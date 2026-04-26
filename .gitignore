@@ -5,3 +5,11 @@
 crash.log
 *.tfvars
 *.tfplan
+local.settings.json
+local.settings.template.json
+*.DS_Store
+.venv/
+__pycache__/
+*.pyc
+local.settings.json
+
