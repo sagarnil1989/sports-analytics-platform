@@ -67,6 +67,8 @@ app_settings = {
   KEY_VAULT_URI             = data.azurerm_key_vault.main.vault_uri
   SQL_SERVER_NAME           = local.config.sql_server_name
   SQL_DATABASE_NAME         = local.config.sql_database_name
+  MAX_LIVE_MATCHES = local.config.max_live_matches
+
 }
 
   tags = local.config.tags

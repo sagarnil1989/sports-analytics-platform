@@ -165,6 +165,8 @@ def summarize_inplay_items(items: List[Dict[str, Any]], max_live_matches: int) -
             "time_status": item.get("time_status"),
             "raw_item": item,
         })
+    if max_live_matches <= 0:
+        return live
     return live[:max_live_matches]
 
 
@@ -178,7 +180,7 @@ def discover_cricket_inplay(timer: func.TimerRequest) -> None:
     """Discover live cricket matches and write latest active FI list to bronze/control."""
     now = utc_now()
     sport_id = get_env("SPORT_ID", "3")
-    max_live_matches = get_int_env("MAX_LIVE_MATCHES", 1)
+    max_live_matches = get_int_env("MAX_LIVE_MATCHES", 10)
     container = get_container_client()
 
     api_payload = call_betsapi(
