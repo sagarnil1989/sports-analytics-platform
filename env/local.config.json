@@ -20,6 +20,8 @@
   "bet365_base_url": "https://api.b365api.com",
   "max_live_matches": 10,
   "sport_id": "3",
+  "max_silver_snapshots_per_run": "50",
+  "max_gold_events_per_run": "20",
   "tags": {
     "project": "ramanuj",
     "environment": "local",

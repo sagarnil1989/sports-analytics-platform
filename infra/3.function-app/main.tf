@@ -68,7 +68,8 @@ app_settings = {
   SQL_SERVER_NAME           = local.config.sql_server_name
   SQL_DATABASE_NAME         = local.config.sql_database_name
   MAX_LIVE_MATCHES = local.config.max_live_matches
-
+  MAX_SILVER_SNAPSHOTS_PER_RUN = local.config.max_silver_snapshots_per_run
+  MAX_GOLD_EVENTS_PER_RUN = local.config.max_gold_events_per_run
 }
 
   tags = local.config.tags
