@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+from html import escape
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -24,16 +25,6 @@ def utc_now() -> datetime:
 def ts_compact(dt: datetime) -> str:
     return dt.strftime("%Y%m%dT%H%M%SZ")
 
-def format_unix_ts(value):
-    if value is None or value == "":
-        return "-"
-
-    try:
-        # Bet365 timestamps are Unix seconds
-        ts = int(float(value))
-        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    except Exception:
-        return str(value)
 
 def get_env(name: str, default: Optional[str] = None) -> str:
     value = os.environ.get(name, default)
@@ -194,29 +185,23 @@ def get_fi_from_inplay_item(item: Dict[str, Any]) -> Optional[str]:
 
 def summarize_inplay_items(items: List[Dict[str, Any]], max_live_matches: int) -> List[Dict[str, Any]]:
     live = []
-
     for item in items:
-        event_id = item.get("id")
-        fi = item.get("bet365_id")
-
-        if not event_id or not fi:
+        fi = get_fi_from_inplay_item(item)
+        event_id = get_event_id_from_inplay_item(item)
+        if not fi:
             continue
-
         live.append({
-            "event_id": str(event_id),
-            "fi": str(fi),
+            "fi": fi,
+            "event_id": event_id or fi,
             "sport_id": str(item.get("sport_id", os.environ.get("SPORT_ID", "3"))),
             "league": item.get("league"),
             "home": item.get("home"),
             "away": item.get("away"),
             "time_status": item.get("time_status"),
-            "score": item.get("ss"),
             "raw_item": item,
         })
-
     if max_live_matches <= 0:
         return live
-
     return live[:max_live_matches]
 
 
@@ -821,8 +806,11 @@ def build_match_page(
     players = player_entries.get("rows", []) if isinstance(player_entries, dict) else []
     odds = odds_records.get("rows", []) if isinstance(odds_records, dict) else []
     markets = current_markets.get("rows", []) if isinstance(current_markets, dict) else []
-    unique_market_ids = set(m.get("market_id") for m in markets if m.get("market_id"))
-    unique_market_names = set(m.get("market_name") for m in markets if m.get("market_name"))
+    unique_market_keys = {
+        m.get("market_group_id") or m.get("market_group_name") or m.get("market_id") or m.get("market_name")
+        for m in markets
+        if m.get("market_group_id") or m.get("market_group_name") or m.get("market_id") or m.get("market_name")
+    }
     return {
         "generated_at_utc": utc_now().isoformat(),
         "snapshot": {
@@ -832,6 +820,7 @@ def build_match_page(
             "fi": match_snapshot.get("fi"),
         },
         "match_header": {
+            "league_id": match_snapshot.get("league_id"),
             "league_name": match_snapshot.get("league_name"),
             "match_name": match_snapshot.get("match_name"),
             "home_team": {"id": match_snapshot.get("home_team_id"), "name": match_snapshot.get("home_team_name")},
@@ -847,7 +836,7 @@ def build_match_page(
         "odds": {"count": len(odds), "records": odds},
         "current_markets": {
             "selection_count": len(markets),
-            "market_count": len(unique_market_ids or unique_market_names),
+            "market_count": len(unique_market_keys),
             "records": markets,
         },
         "source": {
@@ -870,26 +859,119 @@ def write_gold_match_page(gold_container, match_page: Dict[str, Any]) -> None:
     upload_json(gold_container, f"{latest_base}/match_page.json", match_page, overwrite=True)
 
 
+def build_match_index_row(page: Dict[str, Any]) -> Dict[str, Any]:
+    header = page.get("match_header", {}) or {}
+    snapshot = page.get("snapshot", {}) or {}
+    score = page.get("score", {}) or {}
+    current_markets = page.get("current_markets", {}) or {}
+    event_id = snapshot.get("event_id")
+    home_name = (header.get("home_team") or {}).get("name")
+    away_name = (header.get("away_team") or {}).get("name")
+    match_name = header.get("match_name") or (f"{home_name} vs {away_name}" if home_name and away_name else None)
+    return {
+        "event_id": event_id,
+        "fi": snapshot.get("fi"),
+        "snapshot_id": snapshot.get("snapshot_id"),
+        "snapshot_time_utc": snapshot.get("snapshot_time_utc"),
+        "league_id": header.get("league_id"),
+        "league_name": header.get("league_name"),
+        "match_name": match_name,
+        "home_team_name": home_name,
+        "away_team_name": away_name,
+        "score_summary": score.get("summary_from_events") or score.get("summary_from_bet365"),
+        "odds_count": (page.get("odds") or {}).get("count"),
+        "current_market_count": current_markets.get("market_count"),
+        "current_market_selection_count": current_markets.get("selection_count"),
+        "latest_gold_path": f"gold/cricket/matches/latest/event_id={event_id}/match_page.json",
+    }
+
+
 def write_gold_index(gold_container, pages: List[Dict[str, Any]]) -> None:
-    matches = []
+    """Write small precomputed index files used by HTTP pages.
+
+    This merges new pages into the existing latest index, so HTTP routes do not
+    scan the full cricket/matches/history folder and should not timeout.
+    """
+    existing_index = download_json(gold_container, "cricket/matches/latest/index.json") or {}
+    latest_by_event: Dict[str, Dict[str, Any]] = {}
+
+    if isinstance(existing_index, dict):
+        for row in existing_index.get("matches", []):
+            event_id = str(row.get("event_id") or "")
+            if event_id:
+                latest_by_event[event_id] = row
+
     for page in pages:
-        matches.append({
-            "event_id": page.get("snapshot", {}).get("event_id"),
-            "fi": page.get("snapshot", {}).get("fi"),
-            "snapshot_id": page.get("snapshot", {}).get("snapshot_id"),
-            "snapshot_time_utc": page.get("snapshot", {}).get("snapshot_time_utc"),
-            "league_name": page.get("match_header", {}).get("league_name"),
-            "match_name": page.get("match_header", {}).get("match_name"),
-            "home_team_name": page.get("match_header", {}).get("home_team", {}).get("name"),
-            "away_team_name": page.get("match_header", {}).get("away_team", {}).get("name"),
-            "score_summary": page.get("score", {}).get("summary_from_events") or page.get("score", {}).get("summary_from_bet365"),
-            "odds_count": page.get("odds", {}).get("count"),
-            "current_market_count": page.get("current_markets", {}).get("market_count"),
-            "current_market_selection_count": page.get("current_markets", {}).get("selection_count"),
-            "latest_gold_path": f"gold/cricket/matches/latest/event_id={page.get('snapshot', {}).get('event_id')}/match_page.json",
+        row = build_match_index_row(page)
+        event_id = str(row.get("event_id") or "")
+        if not event_id:
+            continue
+        current = latest_by_event.get(event_id)
+        if current is None or (row.get("snapshot_time_utc") or "") >= (current.get("snapshot_time_utc") or ""):
+            latest_by_event[event_id] = row
+
+    matches = list(latest_by_event.values())
+    matches.sort(key=lambda x: x.get("snapshot_time_utc") or "", reverse=True)
+
+    upload_json(
+        gold_container,
+        "cricket/matches/latest/index.json",
+        {"generated_at_utc": utc_now().isoformat(), "match_count": len(matches), "matches": matches},
+        overwrite=True,
+    )
+    write_gold_league_indexes(gold_container, matches)
+
+
+def write_gold_league_indexes(gold_container, matches: List[Dict[str, Any]]) -> None:
+    leagues: Dict[str, Dict[str, Any]] = {}
+
+    for match in matches:
+        league_id = str(match.get("league_id") or "unknown")
+        league_name = match.get("league_name") or "Unknown League"
+        if league_id not in leagues:
+            leagues[league_id] = {
+                "league_id": league_id,
+                "league_name": league_name,
+                "match_count": 0,
+                "latest_snapshot_time_utc": None,
+                "matches": [],
+            }
+        leagues[league_id]["matches"].append(match)
+        leagues[league_id]["match_count"] += 1
+        snapshot_time = match.get("snapshot_time_utc") or ""
+        if not leagues[league_id]["latest_snapshot_time_utc"] or snapshot_time > leagues[league_id]["latest_snapshot_time_utc"]:
+            leagues[league_id]["latest_snapshot_time_utc"] = snapshot_time
+
+    league_rows = []
+    for league in leagues.values():
+        league["matches"].sort(key=lambda x: x.get("snapshot_time_utc") or "", reverse=True)
+        upload_json(
+            gold_container,
+            f"cricket/leagues/{league['league_id']}/matches.json",
+            {
+                "generated_at_utc": utc_now().isoformat(),
+                "league_id": league["league_id"],
+                "league_name": league["league_name"],
+                "match_count": league["match_count"],
+                "matches": league["matches"],
+            },
+            overwrite=True,
+        )
+        league_rows.append({
+            "league_id": league["league_id"],
+            "league_name": league["league_name"],
+            "match_count": league["match_count"],
+            "latest_snapshot_time_utc": league["latest_snapshot_time_utc"],
+            "matches_path": f"gold/cricket/leagues/{league['league_id']}/matches.json",
         })
-    index_payload = {"generated_at_utc": utc_now().isoformat(), "match_count": len(matches), "matches": matches}
-    upload_json(gold_container, "cricket/matches/latest/index.json", index_payload, overwrite=True)
+
+    league_rows.sort(key=lambda x: x.get("latest_snapshot_time_utc") or "", reverse=True)
+    upload_json(
+        gold_container,
+        "cricket/leagues/index.json",
+        {"generated_at_utc": utc_now().isoformat(), "league_count": len(league_rows), "leagues": league_rows},
+        overwrite=True,
+    )
 
 
 @app.timer_trigger(schedule="*/30 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
@@ -956,91 +1038,159 @@ def get_match_page(req: func.HttpRequest) -> func.HttpResponse:
 def get_matches_list_html(req: func.HttpRequest) -> func.HttpResponse:
     try:
         gold = get_named_container_client("gold")
-
-        latest_by_event = {}
-
-        for blob in gold.list_blobs(name_starts_with="cricket/matches/history/"):
-            name = blob.name
-            if not name.endswith("/match_page.json"):
-                continue
-
-            try:
-                page = download_required_json(gold, name)
-                event_id = str(page.get("snapshot", {}).get("event_id", "-"))
-                snapshot_time = page.get("snapshot", {}).get("snapshot_time_utc") or ""
-
-                current = latest_by_event.get(event_id)
-                current_time = current.get("snapshot_time_utc") if current else ""
-
-                if current is None or snapshot_time > current_time:
-                    latest_by_event[event_id] = {
-                        "event_id": event_id,
-                        "snapshot_time_utc": snapshot_time,
-                        "match_name": page.get("match_header", {}).get("match_name") or "-",
-                        "league_name": page.get("match_header", {}).get("league_name") or "-",
-                        "score_summary": (
-                            page.get("score", {}).get("summary_from_events")
-                            or page.get("score", {}).get("summary_from_bet365")
-                            or "-"
-                        ),
-                        "markets": page.get("current_markets", {}).get("market_count", 0),
-                    }
-
-            except Exception:
-                logging.exception(f"Failed reading blob: {name}")
-
-        matches = list(latest_by_event.values())
-        matches.sort(key=lambda x: x.get("snapshot_time_utc"), reverse=True)
+        index = download_required_json(gold, "cricket/matches/latest/index.json")
+        matches = index.get("matches", []) if isinstance(index, dict) else []
 
         rows = ""
         for m in matches:
+            event_id = escape(str(m.get("event_id") or "-"))
+            fi = escape(str(m.get("fi") or "-"))
+            match_name = escape(str(m.get("match_name") or "-"))
+            league_name = escape(str(m.get("league_name") or "-"))
+            league_id = escape(str(m.get("league_id") or "unknown"))
+            score = escape(str(m.get("score_summary") or "-"))
+            markets = escape(str(m.get("current_market_count") or 0))
+            selections = escape(str(m.get("current_market_selection_count") or 0))
+            snapshot_time = escape(str(m.get("snapshot_time_utc") or "-"))
             rows += f"""
             <tr>
-                <td>{m["event_id"]}</td>
-                <td>{m["match_name"]}</td>
-                <td>{m["league_name"]}</td>
-                <td>{m["score_summary"]}</td>
-                <td>{m["markets"]}</td>
-                <td>{m["snapshot_time_utc"]}</td>
-                <td><a href="/api/matches/{m["event_id"]}/view">Open</a></td>
+                <td>{event_id}</td>
+                <td>{fi}</td>
+                <td>{match_name}</td>
+                <td><a href="/api/leagues/{league_id}/matches/view">{league_name}</a></td>
+                <td>{score}</td>
+                <td>{markets}</td>
+                <td>{selections}</td>
+                <td>{snapshot_time}</td>
+                <td><a href="/api/matches/{event_id}/view">Open</a></td>
             </tr>
             """
 
         html = f"""
+        <!DOCTYPE html>
         <html>
         <head>
-            <title>All Cricket Matches</title>
+            <title>Cricket Matches</title>
             <style>
-                body {{ font-family: Arial; background:#f7f7f7; padding:30px; }}
-                table {{ width:100%; border-collapse: collapse; background:white; }}
-                th, td {{ padding:10px; border-bottom:1px solid #ddd; }}
-                th {{ background:#222; color:white; }}
-                a {{ color:#0066cc; font-weight:bold; }}
+                body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
+                .nav {{ margin-bottom: 16px; }}
+                table {{ width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 8px #ddd; }}
+                th, td {{ padding: 10px; border-bottom: 1px solid #ddd; text-align: left; font-size: 14px; }}
+                th {{ background: #222; color: white; }}
+                a {{ color: #0066cc; font-weight: bold; text-decoration: none; }}
             </style>
         </head>
         <body>
-            <h1>All Matches ({len(matches)})</h1>
+            <h1>Cricket Matches ({len(matches)})</h1>
+            <div class="nav"><a href="/api/leagues/view">View leagues</a> | <a href="/api/matches">JSON</a></div>
             <table>
-                <tr>
-                    <th>Event</th>
-                    <th>Match</th>
-                    <th>League</th>
-                    <th>Score</th>
-                    <th>Markets</th>
-                    <th>Updated</th>
-                    <th></th>
-                </tr>
-                {rows}
+                <thead>
+                    <tr>
+                        <th>Event ID</th><th>Bet365 FI</th><th>Match</th><th>League</th><th>Score</th>
+                        <th>Markets</th><th>Selections</th><th>Last Snapshot</th><th>Page</th>
+                    </tr>
+                </thead>
+                <tbody>{rows}</tbody>
             </table>
         </body>
         </html>
         """
-
-        return func.HttpResponse(html, mimetype="text/html")
-
+        return func.HttpResponse(html, status_code=200, mimetype="text/html")
+    except ResourceNotFoundError:
+        return func.HttpResponse("Index not created yet. Wait for build_cricket_gold_match_pages to run.", status_code=404)
     except Exception as ex:
-        logging.exception("Failed matches list page")
-        return func.HttpResponse(str(ex), status_code=500)
+        logging.exception("Failed to render matches list")
+        return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
+
+
+@app.route(route="leagues", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_leagues(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        gold = get_named_container_client("gold")
+        data = download_required_json(gold, "cricket/leagues/index.json")
+        return func.HttpResponse(json.dumps(data, ensure_ascii=False, indent=2), status_code=200, mimetype="application/json")
+    except ResourceNotFoundError:
+        return func.HttpResponse(json.dumps({"league_count": 0, "leagues": []}), status_code=404, mimetype="application/json")
+    except Exception as ex:
+        logging.exception("Failed to get leagues")
+        return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
+
+
+@app.route(route="leagues/view", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_leagues_html(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        gold = get_named_container_client("gold")
+        index = download_required_json(gold, "cricket/leagues/index.json")
+        leagues = index.get("leagues", []) if isinstance(index, dict) else []
+        rows = ""
+        for l in leagues:
+            league_id = escape(str(l.get("league_id") or "unknown"))
+            league_name = escape(str(l.get("league_name") or "Unknown League"))
+            match_count = escape(str(l.get("match_count") or 0))
+            latest = escape(str(l.get("latest_snapshot_time_utc") or "-"))
+            rows += f"""
+            <tr><td>{league_id}</td><td>{league_name}</td><td>{match_count}</td><td>{latest}</td><td><a href="/api/leagues/{league_id}/matches/view">Open matches</a></td></tr>
+            """
+        html = f"""
+        <!DOCTYPE html><html><head><title>Cricket Leagues</title>
+        <style>body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }} table {{ width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 8px #ddd; }} th, td {{ padding: 10px; border-bottom: 1px solid #ddd; text-align: left; }} th {{ background: #222; color: white; }} a {{ color: #0066cc; font-weight: bold; text-decoration: none; }}</style>
+        </head><body><h1>Cricket Leagues ({len(leagues)})</h1><p><a href="/api/matches/view">All matches</a></p>
+        <table><thead><tr><th>League ID</th><th>League</th><th>Matches</th><th>Latest Snapshot</th><th>Page</th></tr></thead><tbody>{rows}</tbody></table></body></html>
+        """
+        return func.HttpResponse(html, status_code=200, mimetype="text/html")
+    except ResourceNotFoundError:
+        return func.HttpResponse("League index not created yet. Wait for build_cricket_gold_match_pages to run.", status_code=404)
+    except Exception as ex:
+        logging.exception("Failed to render leagues")
+        return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
+
+
+@app.route(route="leagues/{league_id}/matches", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_league_matches(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        league_id = req.route_params.get("league_id") or "unknown"
+        gold = get_named_container_client("gold")
+        data = download_required_json(gold, f"cricket/leagues/{league_id}/matches.json")
+        return func.HttpResponse(json.dumps(data, ensure_ascii=False, indent=2), status_code=200, mimetype="application/json")
+    except ResourceNotFoundError:
+        return func.HttpResponse(json.dumps({"match_count": 0, "matches": []}), status_code=404, mimetype="application/json")
+    except Exception as ex:
+        logging.exception("Failed to get league matches")
+        return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
+
+
+@app.route(route="leagues/{league_id}/matches/view", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_league_matches_html(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        league_id = req.route_params.get("league_id") or "unknown"
+        gold = get_named_container_client("gold")
+        data = download_required_json(gold, f"cricket/leagues/{league_id}/matches.json")
+        matches = data.get("matches", []) if isinstance(data, dict) else []
+        league_name = escape(str(data.get("league_name") or league_id)) if isinstance(data, dict) else escape(str(league_id))
+        rows = ""
+        for m in matches:
+            event_id = escape(str(m.get("event_id") or "-"))
+            fi = escape(str(m.get("fi") or "-"))
+            match_name = escape(str(m.get("match_name") or "-"))
+            score = escape(str(m.get("score_summary") or "-"))
+            markets = escape(str(m.get("current_market_count") or 0))
+            selections = escape(str(m.get("current_market_selection_count") or 0))
+            snapshot_time = escape(str(m.get("snapshot_time_utc") or "-"))
+            rows += f"""
+            <tr><td>{event_id}</td><td>{fi}</td><td>{match_name}</td><td>{score}</td><td>{markets}</td><td>{selections}</td><td>{snapshot_time}</td><td><a href="/api/matches/{event_id}/view">Open</a></td></tr>
+            """
+        html = f"""
+        <!DOCTYPE html><html><head><title>{league_name} Matches</title>
+        <style>body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }} table {{ width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 8px #ddd; }} th, td {{ padding: 10px; border-bottom: 1px solid #ddd; text-align: left; }} th {{ background: #222; color: white; }} a {{ color: #0066cc; font-weight: bold; text-decoration: none; }}</style>
+        </head><body><h1>{league_name} ({len(matches)} matches)</h1><p><a href="/api/leagues/view">Back to leagues</a> | <a href="/api/matches/view">All matches</a></p>
+        <table><thead><tr><th>Event ID</th><th>Bet365 FI</th><th>Match</th><th>Score</th><th>Markets</th><th>Selections</th><th>Last Snapshot</th><th>Page</th></tr></thead><tbody>{rows}</tbody></table></body></html>
+        """
+        return func.HttpResponse(html, status_code=200, mimetype="text/html")
+    except ResourceNotFoundError:
+        return func.HttpResponse("League matches index not found yet.", status_code=404)
+    except Exception as ex:
+        logging.exception("Failed to render league matches")
+        return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
 
 
 @app.route(route="matches/{event_id}/view", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
@@ -1069,7 +1219,7 @@ def get_match_page_html(req: func.HttpRequest) -> func.HttpResponse:
             market_options += f'<option value="{safe_value}">{market_name}</option>'
 
         current_market_table_rows = ""
-        for m in current_market_rows:
+        for m in current_market_rows[:1500]:
             market_group_name = m.get("market_group_name") or "Unknown Market"
             market_name = m.get("market_name") or market_group_name
             odds_display = (
