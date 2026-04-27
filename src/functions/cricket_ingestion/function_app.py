@@ -1,17 +1,20 @@
 import json
 import logging
 import os
-import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import azure.functions as func
 import requests
 from azure.storage.blob import BlobServiceClient, ContentSettings
-from azure.core.exceptions import ResourceNotFoundError
+from azure.core.exceptions import ResourceNotFoundError, ResourceExistsError
 
 app = func.FunctionApp()
 
+
+# -----------------------------
+# Common helpers
+# -----------------------------
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -42,10 +45,25 @@ def get_bool_env(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y"}
 
 
-def get_container_client():
+def get_blob_service_client() -> BlobServiceClient:
     storage_conn = get_env("DATA_STORAGE_CONNECTION_STRING")
-    blob_service = BlobServiceClient.from_connection_string(storage_conn)
-    return blob_service.get_container_client("bronze")
+    return BlobServiceClient.from_connection_string(storage_conn)
+
+
+def get_named_container_client(container_name: str):
+    blob_service = get_blob_service_client()
+    container = blob_service.get_container_client(container_name)
+    try:
+        container.create_container()
+    except ResourceExistsError:
+        pass
+    except Exception:
+        pass
+    return container
+
+
+def get_bronze_container_client():
+    return get_named_container_client("bronze")
 
 
 def upload_json(container_client, blob_path: str, payload: Dict[str, Any], overwrite: bool = False) -> None:
@@ -65,6 +83,19 @@ def download_json(container_client, blob_path: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def download_required_json(container_client, blob_path: str) -> Dict[str, Any]:
+    data = container_client.download_blob(blob_path).readall()
+    return json.loads(data)
+
+
+def blob_exists(container_client, blob_path: str) -> bool:
+    try:
+        container_client.get_blob_client(blob_path).get_blob_properties()
+        return True
+    except ResourceNotFoundError:
+        return False
+
+
 def call_betsapi(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     base_url = get_env("BETS_API_BASE_URL", "https://api.b365api.com").rstrip("/")
     token = get_env("BETS_API_TOKEN")
@@ -72,19 +103,16 @@ def call_betsapi(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{base_url}{path}"
     query = dict(params)
     query["token"] = token
-
     started = utc_now()
+
     try:
         response = requests.get(url, params=query, timeout=20)
         elapsed_ms = int((utc_now() - started).total_seconds() * 1000)
-
         try:
             body = response.json()
         except ValueError:
             body = {"raw_text": response.text}
-
         success = response.status_code == 200 and isinstance(body, dict) and body.get("success") in [1, "1", True]
-
         return {
             "request": {
                 "url": url,
@@ -131,17 +159,22 @@ def extract_results(api_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def get_event_id_from_inplay_item(item: Dict[str, Any]) -> Optional[str]:
-    for key in ["our_event_id", "event_id", "id"]:
+    for key in ["our_event_id", "event_id"]:
         value = item.get(key)
         if value is not None and str(value).strip():
             return str(value)
+    if item.get("bet365_id") is not None:
+        value = item.get("id")
+        if value is not None and str(value).strip():
+            return str(value)
+    value = item.get("id")
+    if value is not None and str(value).strip():
+        return str(value)
     return None
 
 
 def get_fi_from_inplay_item(item: Dict[str, Any]) -> Optional[str]:
-    # For Bet365 inplay_filter, docs say the returned id can be used as FI.
-    # Some responses also contain FI explicitly.
-    for key in ["FI", "fi", "id"]:
+    for key in ["bet365_id", "FI", "fi", "id"]:
         value = item.get(key)
         if value is not None and str(value).strip():
             return str(value)
@@ -170,28 +203,23 @@ def summarize_inplay_items(items: List[Dict[str, Any]], max_live_matches: int) -
     return live[:max_live_matches]
 
 
-@app.timer_trigger(
-    schedule="*/15 * * * * *",
-    arg_name="timer",
-    run_on_startup=True,
-    use_monitor=False,
-)
+# -----------------------------
+# Bronze ingestion
+# -----------------------------
+
+@app.timer_trigger(schedule="*/15 * * * * *", arg_name="timer", run_on_startup=True, use_monitor=False)
 def discover_cricket_inplay(timer: func.TimerRequest) -> None:
-    """Discover live cricket matches and write latest active FI list to bronze/control."""
     now = utc_now()
     sport_id = get_env("SPORT_ID", "3")
     max_live_matches = get_int_env("MAX_LIVE_MATCHES", 10)
-    container = get_container_client()
+    container = get_bronze_container_client()
 
-    api_payload = call_betsapi(
-        path="/v1/bet365/inplay_filter",
-        params={"sport_id": sport_id},
-    )
+    api_payload = call_betsapi(path="/v3/events/inplay", params={"sport_id": sport_id})
 
     raw_path = (
         f"betsapi/inplay_filter/sport_id={sport_id}/"
         f"year={now.year}/month={now.month:02d}/day={now.day:02d}/hour={now.hour:02d}/"
-        f"inplay_filter_{ts_compact(now)}.json"
+        f"events_inplay_{ts_compact(now)}.json"
     )
     upload_json(container, raw_path, api_payload)
 
@@ -204,7 +232,6 @@ def discover_cricket_inplay(timer: func.TimerRequest) -> None:
         "active_matches": active_matches,
         "source_raw_path": f"bronze/{raw_path}",
     }
-
     upload_json(container, "betsapi/control/active_inplay_fi/latest.json", control_payload, overwrite=True)
 
     logging.info(json.dumps({
@@ -215,36 +242,22 @@ def discover_cricket_inplay(timer: func.TimerRequest) -> None:
     }))
 
 
-@app.timer_trigger(
-    schedule="*/5 * * * * *",
-    arg_name="timer",
-    run_on_startup=False,
-    use_monitor=False,
-)
+@app.timer_trigger(schedule="*/5 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
 def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
-    """Capture synchronized match state + Bet365 odds snapshot for active live cricket matches."""
-    now = utc_now()
     sport_id = get_env("SPORT_ID", "3")
-    container = get_container_client()
+    container = get_bronze_container_client()
 
     control = download_json(container, "betsapi/control/active_inplay_fi/latest.json")
     if not control or not control.get("active_matches"):
-        logging.info(json.dumps({
-            "event": "capture_cricket_inplay_snapshot_skipped",
-            "reason": "no_active_matches",
-        }))
+        logging.info(json.dumps({"event": "capture_cricket_inplay_snapshot_skipped", "reason": "no_active_matches"}))
         return
 
     active_matches = control["active_matches"]
     enable_events_inplay = get_bool_env("ENABLE_EVENTS_INPLAY_MATCH_STATE", True)
 
-    # One clean match-state call shared for all active matches in this snapshot.
     events_inplay_payload = None
     if enable_events_inplay:
-        events_inplay_payload = call_betsapi(
-            path="/v3/events/inplay",
-            params={"sport_id": sport_id},
-        )
+        events_inplay_payload = call_betsapi(path="/v3/events/inplay", params={"sport_id": sport_id})
 
     for match in active_matches:
         snapshot_time = utc_now()
@@ -252,16 +265,10 @@ def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
         fi = str(match["fi"])
         event_id = str(match.get("event_id") or fi)
 
-        bet365_event_payload = call_betsapi(
-            path="/v1/bet365/event",
-            params={"FI": fi, "stats": 1},
-        )
+        bet365_event_payload = call_betsapi(path="/v1/bet365/event", params={"FI": fi, "stats": 1})
+        event_odds_payload = call_betsapi(path="/v2/event/odds", params={"event_id": event_id})
 
-        base_path = (
-            f"betsapi/inplay_snapshot/sport_id={sport_id}/event_id={event_id}/fi={fi}/"
-            f"snapshot_id={snapshot_id}"
-        )
-
+        base_path = f"betsapi/inplay_snapshot/sport_id={sport_id}/event_id={event_id}/fi={fi}/snapshot_id={snapshot_id}"
         manifest = {
             "snapshot_id": snapshot_id,
             "snapshot_time_utc": snapshot_time.isoformat(),
@@ -272,19 +279,23 @@ def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
             "files": {
                 "events_inplay": f"bronze/{base_path}/events_inplay.json" if events_inplay_payload else None,
                 "bet365_event": f"bronze/{base_path}/bet365_event.json",
+                "event_odds": f"bronze/{base_path}/event_odds.json",
             },
             "status": {
                 "events_inplay_success": events_inplay_payload["response"]["success"] if events_inplay_payload else None,
                 "bet365_event_success": bet365_event_payload["response"]["success"],
                 "bet365_event_error": bet365_event_payload["response"].get("error"),
                 "bet365_event_error_detail": bet365_event_payload["response"].get("error_detail"),
+                "event_odds_success": event_odds_payload["response"]["success"],
+                "event_odds_error": event_odds_payload["response"].get("error"),
+                "event_odds_error_detail": event_odds_payload["response"].get("error_detail"),
             },
         }
 
         if events_inplay_payload:
             upload_json(container, f"{base_path}/events_inplay.json", events_inplay_payload)
-
         upload_json(container, f"{base_path}/bet365_event.json", bet365_event_payload)
+        upload_json(container, f"{base_path}/event_odds.json", event_odds_payload)
         upload_json(container, f"{base_path}/manifest.json", manifest)
 
         logging.info(json.dumps({
@@ -293,6 +304,7 @@ def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
             "event_id": event_id,
             "fi": fi,
             "bet365_event_success": bet365_event_payload["response"]["success"],
+            "event_odds_success": event_odds_payload["response"]["success"],
             "base_path": f"bronze/{base_path}",
         }))
 
@@ -300,21 +312,6 @@ def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
 # -----------------------------
 # Silver parsing helpers
 # -----------------------------
-
-def get_blob_service_client():
-    storage_conn = get_env("DATA_STORAGE_CONNECTION_STRING")
-    return BlobServiceClient.from_connection_string(storage_conn)
-
-
-def get_named_container_client(container_name: str):
-    blob_service = get_blob_service_client()
-    container = blob_service.get_container_client(container_name)
-    try:
-        container.create_container()
-    except Exception:
-        pass
-    return container
-
 
 def list_manifest_paths(bronze_container, sport_id: str, limit: int) -> List[str]:
     prefix = f"betsapi/inplay_snapshot/sport_id={sport_id}/"
@@ -325,19 +322,6 @@ def list_manifest_paths(bronze_container, sport_id: str, limit: int) -> List[str
             manifests.append((getattr(blob, "last_modified", None), name))
     manifests.sort(key=lambda x: x[0] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     return [name for _, name in manifests[:limit]]
-
-
-def blob_exists(container_client, blob_path: str) -> bool:
-    try:
-        container_client.get_blob_client(blob_path).get_blob_properties()
-        return True
-    except ResourceNotFoundError:
-        return False
-
-
-def download_required_json(container_client, blob_path: str) -> Dict[str, Any]:
-    data = container_client.download_blob(blob_path).readall()
-    return json.loads(data)
 
 
 def parse_runs_wickets(raw: Optional[str]) -> Dict[str, Optional[int]]:
@@ -372,14 +356,155 @@ def find_matching_event(events_inplay_payload: Dict[str, Any], event_id: str, fi
             return item
         if str(item.get("bet365_id")) == str(fi):
             return item
+        if str(item.get("our_event_id")) == str(event_id):
+            return item
     return None
 
 
-def parse_silver_snapshot(
-    manifest: Dict[str, Any],
-    events_inplay_payload: Dict[str, Any],
+def safe_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def extract_current_score_context(match_snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    score = match_snapshot.get("score_summary_events") or match_snapshot.get("score_summary_bet365")
+    return {
+        "score": score,
+        "score_summary_events": match_snapshot.get("score_summary_events"),
+        "score_summary_bet365": match_snapshot.get("score_summary_bet365"),
+    }
+
+
+def extract_event_odds_records(
+    event_odds_payload: Dict[str, Any],
+    snapshot_id: str,
+    snapshot_time_utc: str,
+    event_id: str,
+    fi: str,
+    score_context: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    body = event_odds_payload.get("response", {}).get("body", {})
+    results = body.get("results", {}) if isinstance(body, dict) else {}
+    stats = results.get("stats", {}) if isinstance(results, dict) else {}
+    odds_root = results.get("odds", {}) if isinstance(results, dict) else {}
+    rows: List[Dict[str, Any]] = []
+
+    if not isinstance(odds_root, dict):
+        return rows
+
+    for market_key, odds_list in odds_root.items():
+        if not isinstance(odds_list, list):
+            continue
+        for item in odds_list:
+            if not isinstance(item, dict):
+                continue
+            rows.append({
+                "snapshot_id": snapshot_id,
+                "snapshot_time_utc": snapshot_time_utc,
+                "event_id": event_id,
+                "fi": fi,
+                "market_key": str(market_key),
+                "odds_id": str(item.get("id")) if item.get("id") is not None else None,
+                "score_from_match_snapshot": score_context.get("score"),
+                "score_from_odds": item.get("ss"),
+                "home_odds": item.get("home_od"),
+                "home_odds_decimal": safe_float(item.get("home_od")),
+                "away_odds": item.get("away_od"),
+                "away_odds_decimal": safe_float(item.get("away_od")),
+                "draw_odds": item.get("draw_od"),
+                "draw_odds_decimal": safe_float(item.get("draw_od")),
+                "handicap": item.get("handicap"),
+                "over_odds": item.get("over_od"),
+                "over_odds_decimal": safe_float(item.get("over_od")),
+                "under_odds": item.get("under_od"),
+                "under_odds_decimal": safe_float(item.get("under_od")),
+                "add_time": item.get("add_time"),
+                "odds_update_stats": stats.get("odds_update"),
+                "raw": item,
+            })
+    return rows
+
+
+def extract_bet365_current_markets(
     bet365_event_payload: Dict[str, Any],
-) -> Dict[str, Any]:
+    snapshot_id: str,
+    snapshot_time_utc: str,
+    event_id: str,
+    fi: str,
+    score_context: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Parse all currently available Bet365 markets from /v1/bet365/event.
+
+    The Bet365 event feed is a flat ordered list. Common useful records:
+    MG = market group, MA = market, PA = participant/selection, OD = odds.
+    Some feeds also place odds on other record types, so any record with OD is captured.
+    """
+    records = extract_bet365_records(bet365_event_payload)
+    rows: List[Dict[str, Any]] = []
+    current_group: Dict[str, Any] = {}
+    current_market: Dict[str, Any] = {}
+
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+
+        r_type = r.get("type")
+
+        if r_type == "MG":
+            current_group = {
+                "market_group_id": str(r.get("ID")) if r.get("ID") is not None else None,
+                "market_group_name": r.get("NA") or r.get("IT"),
+                "market_group_order": r.get("OR"),
+                "raw": r,
+            }
+            current_market = {}
+            continue
+
+        if r_type == "MA":
+            current_market = {
+                "market_id": str(r.get("ID")) if r.get("ID") is not None else None,
+                "market_name": r.get("NA") or r.get("IT"),
+                "market_type": r.get("MT"),
+                "market_count": r.get("MC"),
+                "market_order": r.get("OR"),
+                "raw": r,
+            }
+            continue
+
+        if r_type == "PA" or r.get("OD") is not None:
+            rows.append({
+                "snapshot_id": snapshot_id,
+                "snapshot_time_utc": snapshot_time_utc,
+                "event_id": event_id,
+                "fi": fi,
+                "score_from_match_snapshot": score_context.get("score"),
+                "record_type": r_type,
+                "market_group_id": current_group.get("market_group_id"),
+                "market_group_name": current_group.get("market_group_name"),
+                "market_group_order": current_group.get("market_group_order"),
+                "market_id": current_market.get("market_id"),
+                "market_name": current_market.get("market_name"),
+                "market_type": current_market.get("market_type"),
+                "market_count": current_market.get("market_count"),
+                "market_order": current_market.get("market_order"),
+                "selection_id": str(r.get("ID")) if r.get("ID") is not None else None,
+                "selection_name": r.get("NA"),
+                "selection_order": r.get("OR"),
+                "odds": r.get("OD"),
+                "odds_decimal": safe_float(r.get("OD")),
+                "handicap": r.get("HA") or r.get("HD"),
+                "suspended": r.get("SU") or r.get("SS"),
+                "raw": r,
+            })
+
+    return rows
+
+
+def parse_silver_snapshot(manifest: Dict[str, Any], events_inplay_payload: Dict[str, Any], bet365_event_payload: Dict[str, Any], event_odds_payload: Dict[str, Any]) -> Dict[str, Any]:
     snapshot_id = manifest["snapshot_id"]
     snapshot_time_utc = manifest["snapshot_time_utc"]
     event_id = str(manifest["event_id"])
@@ -413,16 +538,15 @@ def parse_silver_snapshot(
         "score_summary_bet365": ev.get("SS"),
         "bet365_event_success": manifest.get("status", {}).get("bet365_event_success"),
         "events_inplay_success": manifest.get("status", {}).get("events_inplay_success"),
+        "event_odds_success": manifest.get("status", {}).get("event_odds_success"),
         "source_bronze_manifest_path": f"bronze/betsapi/inplay_snapshot/sport_id={sport_id}/event_id={event_id}/fi={fi}/snapshot_id={snapshot_id}/manifest.json",
     }
 
-    team_scores = []
-    player_entries = []
-    odds_records = []
+    team_scores: List[Dict[str, Any]] = []
+    player_entries: List[Dict[str, Any]] = []
 
     for r in records:
         r_type = r.get("type")
-
         if r_type == "TE" and r.get("NA") and (r.get("SC") or r.get("S5")):
             parsed = parse_runs_wickets(r.get("S5"))
             team_scores.append({
@@ -445,8 +569,7 @@ def parse_silver_snapshot(
                 "s8": r.get("S8"),
                 "raw": r,
             })
-
-        if r_type == "TE" and r.get("NA") and not (r.get("SC") or r.get("S5")):
+        elif r_type == "TE" and r.get("NA"):
             player_entries.append({
                 "snapshot_id": snapshot_id,
                 "snapshot_time_utc": snapshot_time_utc,
@@ -458,24 +581,23 @@ def parse_silver_snapshot(
                 "raw": r,
             })
 
-        if r_type in {"MA", "PA", "MG", "ML", "SE"} or any(k in r for k in ["OD", "FD", "HD", "HA"]):
-            odds_records.append({
-                "snapshot_id": snapshot_id,
-                "snapshot_time_utc": snapshot_time_utc,
-                "event_id": event_id,
-                "fi": fi,
-                "record_type": r_type,
-                "market_or_selection_name": r.get("NA"),
-                "odds_decimal": r.get("OD") or r.get("FD"),
-                "handicap": r.get("HD") or r.get("HA"),
-                "raw": r,
-            })
+    score_context = extract_current_score_context(match_snapshot)
+    odds_records = extract_event_odds_records(event_odds_payload, snapshot_id, snapshot_time_utc, event_id, fi, score_context)
+    current_markets = extract_bet365_current_markets(
+        bet365_event_payload,
+        snapshot_id,
+        snapshot_time_utc,
+        event_id,
+        fi,
+        score_context,
+    )
 
     return {
         "match_snapshot": match_snapshot,
         "team_scores": team_scores,
         "player_entries": player_entries,
         "odds_records": odds_records,
+        "current_markets": current_markets,
     }
 
 
@@ -483,15 +605,14 @@ def write_silver_outputs(silver_container, parsed: Dict[str, Any]) -> None:
     match = parsed["match_snapshot"]
     dt = datetime.fromisoformat(match["snapshot_time_utc"].replace("Z", "+00:00"))
     base = (
-        f"cricket/inplay/"
-        f"year={dt.year}/month={dt.month:02d}/day={dt.day:02d}/hour={dt.hour:02d}/"
+        f"cricket/inplay/year={dt.year}/month={dt.month:02d}/day={dt.day:02d}/hour={dt.hour:02d}/"
         f"event_id={match['event_id']}/snapshot_id={match['snapshot_id']}"
     )
-
     upload_json(silver_container, f"{base}/match_snapshot.json", parsed["match_snapshot"], overwrite=True)
     upload_json(silver_container, f"{base}/team_scores.json", {"rows": parsed["team_scores"]}, overwrite=True)
     upload_json(silver_container, f"{base}/player_entries.json", {"rows": parsed["player_entries"]}, overwrite=True)
     upload_json(silver_container, f"{base}/odds_records.json", {"rows": parsed["odds_records"]}, overwrite=True)
+    upload_json(silver_container, f"{base}/current_markets.json", {"rows": parsed.get("current_markets", [])}, overwrite=True)
 
     marker_path = f"cricket/control/processed_snapshots/{match['snapshot_id']}_{match['event_id']}_{match['fi']}.json"
     marker = {
@@ -503,28 +624,19 @@ def write_silver_outputs(silver_container, parsed: Dict[str, Any]) -> None:
         "team_score_count": len(parsed["team_scores"]),
         "player_entry_count": len(parsed["player_entries"]),
         "odds_record_count": len(parsed["odds_records"]),
+        "current_market_selection_count": len(parsed.get("current_markets", [])),
     }
     upload_json(silver_container, marker_path, marker, overwrite=True)
 
 
-@app.timer_trigger(
-    schedule="*/30 * * * * *",
-    arg_name="timer",
-    run_on_startup=False,
-    use_monitor=False,
-)
+@app.timer_trigger(schedule="*/30 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
 def parse_cricket_bronze_to_silver(timer: func.TimerRequest) -> None:
-    """Parse recent bronze in-play snapshots into silver JSON tables."""
     sport_id = get_env("SPORT_ID", "3")
     max_per_run = get_int_env("MAX_SILVER_SNAPSHOTS_PER_RUN", 50)
-
     bronze = get_named_container_client("bronze")
     silver = get_named_container_client("silver")
-
     manifest_paths = list_manifest_paths(bronze, sport_id, max_per_run)
-    processed = 0
-    skipped = 0
-    failed = 0
+    processed = skipped = failed = 0
 
     for manifest_path in manifest_paths:
         try:
@@ -532,20 +644,17 @@ def parse_cricket_bronze_to_silver(timer: func.TimerRequest) -> None:
             snapshot_id = manifest["snapshot_id"]
             event_id = str(manifest["event_id"])
             fi = str(manifest["fi"])
-
             marker_path = f"cricket/control/processed_snapshots/{snapshot_id}_{event_id}_{fi}.json"
             if blob_exists(silver, marker_path):
                 skipped += 1
                 continue
-
             base_path = manifest_path.removesuffix("/manifest.json")
             events_inplay_payload = download_required_json(bronze, f"{base_path}/events_inplay.json")
             bet365_event_payload = download_required_json(bronze, f"{base_path}/bet365_event.json")
-
-            parsed = parse_silver_snapshot(manifest, events_inplay_payload, bet365_event_payload)
+            event_odds_payload = download_required_json(bronze, f"{base_path}/event_odds.json")
+            parsed = parse_silver_snapshot(manifest, events_inplay_payload, bet365_event_payload, event_odds_payload)
             write_silver_outputs(silver, parsed)
             processed += 1
-
         except Exception:
             failed += 1
             logging.exception("Failed to parse bronze snapshot to silver")
@@ -557,3 +666,393 @@ def parse_cricket_bronze_to_silver(timer: func.TimerRequest) -> None:
         "failed": failed,
         "checked": len(manifest_paths),
     }))
+
+
+# -----------------------------
+# Gold serving layer
+# -----------------------------
+
+def list_latest_silver_match_snapshots(silver_container, limit: int) -> List[str]:
+    prefix = "cricket/inplay/"
+    snapshots = []
+    for blob in silver_container.list_blobs(name_starts_with=prefix):
+        name = blob.name
+        if name.endswith("/match_snapshot.json"):
+            snapshots.append((getattr(blob, "last_modified", None), name))
+    snapshots.sort(key=lambda x: x[0] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    return [name for _, name in snapshots[:limit]]
+
+
+def base_path_from_match_snapshot_path(match_snapshot_path: str) -> str:
+    return match_snapshot_path.removesuffix("/match_snapshot.json")
+
+
+def build_match_page(
+    match_snapshot: Dict[str, Any],
+    team_scores: Dict[str, Any],
+    player_entries: Dict[str, Any],
+    odds_records: Dict[str, Any],
+    current_markets: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    teams = team_scores.get("rows", []) if isinstance(team_scores, dict) else []
+    players = player_entries.get("rows", []) if isinstance(player_entries, dict) else []
+    odds = odds_records.get("rows", []) if isinstance(odds_records, dict) else []
+    markets = current_markets.get("rows", []) if isinstance(current_markets, dict) else []
+    unique_market_ids = {m.get("market_id") for m in markets if m.get("market_id")}
+    unique_market_names = {m.get("market_name") for m in markets if m.get("market_name")}
+
+    return {
+        "generated_at_utc": utc_now().isoformat(),
+        "snapshot": {
+            "snapshot_id": match_snapshot.get("snapshot_id"),
+            "snapshot_time_utc": match_snapshot.get("snapshot_time_utc"),
+            "event_id": match_snapshot.get("event_id"),
+            "fi": match_snapshot.get("fi"),
+        },
+        "match_header": {
+            "league_name": match_snapshot.get("league_name"),
+            "match_name": match_snapshot.get("match_name"),
+            "home_team": {"id": match_snapshot.get("home_team_id"), "name": match_snapshot.get("home_team_name")},
+            "away_team": {"id": match_snapshot.get("away_team_id"), "name": match_snapshot.get("away_team_name")},
+            "time_status": match_snapshot.get("time_status"),
+        },
+        "score": {
+            "summary_from_events": match_snapshot.get("score_summary_events"),
+            "summary_from_bet365": match_snapshot.get("score_summary_bet365"),
+            "team_scores": teams,
+        },
+        "players": players,
+        "odds": {"count": len(odds), "records": odds},
+        "current_markets": {
+            "selection_count": len(markets),
+            "market_count": len(unique_market_ids) if unique_market_ids else len(unique_market_names),
+            "records": markets,
+        },
+        "source": {
+            "silver_match_snapshot_path": match_snapshot.get("source_silver_match_snapshot_path"),
+            "bronze_manifest_path": match_snapshot.get("source_bronze_manifest_path"),
+        },
+    }
+
+def write_gold_match_page(gold_container, match_page: Dict[str, Any]) -> None:
+    event_id = str(match_page["snapshot"]["event_id"])
+    snapshot_id = str(match_page["snapshot"]["snapshot_id"])
+    snapshot_time = match_page["snapshot"].get("snapshot_time_utc")
+    dt = datetime.fromisoformat(snapshot_time.replace("Z", "+00:00")) if snapshot_time else utc_now()
+    history_base = (
+        f"cricket/matches/history/event_id={event_id}/year={dt.year}/month={dt.month:02d}/day={dt.day:02d}/hour={dt.hour:02d}/snapshot_id={snapshot_id}"
+    )
+    latest_base = f"cricket/matches/latest/event_id={event_id}"
+    upload_json(gold_container, f"{history_base}/match_page.json", match_page, overwrite=True)
+    upload_json(gold_container, f"{latest_base}/match_page.json", match_page, overwrite=True)
+
+
+def write_gold_index(gold_container, pages: List[Dict[str, Any]]) -> None:
+    matches = []
+    for page in pages:
+        matches.append({
+            "event_id": page.get("snapshot", {}).get("event_id"),
+            "fi": page.get("snapshot", {}).get("fi"),
+            "snapshot_id": page.get("snapshot", {}).get("snapshot_id"),
+            "snapshot_time_utc": page.get("snapshot", {}).get("snapshot_time_utc"),
+            "league_name": page.get("match_header", {}).get("league_name"),
+            "match_name": page.get("match_header", {}).get("match_name"),
+            "home_team_name": page.get("match_header", {}).get("home_team", {}).get("name"),
+            "away_team_name": page.get("match_header", {}).get("away_team", {}).get("name"),
+            "score_summary": page.get("score", {}).get("summary_from_events") or page.get("score", {}).get("summary_from_bet365"),
+            "odds_count": page.get("odds", {}).get("count"),
+            "current_market_count": page.get("current_markets", {}).get("market_count"),
+            "current_market_selection_count": page.get("current_markets", {}).get("selection_count"),
+            "latest_gold_path": f"gold/cricket/matches/latest/event_id={page.get('snapshot', {}).get('event_id')}/match_page.json",
+        })
+    index_payload = {"generated_at_utc": utc_now().isoformat(), "match_count": len(matches), "matches": matches}
+    upload_json(gold_container, "cricket/matches/latest/index.json", index_payload, overwrite=True)
+
+
+@app.timer_trigger(schedule="*/30 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
+def build_cricket_gold_match_pages(timer: func.TimerRequest) -> None:
+    max_events = get_int_env("MAX_GOLD_EVENTS_PER_RUN", 20)
+    silver = get_named_container_client("silver")
+    gold = get_named_container_client("gold")
+    match_snapshot_paths = list_latest_silver_match_snapshots(silver, max_events)
+    built_pages = []
+    processed = failed = 0
+
+    for match_snapshot_path in match_snapshot_paths:
+        try:
+            base_path = base_path_from_match_snapshot_path(match_snapshot_path)
+            match_snapshot = download_required_json(silver, f"{base_path}/match_snapshot.json")
+            match_snapshot["source_silver_match_snapshot_path"] = f"silver/{base_path}/match_snapshot.json"
+            team_scores = download_required_json(silver, f"{base_path}/team_scores.json")
+            player_entries = download_required_json(silver, f"{base_path}/player_entries.json")
+            odds_records = download_required_json(silver, f"{base_path}/odds_records.json")
+            try:
+                current_markets = download_required_json(silver, f"{base_path}/current_markets.json")
+            except ResourceNotFoundError:
+                current_markets = {"rows": []}
+            match_page = build_match_page(match_snapshot, team_scores, player_entries, odds_records, current_markets)
+            write_gold_match_page(gold, match_page)
+            built_pages.append(match_page)
+            processed += 1
+        except Exception:
+            failed += 1
+            logging.exception("Failed to build gold match page")
+
+    if built_pages:
+        write_gold_index(gold, built_pages)
+
+    logging.info(json.dumps({
+        "event": "build_cricket_gold_match_pages_completed",
+        "processed": processed,
+        "failed": failed,
+        "checked": len(match_snapshot_paths),
+    }))
+
+
+# -----------------------------
+# HTTP APIs and web pages
+# -----------------------------
+
+def json_response(payload: Dict[str, Any], status_code: int = 200) -> func.HttpResponse:
+    return func.HttpResponse(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        status_code=status_code,
+        mimetype="application/json",
+    )
+
+
+def format_unix_ts(ts: Any) -> str:
+    if ts is None or ts == "":
+        return "-"
+    try:
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except Exception:
+        return str(ts)
+
+
+@app.route(route="matches", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_latest_matches(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        gold = get_named_container_client("gold")
+        data = download_required_json(gold, "cricket/matches/latest/index.json")
+        return json_response(data)
+    except ResourceNotFoundError:
+        return json_response({"matches": [], "match_count": 0}, 404)
+    except Exception as ex:
+        logging.exception("Failed to get latest matches")
+        return json_response({"error": str(ex)}, 500)
+
+
+@app.route(route="matches/{event_id}", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_match_page(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        event_id = req.route_params.get("event_id")
+        if not event_id:
+            return json_response({"error": "Missing event_id"}, 400)
+        gold = get_named_container_client("gold")
+        data = download_required_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
+        return json_response(data)
+    except ResourceNotFoundError:
+        return json_response({"error": "Match not found", "event_id": req.route_params.get("event_id")}, 404)
+    except Exception as ex:
+        logging.exception("Failed to get match page")
+        return json_response({"error": str(ex)}, 500)
+
+
+@app.route(route="matches/view", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_matches_list_html(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        gold = get_named_container_client("gold")
+        index = download_required_json(gold, "cricket/matches/latest/index.json")
+        matches = index.get("matches", []) if isinstance(index, dict) else []
+
+        latest_by_event: Dict[str, Dict[str, Any]] = {}
+        for m in matches:
+            event_id = str(m.get("event_id", "-"))
+            snapshot_time = m.get("snapshot_time_utc") or ""
+            current = latest_by_event.get(event_id)
+            current_time = current.get("snapshot_time_utc") if current else ""
+            if current is None or snapshot_time > current_time:
+                latest_by_event[event_id] = m
+
+        unique_matches = list(latest_by_event.values())
+        unique_matches.sort(key=lambda x: x.get("snapshot_time_utc") or "", reverse=True)
+
+        rows = ""
+        for m in unique_matches:
+            event_id = m.get("event_id", "-")
+            match_name = m.get("match_name") or (
+                f"{m.get('home_team_name')} vs {m.get('away_team_name')}"
+                if m.get("home_team_name") and m.get("away_team_name") else "-"
+            )
+            rows += f"""
+            <tr>
+                <td>{event_id}</td>
+                <td>{match_name}</td>
+                <td>{m.get('league_name') or '-'}</td>
+                <td>{m.get('score_summary') or '-'}</td>
+                <td>{m.get('current_market_count') or 0}</td>
+                <td>{m.get('current_market_selection_count') or 0}</td>
+                <td>{m.get('snapshot_time_utc') or '-'}</td>
+                <td><a href="/api/matches/{event_id}/view">Open</a></td>
+            </tr>
+            """
+
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Cricket Matches</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
+                table {{ width: 100%; border-collapse: collapse; background: white; }}
+                th, td {{ padding: 12px; border-bottom: 1px solid #ddd; text-align: left; }}
+                th {{ background: #222; color: white; }}
+                a {{ color: #0066cc; font-weight: bold; text-decoration: none; }}
+            </style>
+        </head>
+        <body>
+            <h1>Cricket Matches ({len(unique_matches)})</h1>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Event ID</th>
+                        <th>Match</th>
+                        <th>League</th>
+                        <th>Score</th>
+                        <th>Markets</th>
+                        <th>Selections</th>
+                        <th>Last Snapshot</th>
+                        <th>Page</th>
+                    </tr>
+                </thead>
+                <tbody>{rows}</tbody>
+            </table>
+        </body>
+        </html>
+        """
+        return func.HttpResponse(html, status_code=200, mimetype="text/html")
+    except Exception as ex:
+        logging.exception("Failed to render matches list")
+        return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
+
+
+@app.route(route="matches/{event_id}/view", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_match_page_html(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        event_id = req.route_params.get("event_id")
+        gold = get_named_container_client("gold")
+        data = download_required_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
+
+        header = data.get("match_header", {})
+        score = data.get("score", {})
+        odds = data.get("odds", {}).get("records", [])
+        current_markets = data.get("current_markets", {})
+        current_market_rows = current_markets.get("records", []) if isinstance(current_markets, dict) else []
+
+        match_name = header.get("match_name") or (
+            f"{header.get('home_team', {}).get('name')} vs {header.get('away_team', {}).get('name')}"
+            if header.get("home_team", {}).get("name") and header.get("away_team", {}).get("name") else "Match"
+        )
+        score_text = score.get("summary_from_events") or score.get("summary_from_bet365") or "-"
+
+        current_market_names = sorted({m.get("market_name") or "Unknown Market" for m in current_market_rows})
+        market_options = '<option value="ALL">All current markets</option>'
+        for market_name in current_market_names:
+            safe_value = str(market_name).replace('"', '&quot;')
+            market_options += f'<option value="{safe_value}">{market_name}</option>'
+
+        current_market_table_rows = ""
+        for m in current_market_rows[:1000]:
+            market_name = m.get("market_name") or "Unknown Market"
+            current_market_table_rows += f"""
+            <tr data-current-market="{str(market_name).replace('"', '&quot;')}">
+                <td>{m.get('market_group_name') or '-'}</td>
+                <td>{market_name}</td>
+                <td>{m.get('selection_name') or '-'}</td>
+                <td>{m.get('odds') or '-'}</td>
+                <td>{m.get('handicap') or '-'}</td>
+                <td>{m.get('suspended') or '-'}</td>
+            </tr>
+            """
+
+        odds_rows = ""
+        for o in odds[:1000]:
+            odds_rows += f"""
+            <tr>
+                <td>{o.get('score_from_odds') or o.get('score_from_match_snapshot') or '-'}</td>
+                <td>{o.get('market_key') or '-'}</td>
+                <td>{o.get('home_odds') or '-'}</td>
+                <td>{o.get('away_odds') or '-'}</td>
+                <td>{o.get('draw_odds') or '-'}</td>
+                <td>{o.get('handicap') or '-'}</td>
+                <td>{format_unix_ts(o.get('add_time'))}</td>
+            </tr>
+            """
+
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>{match_name}</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
+                h1 {{ margin-bottom: 5px; }}
+                .score {{ font-size: 22px; margin-bottom: 25px; }}
+                .cards {{ display: flex; gap: 15px; margin-bottom: 25px; flex-wrap: wrap; }}
+                .card {{ background: white; padding: 18px; border-radius: 10px; box-shadow: 0 2px 8px #ddd; min-width: 160px; }}
+                .label {{ color: #666; font-size: 13px; }}
+                .value {{ font-size: 24px; font-weight: bold; }}
+                .section {{ margin-top: 35px; }}
+                select {{ padding: 10px; font-size: 16px; margin-bottom: 15px; }}
+                table {{ width: 100%; border-collapse: collapse; background: white; }}
+                th, td {{ padding: 10px; border-bottom: 1px solid #ddd; text-align: left; }}
+                th {{ background: #222; color: white; position: sticky; top: 0; }}
+            </style>
+        </head>
+        <body>
+            <h1>{match_name}</h1>
+            <div class="score">Score: {score_text}</div>
+
+            <div class="cards">
+                <div class="card"><div class="label">Current Markets</div><div class="value">{current_markets.get('market_count', 0)}</div></div>
+                <div class="card"><div class="label">Current Selections</div><div class="value">{current_markets.get('selection_count', 0)}</div></div>
+                <div class="card"><div class="label">Odds History Rows</div><div class="value">{len(odds)}</div></div>
+                <div class="card"><div class="label">Event ID</div><div class="value" style="font-size:16px;">{event_id}</div></div>
+            </div>
+
+            <div class="section">
+                <h2>Current Bet365 Markets</h2>
+                <label><b>Filter market:</b></label><br>
+                <select id="currentMarketFilter" onchange="filterCurrentMarket()">{market_options}</select>
+                <table>
+                    <thead><tr><th>Group</th><th>Market</th><th>Selection</th><th>Odds</th><th>Handicap</th><th>Suspended</th></tr></thead>
+                    <tbody>{current_market_table_rows}</tbody>
+                </table>
+            </div>
+
+            <div class="section">
+                <h2>Odds Timeline</h2>
+                <table>
+                    <thead><tr><th>Score</th><th>Market Key</th><th>Home</th><th>Away</th><th>Draw</th><th>Handicap</th><th>Time</th></tr></thead>
+                    <tbody>{odds_rows}</tbody>
+                </table>
+            </div>
+
+            <script>
+                function filterCurrentMarket() {{
+                    const selected = document.getElementById("currentMarketFilter").value;
+                    const rows = document.querySelectorAll("tr[data-current-market]");
+                    rows.forEach(row => {{
+                        const market = row.getAttribute("data-current-market");
+                        row.style.display = selected === "ALL" || market === selected ? "" : "none";
+                    }});
+                }}
+            </script>
+        </body>
+        </html>
+        """
+        return func.HttpResponse(html, status_code=200, mimetype="text/html")
+    except Exception as ex:
+        logging.exception("Failed to render match HTML")
+        return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
