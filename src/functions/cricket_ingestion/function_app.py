@@ -194,23 +194,29 @@ def get_fi_from_inplay_item(item: Dict[str, Any]) -> Optional[str]:
 
 def summarize_inplay_items(items: List[Dict[str, Any]], max_live_matches: int) -> List[Dict[str, Any]]:
     live = []
+
     for item in items:
-        fi = get_fi_from_inplay_item(item)
-        event_id = get_event_id_from_inplay_item(item)
-        if not fi:
+        event_id = item.get("id")
+        fi = item.get("bet365_id")
+
+        if not event_id or not fi:
             continue
+
         live.append({
-            "fi": fi,
-            "event_id": event_id or fi,
+            "event_id": str(event_id),
+            "fi": str(fi),
             "sport_id": str(item.get("sport_id", os.environ.get("SPORT_ID", "3"))),
             "league": item.get("league"),
             "home": item.get("home"),
             "away": item.get("away"),
             "time_status": item.get("time_status"),
+            "score": item.get("ss"),
             "raw_item": item,
         })
+
     if max_live_matches <= 0:
         return live
+
     return live[:max_live_matches]
 
 
@@ -1063,7 +1069,7 @@ def get_match_page_html(req: func.HttpRequest) -> func.HttpResponse:
             market_options += f'<option value="{safe_value}">{market_name}</option>'
 
         current_market_table_rows = ""
-        for m in current_market_rows[:1500]:
+        for m in current_market_rows:
             market_group_name = m.get("market_group_name") or "Unknown Market"
             market_name = m.get("market_name") or market_group_name
             odds_display = (
