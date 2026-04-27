@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -23,6 +24,16 @@ def utc_now() -> datetime:
 def ts_compact(dt: datetime) -> str:
     return dt.strftime("%Y%m%dT%H%M%SZ")
 
+def format_unix_ts(value):
+    if value is None or value == "":
+        return "-"
+
+    try:
+        # Bet365 timestamps are Unix seconds
+        ts = int(float(value))
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except Exception:
+        return str(value)
 
 def get_env(name: str, default: Optional[str] = None) -> str:
     value = os.environ.get(name, default)
@@ -362,12 +373,50 @@ def find_matching_event(events_inplay_payload: Dict[str, Any], event_id: str, fi
 
 
 def safe_float(value: Any) -> Optional[float]:
+    """Convert normal decimal strings to float. For fractional odds, use odds_to_decimal."""
     if value is None or value == "":
         return None
     try:
         return float(value)
     except Exception:
         return None
+
+
+def fractional_odds_to_decimal(value: Any) -> Optional[float]:
+    """Convert Bet365 fractional odds such as 13/8 or 10/11 to decimal odds.
+
+    Decimal odds = 1 + numerator / denominator.
+    """
+    if value is None or value == "":
+        return None
+
+    raw = str(value).strip()
+    if "/" not in raw:
+        return safe_float(raw)
+
+    try:
+        numerator, denominator = raw.split("/", 1)
+        denominator_float = float(denominator)
+        if denominator_float == 0:
+            return None
+        return round(1 + (float(numerator) / denominator_float), 3)
+    except Exception:
+        return None
+
+
+def extract_market_template_id_from_it(it_value: Any) -> Optional[str]:
+    """Extract template id from Bet365 IT values such as ...-30143-H_1_1."""
+    if not it_value:
+        return None
+    match = re.search(r"-(\d+)-H", str(it_value))
+    return match.group(1) if match else None
+
+
+def clean_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text_value = str(value).strip()
+    return text_value if text_value else None
 
 
 def extract_current_score_context(match_snapshot: Dict[str, Any]) -> Dict[str, Any]:
@@ -429,6 +478,7 @@ def extract_event_odds_records(
     return rows
 
 
+
 def extract_bet365_current_markets(
     bet365_event_payload: Dict[str, Any],
     snapshot_id: str,
@@ -437,16 +487,27 @@ def extract_bet365_current_markets(
     fi: str,
     score_context: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
-    """Parse all currently available Bet365 markets from /v1/bet365/event.
+    """Parse all current Bet365 markets from /v1/bet365/event.
 
-    The Bet365 event feed is a flat ordered list. Common useful records:
-    MG = market group, MA = market, PA = participant/selection, OD = odds.
-    Some feeds also place odds on other record types, so any record with OD is captured.
+    Bet365 event data is a flat ordered stream:
+    - MG = market group, e.g. "Match Winner 2-Way"
+    - MA = market/column within the group, e.g. "Over" or "Under"
+    - PA = selection/price row. PA rows with OD contain real odds.
+
+    Some markets first publish handicap/line values as PA rows without OD
+    (for example "0.5", "3.5", "153.5"). We remember those and attach
+    them to later PA rows using the MA/template id.
     """
     records = extract_bet365_records(bet365_event_payload)
     rows: List[Dict[str, Any]] = []
+
     current_group: Dict[str, Any] = {}
     current_market: Dict[str, Any] = {}
+
+    # Reset for every MG. Used for markets like:
+    # PA NA=0.5 IT=...-30143-H, then PA OD with MA=30143.
+    line_by_template_id: Dict[str, str] = {}
+    line_by_order: Dict[str, str] = {}
 
     for r in records:
         if not isinstance(r, dict):
@@ -456,53 +517,109 @@ def extract_bet365_current_markets(
 
         if r_type == "MG":
             current_group = {
-                "market_group_id": str(r.get("ID")) if r.get("ID") is not None else None,
-                "market_group_name": r.get("NA") or r.get("IT"),
-                "market_group_order": r.get("OR"),
-                "raw": r,
+                "market_group_id": clean_text(r.get("ID")),
+                "market_group_name": clean_text(r.get("NA")) or clean_text(r.get("IT")) or "Unknown Market",
+                "market_group_order": clean_text(r.get("OR")),
+                "market_group_suspended": clean_text(r.get("SU")),
+                "market_group_raw": r,
             }
             current_market = {}
+            line_by_template_id = {}
+            line_by_order = {}
             continue
 
         if r_type == "MA":
+            ma_name = clean_text(r.get("NA"))
             current_market = {
-                "market_id": str(r.get("ID")) if r.get("ID") is not None else None,
-                "market_name": r.get("NA") or r.get("IT"),
-                "market_type": r.get("MT"),
-                "market_count": r.get("MC"),
-                "market_order": r.get("OR"),
-                "raw": r,
+                "market_id": clean_text(r.get("ID")),
+                "market_name": ma_name,
+                "market_it": clean_text(r.get("IT")),
+                "market_py": clean_text(r.get("PY")),
+                "market_sy": clean_text(r.get("SY")),
+                "market_order": clean_text(r.get("OR")),
+                "market_raw": r,
             }
             continue
 
-        if r_type == "PA" or r.get("OD") is not None:
-            rows.append({
-                "snapshot_id": snapshot_id,
-                "snapshot_time_utc": snapshot_time_utc,
-                "event_id": event_id,
-                "fi": fi,
-                "score_from_match_snapshot": score_context.get("score"),
-                "record_type": r_type,
-                "market_group_id": current_group.get("market_group_id"),
-                "market_group_name": current_group.get("market_group_name"),
-                "market_group_order": current_group.get("market_group_order"),
-                "market_id": current_market.get("market_id"),
-                "market_name": current_market.get("market_name"),
-                "market_type": current_market.get("market_type"),
-                "market_count": current_market.get("market_count"),
-                "market_order": current_market.get("market_order"),
-                "selection_id": str(r.get("ID")) if r.get("ID") is not None else None,
-                "selection_name": r.get("NA"),
-                "selection_order": r.get("OR"),
-                "odds": r.get("OD"),
-                "odds_decimal": safe_float(r.get("OD")),
-                "handicap": r.get("HA") or r.get("HD"),
-                "suspended": r.get("SU") or r.get("SS"),
-                "raw": r,
-            })
+        if r_type != "PA":
+            continue
+
+        odds_fractional = clean_text(r.get("OD"))
+
+        # PA without OD often carries line/header values, not a price.
+        if not odds_fractional:
+            line_value = clean_text(r.get("NA"))
+            if line_value:
+                template_id = clean_text(r.get("MA")) or extract_market_template_id_from_it(r.get("IT"))
+                if template_id:
+                    line_by_template_id[template_id] = line_value
+                order = clean_text(r.get("OR"))
+                if order:
+                    line_by_order[order] = line_value
+            continue
+
+        selection_order = clean_text(r.get("OR"))
+        template_id = clean_text(r.get("MA"))
+        line_value = clean_text(r.get("HA")) or clean_text(r.get("HD"))
+        if not line_value and template_id:
+            line_value = line_by_template_id.get(template_id)
+        if not line_value and selection_order:
+            line_value = line_by_order.get(selection_order)
+
+        market_group_name = current_group.get("market_group_name") or "Unknown Market"
+        market_name = current_market.get("market_name")
+        selection_name = clean_text(r.get("NA"))
+
+        # For Over/Under markets the PA often has no NA; the MA name is the selection.
+        if not selection_name:
+            selection_name = market_name or market_group_name
+
+        display_selection_name = selection_name
+        if line_value and selection_name and line_value not in selection_name:
+            display_selection_name = f"{selection_name} {line_value}"
+
+        suspended_raw = clean_text(r.get("SU"))
+        is_suspended = suspended_raw == "0" or current_group.get("market_group_suspended") == "0"
+
+        rows.append({
+            "snapshot_id": snapshot_id,
+            "snapshot_time_utc": snapshot_time_utc,
+            "event_id": event_id,
+            "fi": fi,
+            "score_from_match_snapshot": score_context.get("score"),
+
+            "record_type": r_type,
+
+            "market_group_id": current_group.get("market_group_id"),
+            "market_group_name": market_group_name,
+            "market_group_order": current_group.get("market_group_order"),
+            "market_group_suspended": current_group.get("market_group_suspended"),
+
+            "market_id": current_market.get("market_id"),
+            "market_name": market_name,
+            "market_order": current_market.get("market_order"),
+            "market_template_id": template_id,
+
+            "selection_id": clean_text(r.get("ID")),
+            "selection_name": selection_name,
+            "display_selection_name": display_selection_name,
+            "selection_order": selection_order,
+
+            "odds_fractional": odds_fractional,
+            "odds_decimal": fractional_odds_to_decimal(odds_fractional),
+
+            # Keep old field name for backward compatibility with the HTML page.
+            "odds": odds_fractional,
+
+            "line": line_value,
+            "handicap": line_value,
+            "suspended": is_suspended,
+            "suspended_raw": suspended_raw,
+
+            "raw": r,
+        })
 
     return rows
-
 
 def parse_silver_snapshot(manifest: Dict[str, Any], events_inplay_payload: Dict[str, Any], bet365_event_payload: Dict[str, Any], event_odds_payload: Dict[str, Any]) -> Dict[str, Any]:
     snapshot_id = manifest["snapshot_id"]
@@ -698,9 +815,8 @@ def build_match_page(
     players = player_entries.get("rows", []) if isinstance(player_entries, dict) else []
     odds = odds_records.get("rows", []) if isinstance(odds_records, dict) else []
     markets = current_markets.get("rows", []) if isinstance(current_markets, dict) else []
-    unique_market_ids = {m.get("market_id") for m in markets if m.get("market_id")}
-    unique_market_names = {m.get("market_name") for m in markets if m.get("market_name")}
-
+    unique_market_ids = set(m.get("market_id") for m in markets if m.get("market_id"))
+    unique_market_names = set(m.get("market_name") for m in markets if m.get("market_name"))
     return {
         "generated_at_utc": utc_now().isoformat(),
         "snapshot": {
@@ -725,7 +841,7 @@ def build_match_page(
         "odds": {"count": len(odds), "records": odds},
         "current_markets": {
             "selection_count": len(markets),
-            "market_count": len(unique_market_ids) if unique_market_ids else len(unique_market_names),
+            "market_count": len(unique_market_ids or unique_market_names),
             "records": markets,
         },
         "source": {
@@ -733,6 +849,7 @@ def build_match_page(
             "bronze_manifest_path": match_snapshot.get("source_bronze_manifest_path"),
         },
     }
+
 
 def write_gold_match_page(gold_container, match_page: Dict[str, Any]) -> None:
     event_id = str(match_page["snapshot"]["event_id"])
@@ -808,133 +925,116 @@ def build_cricket_gold_match_pages(timer: func.TimerRequest) -> None:
         "checked": len(match_snapshot_paths),
     }))
 
-
-# -----------------------------
-# HTTP APIs and web pages
-# -----------------------------
-
-def json_response(payload: Dict[str, Any], status_code: int = 200) -> func.HttpResponse:
-    return func.HttpResponse(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        status_code=status_code,
-        mimetype="application/json",
-    )
-
-
-def format_unix_ts(ts: Any) -> str:
-    if ts is None or ts == "":
-        return "-"
-    try:
-        return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    except Exception:
-        return str(ts)
-
-
 @app.route(route="matches", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_latest_matches(req: func.HttpRequest) -> func.HttpResponse:
     try:
         gold = get_named_container_client("gold")
         data = download_required_json(gold, "cricket/matches/latest/index.json")
-        return json_response(data)
-    except ResourceNotFoundError:
-        return json_response({"matches": [], "match_count": 0}, 404)
+        return func.HttpResponse(json.dumps(data), status_code=200, mimetype="application/json")
     except Exception as ex:
         logging.exception("Failed to get latest matches")
-        return json_response({"error": str(ex)}, 500)
+        return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
 
 
 @app.route(route="matches/{event_id}", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_match_page(req: func.HttpRequest) -> func.HttpResponse:
     try:
         event_id = req.route_params.get("event_id")
-        if not event_id:
-            return json_response({"error": "Missing event_id"}, 400)
         gold = get_named_container_client("gold")
         data = download_required_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
-        return json_response(data)
-    except ResourceNotFoundError:
-        return json_response({"error": "Match not found", "event_id": req.route_params.get("event_id")}, 404)
+        return func.HttpResponse(json.dumps(data), status_code=200, mimetype="application/json")
     except Exception as ex:
         logging.exception("Failed to get match page")
-        return json_response({"error": str(ex)}, 500)
-
-
+        return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
 @app.route(route="matches/view", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_matches_list_html(req: func.HttpRequest) -> func.HttpResponse:
     try:
         gold = get_named_container_client("gold")
-        index = download_required_json(gold, "cricket/matches/latest/index.json")
-        matches = index.get("matches", []) if isinstance(index, dict) else []
 
-        latest_by_event: Dict[str, Dict[str, Any]] = {}
-        for m in matches:
-            event_id = str(m.get("event_id", "-"))
-            snapshot_time = m.get("snapshot_time_utc") or ""
-            current = latest_by_event.get(event_id)
-            current_time = current.get("snapshot_time_utc") if current else ""
-            if current is None or snapshot_time > current_time:
-                latest_by_event[event_id] = m
+        latest_by_event = {}
 
-        unique_matches = list(latest_by_event.values())
-        unique_matches.sort(key=lambda x: x.get("snapshot_time_utc") or "", reverse=True)
+        for blob in gold.list_blobs(name_starts_with="cricket/matches/history/"):
+            name = blob.name
+            if not name.endswith("/match_page.json"):
+                continue
+
+            try:
+                page = download_required_json(gold, name)
+                event_id = str(page.get("snapshot", {}).get("event_id", "-"))
+                snapshot_time = page.get("snapshot", {}).get("snapshot_time_utc") or ""
+
+                current = latest_by_event.get(event_id)
+                current_time = current.get("snapshot_time_utc") if current else ""
+
+                if current is None or snapshot_time > current_time:
+                    latest_by_event[event_id] = {
+                        "event_id": event_id,
+                        "snapshot_time_utc": snapshot_time,
+                        "match_name": page.get("match_header", {}).get("match_name") or "-",
+                        "league_name": page.get("match_header", {}).get("league_name") or "-",
+                        "score_summary": (
+                            page.get("score", {}).get("summary_from_events")
+                            or page.get("score", {}).get("summary_from_bet365")
+                            or "-"
+                        ),
+                        "markets": page.get("current_markets", {}).get("market_count", 0),
+                    }
+
+            except Exception:
+                logging.exception(f"Failed reading blob: {name}")
+
+        matches = list(latest_by_event.values())
+        matches.sort(key=lambda x: x.get("snapshot_time_utc"), reverse=True)
 
         rows = ""
-        for m in unique_matches:
-            event_id = m.get("event_id", "-")
-            match_name = m.get("match_name") or (
-                f"{m.get('home_team_name')} vs {m.get('away_team_name')}"
-                if m.get("home_team_name") and m.get("away_team_name") else "-"
-            )
+        for m in matches:
             rows += f"""
             <tr>
-                <td>{event_id}</td>
-                <td>{match_name}</td>
-                <td>{m.get('league_name') or '-'}</td>
-                <td>{m.get('score_summary') or '-'}</td>
-                <td>{m.get('current_market_count') or 0}</td>
-                <td>{m.get('current_market_selection_count') or 0}</td>
-                <td>{m.get('snapshot_time_utc') or '-'}</td>
-                <td><a href="/api/matches/{event_id}/view">Open</a></td>
+                <td>{m["event_id"]}</td>
+                <td>{m["match_name"]}</td>
+                <td>{m["league_name"]}</td>
+                <td>{m["score_summary"]}</td>
+                <td>{m["markets"]}</td>
+                <td>{m["snapshot_time_utc"]}</td>
+                <td><a href="/api/matches/{m["event_id"]}/view">Open</a></td>
             </tr>
             """
 
         html = f"""
-        <!DOCTYPE html>
         <html>
         <head>
-            <title>Cricket Matches</title>
+            <title>All Cricket Matches</title>
             <style>
-                body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
-                table {{ width: 100%; border-collapse: collapse; background: white; }}
-                th, td {{ padding: 12px; border-bottom: 1px solid #ddd; text-align: left; }}
-                th {{ background: #222; color: white; }}
-                a {{ color: #0066cc; font-weight: bold; text-decoration: none; }}
+                body {{ font-family: Arial; background:#f7f7f7; padding:30px; }}
+                table {{ width:100%; border-collapse: collapse; background:white; }}
+                th, td {{ padding:10px; border-bottom:1px solid #ddd; }}
+                th {{ background:#222; color:white; }}
+                a {{ color:#0066cc; font-weight:bold; }}
             </style>
         </head>
         <body>
-            <h1>Cricket Matches ({len(unique_matches)})</h1>
+            <h1>All Matches ({len(matches)})</h1>
             <table>
-                <thead>
-                    <tr>
-                        <th>Event ID</th>
-                        <th>Match</th>
-                        <th>League</th>
-                        <th>Score</th>
-                        <th>Markets</th>
-                        <th>Selections</th>
-                        <th>Last Snapshot</th>
-                        <th>Page</th>
-                    </tr>
-                </thead>
-                <tbody>{rows}</tbody>
+                <tr>
+                    <th>Event</th>
+                    <th>Match</th>
+                    <th>League</th>
+                    <th>Score</th>
+                    <th>Markets</th>
+                    <th>Updated</th>
+                    <th></th>
+                </tr>
+                {rows}
             </table>
         </body>
         </html>
         """
-        return func.HttpResponse(html, status_code=200, mimetype="text/html")
+
+        return func.HttpResponse(html, mimetype="text/html")
+
     except Exception as ex:
-        logging.exception("Failed to render matches list")
-        return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
+        logging.exception("Failed matches list page")
+        return func.HttpResponse(str(ex), status_code=500)
 
 
 @app.route(route="matches/{event_id}/view", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
@@ -956,23 +1056,29 @@ def get_match_page_html(req: func.HttpRequest) -> func.HttpResponse:
         )
         score_text = score.get("summary_from_events") or score.get("summary_from_bet365") or "-"
 
-        current_market_names = sorted({m.get("market_name") or "Unknown Market" for m in current_market_rows})
+        current_market_names = sorted({m.get("market_group_name") or "Unknown Market" for m in current_market_rows})
         market_options = '<option value="ALL">All current markets</option>'
         for market_name in current_market_names:
             safe_value = str(market_name).replace('"', '&quot;')
             market_options += f'<option value="{safe_value}">{market_name}</option>'
 
         current_market_table_rows = ""
-        for m in current_market_rows[:1000]:
-            market_name = m.get("market_name") or "Unknown Market"
+        for m in current_market_rows[:1500]:
+            market_group_name = m.get("market_group_name") or "Unknown Market"
+            market_name = m.get("market_name") or market_group_name
+            odds_display = (
+                f"{m.get('odds_decimal')} <span style='color:#777;'>({m.get('odds_fractional') or m.get('odds')})</span>"
+                if m.get("odds_decimal") is not None
+                else (m.get("odds_fractional") or m.get("odds") or "-")
+            )
             current_market_table_rows += f"""
-            <tr data-current-market="{str(market_name).replace('"', '&quot;')}">
-                <td>{m.get('market_group_name') or '-'}</td>
+            <tr data-current-market="{str(market_group_name).replace('"', '&quot;')}">
+                <td>{market_group_name}</td>
                 <td>{market_name}</td>
-                <td>{m.get('selection_name') or '-'}</td>
-                <td>{m.get('odds') or '-'}</td>
+                <td>{m.get('display_selection_name') or m.get('selection_name') or '-'}</td>
+                <td>{odds_display}</td>
                 <td>{m.get('handicap') or '-'}</td>
-                <td>{m.get('suspended') or '-'}</td>
+                <td>{'Yes' if m.get('suspended') else 'No'}</td>
             </tr>
             """
 
@@ -1026,7 +1132,7 @@ def get_match_page_html(req: func.HttpRequest) -> func.HttpResponse:
                 <label><b>Filter market:</b></label><br>
                 <select id="currentMarketFilter" onchange="filterCurrentMarket()">{market_options}</select>
                 <table>
-                    <thead><tr><th>Group</th><th>Market</th><th>Selection</th><th>Odds</th><th>Handicap</th><th>Suspended</th></tr></thead>
+                    <thead><tr><th>Group</th><th>Market</th><th>Selection</th><th>Odds Decimal (Fractional)</th><th>Line / Handicap</th><th>Suspended</th></tr></thead>
                     <tbody>{current_market_table_rows}</tbody>
                 </table>
             </div>
