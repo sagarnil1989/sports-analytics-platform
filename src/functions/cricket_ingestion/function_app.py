@@ -253,7 +253,7 @@ def discover_cricket_inplay(timer: func.TimerRequest) -> None:
     }))
 
 
-@app.timer_trigger(schedule="*/2 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
+@app.timer_trigger(schedule="*/5 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
 def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
     sport_id = get_env("SPORT_ID", "3")
     container = get_bronze_container_client()
@@ -1599,6 +1599,17 @@ def get_prematch_match_html(req: func.HttpRequest) -> func.HttpResponse:
         header = page.get("match_header", {}) or {}
         markets = (page.get("prematch_markets", {}) or {}).get("records", [])
 
+        home_team_name = ((header.get("home_team") or {}).get("name")) or "Home Team"
+        away_team_name = ((header.get("away_team") or {}).get("name")) or "Away Team"
+
+        def team_or_player_label(value: Any) -> str:
+            raw = str(value or "").strip()
+            if raw == "1":
+                return home_team_name
+            if raw == "2":
+                return away_team_name
+            return raw or "-"
+
         if market_filter:
             markets = [
                 m for m in markets
@@ -1607,17 +1618,37 @@ def get_prematch_match_html(req: func.HttpRequest) -> func.HttpResponse:
             ]
 
         market_names = sorted({str(m.get("market_name") or m.get("market_key") or "-") for m in markets})
-        grouped_markets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+
+        grouped_markets: Dict[str, List[Dict[str, Any]]] = {}
         for m in markets:
             market_name = str(m.get("market_name") or m.get("market_key") or "Unknown Market")
-            grouped_markets[market_name].append(m)
+            grouped_markets.setdefault(market_name, []).append(m)
 
-        market_sections_html = ""
+        sections_html = ""
         for market_name in sorted(grouped_markets.keys()):
             selections = grouped_markets[market_name]
-            market_sections_html += f"""
-            <div class="market-section" id="market-{escape(market_name).replace(' ', '-')}">
-                <h2>{escape(market_name)} <span class="count">{len(selections)} selections</span></h2>
+            rows = ""
+            for m in selections[:1000]:
+                option = m.get("selection_name") or m.get("selection_header") or "-"
+                team_player = team_or_player_label(m.get("selection_header"))
+                if team_player == str(option).strip():
+                    team_player = "-"
+
+                rows += f"""
+                <tr>
+                    <td>{escape(str(m.get('category_key') or '-'))}</td>
+                    <td>{escape(str(option))}</td>
+                    <td>{escape(str(team_player))}</td>
+                    <td>{escape(str(m.get('handicap') or '-'))}</td>
+                    <td>{escape(str(m.get('odds') or '-'))}</td>
+                    <td>{escape(str(m.get('category_updated_at_utc') or '-'))}</td>
+                    <td><span class="pending">Pending</span></td>
+                </tr>
+                """
+
+            sections_html += f"""
+            <div class="market-section">
+                <h2>{escape(market_name)} <span>{len(selections)} selections</span></h2>
                 <table>
                     <thead>
                         <tr>
@@ -1630,31 +1661,7 @@ def get_prematch_match_html(req: func.HttpRequest) -> func.HttpResponse:
                             <th>Result</th>
                         </tr>
                     </thead>
-                    <tbody>
-            """
-
-            for m in selections:
-                option = m.get("selection_header") or m.get("selection_name") or "-"
-                team_or_player = m.get("selection_name") or "-"
-                line = m.get("handicap") or "-"
-                odds = m.get("odds") or "-"
-                updated = m.get("category_updated_at_utc") or "-"
-                category = m.get("category_key") or "-"
-
-                market_sections_html += f"""
-                <tr>
-                    <td>{escape(str(category))}</td>
-                    <td>{escape(str(option))}</td>
-                    <td>{escape(str(team_or_player))}</td>
-                    <td>{escape(str(line))}</td>
-                    <td>{escape(str(odds))}</td>
-                    <td>{escape(str(updated))}</td>
-                    <td><span class="pending">Pending</span></td>
-                </tr>
-                """
-
-            market_sections_html += """
-                    </tbody>
+                    <tbody>{rows}</tbody>
                 </table>
             </div>
             """
@@ -1664,10 +1671,6 @@ def get_prematch_match_html(req: func.HttpRequest) -> func.HttpResponse:
         if len(market_names) > 20:
             market_summary += f" ... +{len(market_names) - 20} more"
 
-        market_nav = ""
-        for market_name in market_names:
-            market_nav += f'<a class="market-link" href="?market={escape(market_name)}">{escape(market_name)}</a>'
-
         html = f"""
         <!DOCTYPE html>
         <html>
@@ -1676,35 +1679,29 @@ def get_prematch_match_html(req: func.HttpRequest) -> func.HttpResponse:
             <style>
                 body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
                 .card {{ background: white; padding: 18px; border-radius: 10px; box-shadow: 0 2px 8px #ddd; margin-bottom: 20px; }}
-                .market-nav {{ background: white; padding: 12px; border-radius: 10px; box-shadow: 0 2px 8px #ddd; margin-bottom: 20px; }}
-                .market-link {{ display: inline-block; margin: 4px; padding: 6px 10px; background: #eee; border-radius: 999px; color: #0066cc; font-size: 13px; text-decoration: none; font-weight: bold; }}
-                .market-section {{ background: white; padding: 16px; margin-bottom: 25px; border-radius: 10px; box-shadow: 0 2px 8px #ddd; }}
+                .market-section {{ background: white; padding: 18px; border-radius: 10px; box-shadow: 0 2px 8px #ddd; margin: 24px 0; }}
                 .market-section h2 {{ margin-top: 0; border-bottom: 2px solid #222; padding-bottom: 8px; }}
-                .count {{ color: #666; font-size: 14px; font-weight: normal; }}
+                .market-section h2 span {{ color: #666; font-size: 16px; font-weight: normal; }}
                 table {{ width: 100%; border-collapse: collapse; background: white; }}
-                th, td {{ padding: 10px; border-bottom: 1px solid #ddd; text-align: left; vertical-align: top; }}
+                th, td {{ padding: 10px; border-bottom: 1px solid #ddd; text-align: left; }}
                 th {{ background: #222; color: white; position: sticky; top: 0; }}
                 a {{ color: #0066cc; font-weight: bold; text-decoration: none; }}
-                .pending {{ background: #eee; padding: 4px 10px; border-radius: 999px; font-weight: bold; }}
+                .pending {{ display: inline-block; padding: 4px 10px; background: #eee; border-radius: 999px; font-weight: bold; }}
             </style>
         </head>
         <body>
             <p><a href="/api/prematch/view">← Back to prematch matches</a></p>
             <div class="card">
                 <h1>{escape(str(title))}</h1>
-                <p><b>League:</b> {escape(str(header.get("league_name") or "-"))}</p>
-                <p><b>Event ID:</b> {escape(str(event_id))} &nbsp; <b>Bet365 FI:</b> {escape(str((page.get("snapshot") or {}).get("fi") or "-"))}</p>
-                <p><b>Start time:</b> {escape(str(header.get("event_time_utc") or "-"))}</p>
-                <p><b>Markets:</b> {escape(str((page.get("prematch_markets") or {}).get("market_count") or 0))}
-                   &nbsp; <b>Selections:</b> {escape(str((page.get("prematch_markets") or {}).get("selection_count") or 0))}</p>
-                <p><b>Market names:</b> {escape(market_summary or "-")}</p>
+                <p><b>League:</b> {escape(str(header.get('league_name') or '-'))}</p>
+                <p><b>Teams:</b> {escape(str(home_team_name))} vs {escape(str(away_team_name))}</p>
+                <p><b>Event ID:</b> {escape(str(event_id))} &nbsp; <b>Bet365 FI:</b> {escape(str((page.get('snapshot') or {}).get('fi') or '-'))}</p>
+                <p><b>Start time:</b> {escape(str(header.get('event_time_utc') or '-'))}</p>
+                <p><b>Markets:</b> {escape(str((page.get('prematch_markets') or {}).get('market_count') or 0))}
+                   &nbsp; <b>Selections:</b> {escape(str((page.get('prematch_markets') or {}).get('selection_count') or 0))}</p>
+                <p><b>Market names:</b> {escape(market_summary or '-')}</p>
             </div>
-            <div class="market-nav">
-                <b>Jump/filter by market:</b><br>
-                <a class="market-link" href="/api/prematch/{escape(str(event_id))}/view">All markets</a>
-                {market_nav}
-            </div>
-            {market_sections_html}
+            {sections_html}
         </body>
         </html>
         """
@@ -2149,7 +2146,7 @@ def run_prematch_now(req: func.HttpRequest) -> func.HttpResponse:
         discover_cricket_upcoming(None)
         capture_cricket_prematch_odds(None)
         build_cricket_prematch_pages(None)
-
         return func.HttpResponse("Prematch pipeline executed successfully", status_code=200)
     except Exception as ex:
+        logging.exception("Failed to run prematch pipeline manually")
         return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
