@@ -5,6 +5,7 @@ import re
 from html import escape
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from collections import defaultdict
 
 import azure.functions as func
 import requests
@@ -217,11 +218,11 @@ def summarize_inplay_items(items: List[Dict[str, Any]], max_live_matches: int) -
 # Bronze ingestion
 # -----------------------------
 
-@app.timer_trigger(schedule="*/15 * * * * *", arg_name="timer", run_on_startup=True, use_monitor=False)
+@app.timer_trigger(schedule="*/5 * * * * *", arg_name="timer", run_on_startup=True, use_monitor=False)
 def discover_cricket_inplay(timer: func.TimerRequest) -> None:
     now = utc_now()
     sport_id = get_env("SPORT_ID", "3")
-    max_live_matches = get_int_env("MAX_LIVE_MATCHES", 10)
+    max_live_matches = get_int_env("MAX_LIVE_MATCHES", 50)
     container = get_bronze_container_client()
 
     api_payload = call_betsapi(path="/v3/events/inplay", params={"sport_id": sport_id})
@@ -252,7 +253,7 @@ def discover_cricket_inplay(timer: func.TimerRequest) -> None:
     }))
 
 
-@app.timer_trigger(schedule="*/5 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
+@app.timer_trigger(schedule="*/2 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
 def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
     sport_id = get_env("SPORT_ID", "3")
     container = get_bronze_container_client()
@@ -745,10 +746,10 @@ def write_silver_outputs(silver_container, parsed: Dict[str, Any]) -> None:
     upload_json(silver_container, marker_path, marker, overwrite=True)
 
 
-@app.timer_trigger(schedule="*/30 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
+@app.timer_trigger(schedule="*/10 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
 def parse_cricket_bronze_to_silver(timer: func.TimerRequest) -> None:
     sport_id = get_env("SPORT_ID", "3")
-    max_per_run = get_int_env("MAX_SILVER_SNAPSHOTS_PER_RUN", 50)
+    max_per_run = get_int_env("MAX_SILVER_SNAPSHOTS_PER_RUN", 200)
     bronze = get_named_container_client("bronze")
     silver = get_named_container_client("silver")
     manifest_paths = list_manifest_paths(bronze, sport_id, max_per_run)
@@ -982,9 +983,9 @@ def write_gold_league_indexes(gold_container, matches: List[Dict[str, Any]]) -> 
     )
 
 
-@app.timer_trigger(schedule="*/30 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
+@app.timer_trigger(schedule="*/10 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
 def build_cricket_gold_match_pages(timer: func.TimerRequest) -> None:
-    max_events = get_int_env("MAX_GOLD_EVENTS_PER_RUN", 20)
+    max_events = get_int_env("MAX_GOLD_EVENTS_PER_RUN", 100)
     silver = get_named_container_client("silver")
     gold = get_named_container_client("gold")
     match_snapshot_paths = list_latest_silver_match_snapshots(silver, max_events)
@@ -1074,7 +1075,7 @@ def summarize_event_items(items: List[Dict[str, Any]], max_events: int, require_
     return matches[:max_events]
 
 
-@app.timer_trigger(schedule="0 0 */12 * * *", arg_name="timer", run_on_startup=True, use_monitor=False)
+@app.timer_trigger(schedule="0 */1 * * * *", arg_name="timer", run_on_startup=True, use_monitor=False)
 def discover_cricket_upcoming(timer: func.TimerRequest) -> None:
     """Find upcoming cricket matches and store a small control file.
 
@@ -1083,7 +1084,7 @@ def discover_cricket_upcoming(timer: func.TimerRequest) -> None:
     """
     now = utc_now()
     sport_id = get_env("SPORT_ID", "3")
-    max_upcoming = get_int_env("MAX_UPCOMING_MATCHES", 30)
+    max_upcoming = get_int_env("MAX_UPCOMING_MATCHES", 100)
     only_bet365 = get_bool_env("UPCOMING_REQUIRE_BET365_ID", True)
     container = get_bronze_container_client()
 
@@ -1116,11 +1117,11 @@ def discover_cricket_upcoming(timer: func.TimerRequest) -> None:
     }))
 
 
-@app.timer_trigger(schedule="0 5 */12 * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
+@app.timer_trigger(schedule="10 */1 * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
 def capture_cricket_prematch_odds(timer: func.TimerRequest) -> None:
     """Capture prematch odds for upcoming matches using /v4/bet365/prematch."""
     sport_id = get_env("SPORT_ID", "3")
-    max_per_run = get_int_env("MAX_PREMATCH_ODDS_PER_RUN", 10)
+    max_per_run = get_int_env("MAX_PREMATCH_ODDS_PER_RUN", 100)
     container = get_bronze_container_client()
 
     control = download_json(container, "betsapi/control/upcoming_cricket/latest.json")
@@ -1180,12 +1181,12 @@ def capture_cricket_prematch_odds(timer: func.TimerRequest) -> None:
     }))
 
 
-@app.timer_trigger(schedule="0 */60 * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
+@app.timer_trigger(schedule="30 */5 * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
 def discover_cricket_ended(timer: func.TimerRequest) -> None:
     """Capture recently ended cricket matches for result lookup."""
     now = utc_now()
     sport_id = get_env("SPORT_ID", "3")
-    max_ended = get_int_env("MAX_ENDED_MATCHES", 50)
+    max_ended = get_int_env("MAX_ENDED_MATCHES", 100)
     bronze = get_bronze_container_client()
     gold = get_named_container_client("gold")
 
@@ -1459,11 +1460,11 @@ def write_prematch_gold_indexes(gold_container, pages: List[Dict[str, Any]]) -> 
     )
 
 
-@app.timer_trigger(schedule="0 10 */12 * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
+@app.timer_trigger(schedule="30 */1 * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
 def build_cricket_prematch_pages(timer: func.TimerRequest) -> None:
     """Build fast website/API pages from captured prematch odds."""
     sport_id = get_env("SPORT_ID", "3")
-    max_per_run = get_int_env("MAX_PREMATCH_SNAPSHOTS_PER_RUN", 50)
+    max_per_run = get_int_env("MAX_PREMATCH_SNAPSHOTS_PER_RUN", 200)
     bronze = get_named_container_client("bronze")
     gold = get_named_container_client("gold")
 
@@ -1606,24 +1607,66 @@ def get_prematch_match_html(req: func.HttpRequest) -> func.HttpResponse:
             ]
 
         market_names = sorted({str(m.get("market_name") or m.get("market_key") or "-") for m in markets})
-        rows = ""
-        for m in markets[:1000]:
-            rows += f"""
-            <tr>
-                <td>{escape(str(m.get("category_key") or "-"))}</td>
-                <td>{escape(str(m.get("market_name") or m.get("market_key") or "-"))}</td>
-                <td>{escape(str(m.get("selection_header") or "-"))}</td>
-                <td>{escape(str(m.get("selection_name") or "-"))}</td>
-                <td>{escape(str(m.get("handicap") or "-"))}</td>
-                <td>{escape(str(m.get("odds") or "-"))}</td>
-                <td>{escape(str(m.get("category_updated_at_utc") or "-"))}</td>
-            </tr>
+        grouped_markets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for m in markets:
+            market_name = str(m.get("market_name") or m.get("market_key") or "Unknown Market")
+            grouped_markets[market_name].append(m)
+
+        market_sections_html = ""
+        for market_name in sorted(grouped_markets.keys()):
+            selections = grouped_markets[market_name]
+            market_sections_html += f"""
+            <div class="market-section" id="market-{escape(market_name).replace(' ', '-')}">
+                <h2>{escape(market_name)} <span class="count">{len(selections)} selections</span></h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Category</th>
+                            <th>Option</th>
+                            <th>Team / Player</th>
+                            <th>Line</th>
+                            <th>Odds</th>
+                            <th>Updated</th>
+                            <th>Result</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            """
+
+            for m in selections:
+                option = m.get("selection_header") or m.get("selection_name") or "-"
+                team_or_player = m.get("selection_name") or "-"
+                line = m.get("handicap") or "-"
+                odds = m.get("odds") or "-"
+                updated = m.get("category_updated_at_utc") or "-"
+                category = m.get("category_key") or "-"
+
+                market_sections_html += f"""
+                <tr>
+                    <td>{escape(str(category))}</td>
+                    <td>{escape(str(option))}</td>
+                    <td>{escape(str(team_or_player))}</td>
+                    <td>{escape(str(line))}</td>
+                    <td>{escape(str(odds))}</td>
+                    <td>{escape(str(updated))}</td>
+                    <td><span class="pending">Pending</span></td>
+                </tr>
+                """
+
+            market_sections_html += """
+                    </tbody>
+                </table>
+            </div>
             """
 
         title = header.get("match_name") or f"Prematch {event_id}"
         market_summary = ", ".join(market_names[:20])
         if len(market_names) > 20:
             market_summary += f" ... +{len(market_names) - 20} more"
+
+        market_nav = ""
+        for market_name in market_names:
+            market_nav += f'<a class="market-link" href="?market={escape(market_name)}">{escape(market_name)}</a>'
 
         html = f"""
         <!DOCTYPE html>
@@ -1633,10 +1676,16 @@ def get_prematch_match_html(req: func.HttpRequest) -> func.HttpResponse:
             <style>
                 body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
                 .card {{ background: white; padding: 18px; border-radius: 10px; box-shadow: 0 2px 8px #ddd; margin-bottom: 20px; }}
-                table {{ width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 8px #ddd; }}
-                th, td {{ padding: 10px; border-bottom: 1px solid #ddd; text-align: left; }}
+                .market-nav {{ background: white; padding: 12px; border-radius: 10px; box-shadow: 0 2px 8px #ddd; margin-bottom: 20px; }}
+                .market-link {{ display: inline-block; margin: 4px; padding: 6px 10px; background: #eee; border-radius: 999px; color: #0066cc; font-size: 13px; text-decoration: none; font-weight: bold; }}
+                .market-section {{ background: white; padding: 16px; margin-bottom: 25px; border-radius: 10px; box-shadow: 0 2px 8px #ddd; }}
+                .market-section h2 {{ margin-top: 0; border-bottom: 2px solid #222; padding-bottom: 8px; }}
+                .count {{ color: #666; font-size: 14px; font-weight: normal; }}
+                table {{ width: 100%; border-collapse: collapse; background: white; }}
+                th, td {{ padding: 10px; border-bottom: 1px solid #ddd; text-align: left; vertical-align: top; }}
                 th {{ background: #222; color: white; position: sticky; top: 0; }}
                 a {{ color: #0066cc; font-weight: bold; text-decoration: none; }}
+                .pending {{ background: #eee; padding: 4px 10px; border-radius: 999px; font-weight: bold; }}
             </style>
         </head>
         <body>
@@ -1650,20 +1699,12 @@ def get_prematch_match_html(req: func.HttpRequest) -> func.HttpResponse:
                    &nbsp; <b>Selections:</b> {escape(str((page.get("prematch_markets") or {}).get("selection_count") or 0))}</p>
                 <p><b>Market names:</b> {escape(market_summary or "-")}</p>
             </div>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Category</th>
-                        <th>Market</th>
-                        <th>Header</th>
-                        <th>Selection</th>
-                        <th>Handicap</th>
-                        <th>Odds</th>
-                        <th>Updated</th>
-                    </tr>
-                </thead>
-                <tbody>{rows}</tbody>
-            </table>
+            <div class="market-nav">
+                <b>Jump/filter by market:</b><br>
+                <a class="market-link" href="/api/prematch/{escape(str(event_id))}/view">All markets</a>
+                {market_nav}
+            </div>
+            {market_sections_html}
         </body>
         </html>
         """
