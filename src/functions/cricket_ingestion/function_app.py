@@ -3,7 +3,7 @@ import logging
 import os
 import re
 from html import escape
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 from collections import defaultdict
 
@@ -214,6 +214,120 @@ def summarize_inplay_items(items: List[Dict[str, Any]], max_live_matches: int) -
     return live[:max_live_matches]
 
 
+def get_api_result_count(api_payload: Optional[Dict[str, Any]]) -> Optional[int]:
+    """Return a simple count of results in a stored BetsAPI wrapper."""
+    if not api_payload:
+        return None
+    body = api_payload.get("response", {}).get("body")
+    if not isinstance(body, dict):
+        return None
+    results = body.get("results")
+    if isinstance(results, list):
+        return len(results)
+    if isinstance(results, dict):
+        return len(results)
+    return None
+
+
+def build_api_call_lineage(
+    api_name: str,
+    api_payload: Optional[Dict[str, Any]],
+    id_used: Dict[str, Any],
+    bronze_path: Optional[str],
+    purpose: str,
+) -> Dict[str, Any]:
+    """Small lineage row so we can see which API used which id and where the raw data landed."""
+    response = (api_payload or {}).get("response", {})
+    request = (api_payload or {}).get("request", {})
+    return {
+        "api_name": api_name,
+        "purpose": purpose,
+        "id_used": id_used,
+        "path": request.get("url"),
+        "params_without_token": request.get("params_without_token"),
+        "called_at_utc": request.get("called_at_utc"),
+        "http_status_code": response.get("http_status_code"),
+        "success": response.get("success"),
+        "elapsed_ms": response.get("elapsed_ms"),
+        "error": response.get("error"),
+        "error_detail": response.get("error_detail"),
+        "result_count": get_api_result_count(api_payload),
+        "bronze_path": bronze_path,
+    }
+
+
+def build_live_snapshot_lineage(
+    sport_id: str,
+    event_id: str,
+    fi: str,
+    base_path: str,
+    payloads: Dict[str, Optional[Dict[str, Any]]],
+) -> Dict[str, Any]:
+    """Lineage for one live snapshot.
+
+    Important rule:
+    - event_id is used for BetsAPI event endpoints.
+    - fi / bet365_id is used for Bet365 event endpoint.
+    """
+    bronze_base = f"bronze/{base_path}"
+    calls = [
+        build_api_call_lineage(
+            "events_inplay",
+            payloads.get("events_inplay"),
+            {"sport_id": sport_id},
+            f"{bronze_base}/events_inplay_full.json",
+            "Find live cricket matches and current score/status from /v3/events/inplay.",
+        ),
+        build_api_call_lineage(
+            "event_view",
+            payloads.get("event_view"),
+            {"event_id": event_id},
+            f"{bronze_base}/event_view_by_event_id.json",
+            "Get event scoreboard/details from /v1/event/view using event_id.",
+        ),
+        build_api_call_lineage(
+            "event_odds_summary",
+            payloads.get("event_odds_summary"),
+            {"event_id": event_id},
+            f"{bronze_base}/event_odds_summary_by_event_id.json",
+            "Get compact odds summary from /v2/event/odds/summary using event_id.",
+        ),
+        build_api_call_lineage(
+            "event_odds",
+            payloads.get("event_odds"),
+            {"event_id": event_id},
+            f"{bronze_base}/event_odds_by_event_id.json",
+            "Get event odds history from /v2/event/odds using event_id.",
+        ),
+        build_api_call_lineage(
+            "bet365_event",
+            payloads.get("bet365_event"),
+            {"FI": fi},
+            f"{bronze_base}/bet365_event_by_fi.json",
+            "Get live Bet365 market stream from /v1/bet365/event using FI/bet365_id.",
+        ),
+    ]
+    return {
+        "generated_at_utc": utc_now().isoformat(),
+        "sport_id": sport_id,
+        "event_id": event_id,
+        "fi": fi,
+        "id_mapping": {
+            "event_id": {
+                "value": event_id,
+                "used_for": ["/v1/event/view", "/v2/event/odds/summary", "/v2/event/odds"],
+            },
+            "fi": {
+                "value": fi,
+                "also_called": "bet365_id",
+                "used_for": ["/v1/bet365/event"],
+            },
+        },
+        "bronze_base_path": f"bronze/{base_path}",
+        "api_calls": calls,
+    }
+
+
 # -----------------------------
 # Bronze ingestion
 # -----------------------------
@@ -255,6 +369,19 @@ def discover_cricket_inplay(timer: func.TimerRequest) -> None:
 
 @app.timer_trigger(schedule="*/5 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
 def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
+    """Capture one full live snapshot per active match.
+
+    Bronze is intentionally complete and verbose. We store every important live
+    API response separately so future silver/gold logic can be changed without
+    losing raw data.
+
+    APIs captured:
+    1. /v3/events/inplay                 -> list/status/score using sport_id
+    2. /v1/event/view                    -> event details using event_id
+    3. /v2/event/odds/summary            -> odds summary using event_id
+    4. /v2/event/odds                    -> odds history using event_id
+    5. /v1/bet365/event                  -> full Bet365 live markets using FI
+    """
     sport_id = get_env("SPORT_ID", "3")
     container = get_bronze_container_client()
 
@@ -264,11 +391,10 @@ def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
         return
 
     active_matches = control["active_matches"]
-    enable_events_inplay = get_bool_env("ENABLE_EVENTS_INPLAY_MATCH_STATE", True)
 
-    events_inplay_payload = None
-    if enable_events_inplay:
-        events_inplay_payload = call_betsapi(path="/v3/events/inplay", params={"sport_id": sport_id})
+    # Capture the full inplay response once per run and copy it into every
+    # snapshot folder for lineage/debugging.
+    events_inplay_payload = call_betsapi(path="/v3/events/inplay", params={"sport_id": sport_id})
 
     for match in active_matches:
         snapshot_time = utc_now()
@@ -276,10 +402,30 @@ def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
         fi = str(match["fi"])
         event_id = str(match.get("event_id") or fi)
 
-        bet365_event_payload = call_betsapi(path="/v1/bet365/event", params={"FI": fi, "stats": 1})
+        # Use event_id for event APIs.
+        event_view_payload = call_betsapi(path="/v1/event/view", params={"event_id": event_id})
+        event_odds_summary_payload = call_betsapi(path="/v2/event/odds/summary", params={"event_id": event_id})
         event_odds_payload = call_betsapi(path="/v2/event/odds", params={"event_id": event_id})
 
+        # Use FI / bet365_id for Bet365 live markets.
+        bet365_event_payload = call_betsapi(path="/v1/bet365/event", params={"FI": fi, "stats": 1})
+
         base_path = f"betsapi/inplay_snapshot/sport_id={sport_id}/event_id={event_id}/fi={fi}/snapshot_id={snapshot_id}"
+
+        lineage = build_live_snapshot_lineage(
+            sport_id=sport_id,
+            event_id=event_id,
+            fi=fi,
+            base_path=base_path,
+            payloads={
+                "events_inplay": events_inplay_payload,
+                "event_view": event_view_payload,
+                "event_odds_summary": event_odds_summary_payload,
+                "event_odds": event_odds_payload,
+                "bet365_event": bet365_event_payload,
+            },
+        )
+
         manifest = {
             "snapshot_id": snapshot_id,
             "snapshot_time_utc": snapshot_time.isoformat(),
@@ -288,23 +434,47 @@ def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
             "fi": fi,
             "match_from_filter": match,
             "files": {
-                "events_inplay": f"bronze/{base_path}/events_inplay.json" if events_inplay_payload else None,
+                # New explicit names.
+                "events_inplay_full": f"bronze/{base_path}/events_inplay_full.json",
+                "event_view_by_event_id": f"bronze/{base_path}/event_view_by_event_id.json",
+                "event_odds_summary_by_event_id": f"bronze/{base_path}/event_odds_summary_by_event_id.json",
+                "event_odds_by_event_id": f"bronze/{base_path}/event_odds_by_event_id.json",
+                "bet365_event_by_fi": f"bronze/{base_path}/bet365_event_by_fi.json",
+                "lineage": f"bronze/{base_path}/lineage.json",
+
+                # Legacy names kept so older silver code/pages do not break.
+                "events_inplay": f"bronze/{base_path}/events_inplay.json",
                 "bet365_event": f"bronze/{base_path}/bet365_event.json",
                 "event_odds": f"bronze/{base_path}/event_odds.json",
             },
+            "api_lineage": lineage,
             "status": {
-                "events_inplay_success": events_inplay_payload["response"]["success"] if events_inplay_payload else None,
-                "bet365_event_success": bet365_event_payload["response"]["success"],
-                "bet365_event_error": bet365_event_payload["response"].get("error"),
-                "bet365_event_error_detail": bet365_event_payload["response"].get("error_detail"),
+                "events_inplay_success": events_inplay_payload["response"]["success"],
+                "event_view_success": event_view_payload["response"]["success"],
+                "event_view_error": event_view_payload["response"].get("error"),
+                "event_view_error_detail": event_view_payload["response"].get("error_detail"),
+                "event_odds_summary_success": event_odds_summary_payload["response"]["success"],
+                "event_odds_summary_error": event_odds_summary_payload["response"].get("error"),
+                "event_odds_summary_error_detail": event_odds_summary_payload["response"].get("error_detail"),
                 "event_odds_success": event_odds_payload["response"]["success"],
                 "event_odds_error": event_odds_payload["response"].get("error"),
                 "event_odds_error_detail": event_odds_payload["response"].get("error_detail"),
+                "bet365_event_success": bet365_event_payload["response"]["success"],
+                "bet365_event_error": bet365_event_payload["response"].get("error"),
+                "bet365_event_error_detail": bet365_event_payload["response"].get("error_detail"),
             },
         }
 
-        if events_inplay_payload:
-            upload_json(container, f"{base_path}/events_inplay.json", events_inplay_payload)
+        # New explicit raw files.
+        upload_json(container, f"{base_path}/events_inplay_full.json", events_inplay_payload)
+        upload_json(container, f"{base_path}/event_view_by_event_id.json", event_view_payload)
+        upload_json(container, f"{base_path}/event_odds_summary_by_event_id.json", event_odds_summary_payload)
+        upload_json(container, f"{base_path}/event_odds_by_event_id.json", event_odds_payload)
+        upload_json(container, f"{base_path}/bet365_event_by_fi.json", bet365_event_payload)
+        upload_json(container, f"{base_path}/lineage.json", lineage)
+
+        # Legacy copies for backward compatibility.
+        upload_json(container, f"{base_path}/events_inplay.json", events_inplay_payload)
         upload_json(container, f"{base_path}/bet365_event.json", bet365_event_payload)
         upload_json(container, f"{base_path}/event_odds.json", event_odds_payload)
         upload_json(container, f"{base_path}/manifest.json", manifest)
@@ -314,11 +484,13 @@ def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
             "snapshot_id": snapshot_id,
             "event_id": event_id,
             "fi": fi,
-            "bet365_event_success": bet365_event_payload["response"]["success"],
+            "events_inplay_success": events_inplay_payload["response"]["success"],
+            "event_view_success": event_view_payload["response"]["success"],
+            "event_odds_summary_success": event_odds_summary_payload["response"]["success"],
             "event_odds_success": event_odds_payload["response"]["success"],
+            "bet365_event_success": bet365_event_payload["response"]["success"],
             "base_path": f"bronze/{base_path}",
         }))
-
 
 # -----------------------------
 # Silver parsing helpers
@@ -621,7 +793,15 @@ def extract_bet365_current_markets(
 
     return rows
 
-def parse_silver_snapshot(manifest: Dict[str, Any], events_inplay_payload: Dict[str, Any], bet365_event_payload: Dict[str, Any], event_odds_payload: Dict[str, Any]) -> Dict[str, Any]:
+def parse_silver_snapshot(
+    manifest: Dict[str, Any],
+    events_inplay_payload: Dict[str, Any],
+    bet365_event_payload: Dict[str, Any],
+    event_odds_payload: Dict[str, Any],
+    event_view_payload: Optional[Dict[str, Any]] = None,
+    event_odds_summary_payload: Optional[Dict[str, Any]] = None,
+    lineage_payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     snapshot_id = manifest["snapshot_id"]
     snapshot_time_utc = manifest["snapshot_time_utc"]
     event_id = str(manifest["event_id"])
@@ -632,10 +812,14 @@ def parse_silver_snapshot(manifest: Dict[str, Any], events_inplay_payload: Dict[
     ev = next((r for r in records if r.get("type") == "EV"), {})
     matching_event = find_matching_event(events_inplay_payload, event_id, fi) or {}
 
+    # /v1/event/view can also contain useful match/team/league details.
+    event_view_results = extract_results(event_view_payload or {})
+    event_view_item = event_view_results[0] if event_view_results and isinstance(event_view_results[0], dict) else {}
+
     match_from_filter = manifest.get("match_from_filter", {})
-    home = matching_event.get("home") or match_from_filter.get("home") or {}
-    away = matching_event.get("away") or match_from_filter.get("away") or {}
-    league = matching_event.get("league") or match_from_filter.get("league") or {}
+    home = matching_event.get("home") or event_view_item.get("home") or match_from_filter.get("home") or {}
+    away = matching_event.get("away") or event_view_item.get("away") or match_from_filter.get("away") or {}
+    league = matching_event.get("league") or event_view_item.get("league") or match_from_filter.get("league") or {}
 
     match_snapshot = {
         "snapshot_id": snapshot_id,
@@ -651,12 +835,16 @@ def parse_silver_snapshot(manifest: Dict[str, Any], events_inplay_payload: Dict[
         "away_team_name": away.get("name"),
         "match_name": ev.get("NA"),
         "time_status": matching_event.get("time_status") or match_from_filter.get("time_status"),
-        "score_summary_events": matching_event.get("ss") or match_from_filter.get("raw_item", {}).get("ss"),
+        "score_summary_events": matching_event.get("ss") or event_view_item.get("ss") or match_from_filter.get("raw_item", {}).get("ss"),
         "score_summary_bet365": ev.get("SS"),
         "bet365_event_success": manifest.get("status", {}).get("bet365_event_success"),
         "events_inplay_success": manifest.get("status", {}).get("events_inplay_success"),
         "event_odds_success": manifest.get("status", {}).get("event_odds_success"),
+        "event_view_success": manifest.get("status", {}).get("event_view_success"),
+        "event_odds_summary_success": manifest.get("status", {}).get("event_odds_summary_success"),
+        "api_lineage": lineage_payload or manifest.get("api_lineage"),
         "source_bronze_manifest_path": f"bronze/betsapi/inplay_snapshot/sport_id={sport_id}/event_id={event_id}/fi={fi}/snapshot_id={snapshot_id}/manifest.json",
+        "source_bronze_lineage_path": f"bronze/betsapi/inplay_snapshot/sport_id={sport_id}/event_id={event_id}/fi={fi}/snapshot_id={snapshot_id}/lineage.json",
     }
 
     team_scores: List[Dict[str, Any]] = []
@@ -730,6 +918,8 @@ def write_silver_outputs(silver_container, parsed: Dict[str, Any]) -> None:
     upload_json(silver_container, f"{base}/player_entries.json", {"rows": parsed["player_entries"]}, overwrite=True)
     upload_json(silver_container, f"{base}/odds_records.json", {"rows": parsed["odds_records"]}, overwrite=True)
     upload_json(silver_container, f"{base}/current_markets.json", {"rows": parsed.get("current_markets", [])}, overwrite=True)
+    if match.get("api_lineage"):
+        upload_json(silver_container, f"{base}/lineage.json", match["api_lineage"], overwrite=True)
 
     marker_path = f"cricket/control/processed_snapshots/{match['snapshot_id']}_{match['event_id']}_{match['fi']}.json"
     marker = {
@@ -742,6 +932,7 @@ def write_silver_outputs(silver_container, parsed: Dict[str, Any]) -> None:
         "player_entry_count": len(parsed["player_entries"]),
         "odds_record_count": len(parsed["odds_records"]),
         "current_market_selection_count": len(parsed.get("current_markets", [])),
+        "lineage_path": f"silver/{base}/lineage.json" if match.get("api_lineage") else None,
     }
     upload_json(silver_container, marker_path, marker, overwrite=True)
 
@@ -766,10 +957,30 @@ def parse_cricket_bronze_to_silver(timer: func.TimerRequest) -> None:
                 skipped += 1
                 continue
             base_path = manifest_path.removesuffix("/manifest.json")
-            events_inplay_payload = download_required_json(bronze, f"{base_path}/events_inplay.json")
-            bet365_event_payload = download_required_json(bronze, f"{base_path}/bet365_event.json")
-            event_odds_payload = download_required_json(bronze, f"{base_path}/event_odds.json")
-            parsed = parse_silver_snapshot(manifest, events_inplay_payload, bet365_event_payload, event_odds_payload)
+            events_inplay_payload = (
+                download_json(bronze, f"{base_path}/events_inplay_full.json")
+                or download_required_json(bronze, f"{base_path}/events_inplay.json")
+            )
+            bet365_event_payload = (
+                download_json(bronze, f"{base_path}/bet365_event_by_fi.json")
+                or download_required_json(bronze, f"{base_path}/bet365_event.json")
+            )
+            event_odds_payload = (
+                download_json(bronze, f"{base_path}/event_odds_by_event_id.json")
+                or download_required_json(bronze, f"{base_path}/event_odds.json")
+            )
+            event_view_payload = download_json(bronze, f"{base_path}/event_view_by_event_id.json")
+            event_odds_summary_payload = download_json(bronze, f"{base_path}/event_odds_summary_by_event_id.json")
+            lineage_payload = download_json(bronze, f"{base_path}/lineage.json")
+            parsed = parse_silver_snapshot(
+                manifest,
+                events_inplay_payload,
+                bet365_event_payload,
+                event_odds_payload,
+                event_view_payload=event_view_payload,
+                event_odds_summary_payload=event_odds_summary_payload,
+                lineage_payload=lineage_payload,
+            )
             write_silver_outputs(silver, parsed)
             processed += 1
         except Exception:
@@ -850,8 +1061,11 @@ def build_match_page(
         },
         "source": {
             "silver_match_snapshot_path": match_snapshot.get("source_silver_match_snapshot_path"),
+            "silver_lineage_path": match_snapshot.get("source_silver_lineage_path"),
             "bronze_manifest_path": match_snapshot.get("source_bronze_manifest_path"),
+            "bronze_lineage_path": match_snapshot.get("source_bronze_lineage_path"),
         },
+        "data_lineage": match_snapshot.get("api_lineage"),
     }
 
 
@@ -866,6 +1080,9 @@ def write_gold_match_page(gold_container, match_page: Dict[str, Any]) -> None:
     latest_base = f"cricket/matches/latest/event_id={event_id}"
     upload_json(gold_container, f"{history_base}/match_page.json", match_page, overwrite=True)
     upload_json(gold_container, f"{latest_base}/match_page.json", match_page, overwrite=True)
+    if match_page.get("data_lineage"):
+        upload_json(gold_container, f"{history_base}/lineage.json", match_page["data_lineage"], overwrite=True)
+        upload_json(gold_container, f"{latest_base}/lineage.json", match_page["data_lineage"], overwrite=True)
 
 
 def build_match_index_row(page: Dict[str, Any]) -> Dict[str, Any]:
@@ -900,15 +1117,29 @@ def write_gold_index(gold_container, pages: List[Dict[str, Any]]) -> None:
 
     This merges new pages into the existing latest index, so HTTP routes do not
     scan the full cricket/matches/history folder and should not timeout.
+    Entries whose last snapshot is older than LIVE_MATCH_STALE_HOURS are pruned
+    so ended matches do not linger in the live index.
     """
+    stale_hours = get_int_env("LIVE_MATCH_STALE_HOURS", 4)
+    cutoff = utc_now() - timedelta(hours=stale_hours)
+
     existing_index = download_json(gold_container, "cricket/matches/latest/index.json") or {}
     latest_by_event: Dict[str, Dict[str, Any]] = {}
 
     if isinstance(existing_index, dict):
         for row in existing_index.get("matches", []):
             event_id = str(row.get("event_id") or "")
-            if event_id:
-                latest_by_event[event_id] = row
+            if not event_id:
+                continue
+            snapshot_time = row.get("snapshot_time_utc")
+            if snapshot_time:
+                try:
+                    dt = datetime.fromisoformat(snapshot_time.replace("Z", "+00:00"))
+                    if dt < cutoff:
+                        continue  # prune: match ended or no longer live
+                except Exception:
+                    pass
+            latest_by_event[event_id] = row
 
     for page in pages:
         row = build_match_index_row(page)
@@ -988,7 +1219,20 @@ def build_cricket_gold_match_pages(timer: func.TimerRequest) -> None:
     max_events = get_int_env("MAX_GOLD_EVENTS_PER_RUN", 100)
     silver = get_named_container_client("silver")
     gold = get_named_container_client("gold")
-    match_snapshot_paths = list_latest_silver_match_snapshots(silver, max_events)
+
+    # Fetch a larger pool (newest-first) then deduplicate to the single newest
+    # snapshot per event. Without deduplication the loop overwrites gold for
+    # each snapshot of the same event and ends up writing the *oldest* one.
+    all_paths = list_latest_silver_match_snapshots(silver, max_events * 20)
+    seen_events: Dict[str, str] = {}
+    for path in all_paths:
+        m = re.search(r"/event_id=([^/]+)/", path)
+        if m:
+            eid = m.group(1)
+            if eid not in seen_events:
+                seen_events[eid] = path  # list is newest-first; first hit is newest
+    match_snapshot_paths = list(seen_events.values())[:max_events]
+
     built_pages = []
     processed = failed = 0
 
@@ -997,6 +1241,11 @@ def build_cricket_gold_match_pages(timer: func.TimerRequest) -> None:
             base_path = base_path_from_match_snapshot_path(match_snapshot_path)
             match_snapshot = download_required_json(silver, f"{base_path}/match_snapshot.json")
             match_snapshot["source_silver_match_snapshot_path"] = f"silver/{base_path}/match_snapshot.json"
+            match_snapshot["source_silver_lineage_path"] = f"silver/{base_path}/lineage.json"
+            if not match_snapshot.get("api_lineage"):
+                lineage_from_silver = download_json(silver, f"{base_path}/lineage.json")
+                if lineage_from_silver:
+                    match_snapshot["api_lineage"] = lineage_from_silver
             team_scores = download_required_json(silver, f"{base_path}/team_scores.json")
             player_entries = download_required_json(silver, f"{base_path}/player_entries.json")
             odds_records = download_required_json(silver, f"{base_path}/odds_records.json")
@@ -1551,26 +1800,72 @@ def get_prematch_matches_html(req: func.HttpRequest) -> func.HttpResponse:
     try:
         gold = get_named_container_client("gold")
         index = download_required_json(gold, "cricket/prematch/latest/index.json")
+        matches = index.get("matches", []) if isinstance(index, dict) else []
+        matches_sorted = sorted(matches, key=lambda m: (m.get("league_name") or "", m.get("match_name") or ""))
+        league_names = sorted({str(m.get("league_name") or "Unknown") for m in matches})
+        league_options = '<option value="ALL">All Leagues</option>'
+        for ln in league_names:
+            league_options += f'<option value="{escape(ln)}">{escape(ln)}</option>'
         rows = ""
-        for m in index.get("matches", []):
+        current_league = None
+        for m in matches_sorted:
+            league_name = str(m.get("league_name") or "Unknown")
             event_id = escape(str(m.get("event_id") or "-"))
+            league_esc = escape(league_name)
+            if league_name != current_league:
+                current_league = league_name
+                rows += f'<tr class="league-header" data-league="{league_esc}"><td colspan="8">{league_esc}</td></tr>'
             rows += f"""
-            <tr>
+            <tr data-league="{league_esc}">
                 <td>{event_id}</td>
                 <td>{escape(str(m.get("fi") or "-"))}</td>
                 <td>{escape(str(m.get("match_name") or "-"))}</td>
-                <td>{escape(str(m.get("league_name") or "-"))}</td>
+                <td>{league_esc}</td>
                 <td>{escape(str(m.get("event_time_utc") or "-"))}</td>
                 <td>{escape(str(m.get("prematch_market_count") or 0))}</td>
                 <td>{escape(str(m.get("prematch_selection_count") or 0))}</td>
                 <td><a href="/api/prematch/{event_id}/view">Open</a></td>
             </tr>
             """
-        html = build_simple_table_page(
-            f"Upcoming Prematch Matches ({index.get('match_count', 0)})",
-            ["Event ID", "Bet365 FI", "Match", "League", "Start Time", "Markets", "Selections", "Page"],
-            rows,
-        )
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Upcoming Prematch Matches</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
+                .hint {{ color: #666; margin-bottom: 16px; }}
+                .filter-bar {{ margin-bottom: 16px; display: flex; align-items: center; gap: 12px; }}
+                select {{ padding: 8px 12px; font-size: 14px; border: 1px solid #ccc; border-radius: 6px; }}
+                table {{ width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 8px #ddd; }}
+                th, td {{ padding: 10px; border-bottom: 1px solid #ddd; text-align: left; font-size: 14px; }}
+                th {{ background: #222; color: white; position: sticky; top: 0; }}
+                tr.league-header td {{ background: #e8f0fe; color: #1a3a6b; font-weight: bold; font-size: 13px; padding: 7px 10px; }}
+                a {{ color: #0066cc; font-weight: bold; text-decoration: none; }}
+            </style>
+        </head>
+        <body>
+            <h1>Upcoming Prematch Matches ({index.get('match_count', len(matches))})</h1>
+            <p class="hint">This page reads a small pre-built gold index file, so it should load quickly.</p>
+            <div class="filter-bar">
+                <label><b>League:</b></label>
+                <select id="leagueFilter" onchange="filterLeague()">{league_options}</select>
+            </div>
+            <table>
+                <thead><tr><th>Event ID</th><th>Bet365 FI</th><th>Match</th><th>League</th><th>Start Time</th><th>Markets</th><th>Selections</th><th>Page</th></tr></thead>
+                <tbody>{rows}</tbody>
+            </table>
+            <script>
+                function filterLeague() {{
+                    const sel = document.getElementById("leagueFilter").value;
+                    document.querySelectorAll("tr[data-league]").forEach(r => {{
+                        r.style.display = sel === "ALL" || r.dataset.league === sel ? "" : "none";
+                    }});
+                }}
+            </script>
+        </body>
+        </html>
+        """
         return func.HttpResponse(html, status_code=200, mimetype="text/html")
     except Exception as ex:
         logging.exception("Failed to render prematch matches page")
@@ -1810,24 +2105,70 @@ def get_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
     try:
         gold = get_named_container_client("gold")
         index = download_required_json(gold, "cricket/ended/latest/index.json")
+        matches = index.get("matches", []) if isinstance(index, dict) else []
+        matches_sorted = sorted(matches, key=lambda m: (m.get("league_name") or "", m.get("match_name") or ""))
+        league_names = sorted({str(m.get("league_name") or "Unknown") for m in matches})
+        league_options = '<option value="ALL">All Leagues</option>'
+        for ln in league_names:
+            league_options += f'<option value="{escape(ln)}">{escape(ln)}</option>'
         rows = ""
-        for m in index.get("matches", []):
+        current_league = None
+        for m in matches_sorted:
+            league_name = str(m.get("league_name") or "Unknown")
             event_id = escape(str(m.get("event_id") or "-"))
+            league_esc = escape(league_name)
+            if league_name != current_league:
+                current_league = league_name
+                rows += f'<tr class="league-header" data-league="{league_esc}"><td colspan="6">{league_esc}</td></tr>'
             rows += f"""
-            <tr>
+            <tr data-league="{league_esc}">
                 <td>{event_id}</td>
                 <td>{escape(str(m.get("fi") or "-"))}</td>
                 <td>{escape(str(m.get("match_name") or "-"))}</td>
-                <td>{escape(str(m.get("league_name") or "-"))}</td>
+                <td>{league_esc}</td>
                 <td>{escape(str(m.get("score") or "-"))}</td>
                 <td>{escape(str(m.get("event_time_utc") or "-"))}</td>
             </tr>
             """
-        html = build_simple_table_page(
-            f"Ended Cricket Matches ({index.get('ended_match_count', 0)})",
-            ["Event ID", "Bet365 FI", "Match", "League", "Final Score", "Start Time"],
-            rows,
-        )
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Ended Cricket Matches</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
+                .hint {{ color: #666; margin-bottom: 16px; }}
+                .filter-bar {{ margin-bottom: 16px; display: flex; align-items: center; gap: 12px; }}
+                select {{ padding: 8px 12px; font-size: 14px; border: 1px solid #ccc; border-radius: 6px; }}
+                table {{ width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 8px #ddd; }}
+                th, td {{ padding: 10px; border-bottom: 1px solid #ddd; text-align: left; font-size: 14px; }}
+                th {{ background: #222; color: white; position: sticky; top: 0; }}
+                tr.league-header td {{ background: #e8f0fe; color: #1a3a6b; font-weight: bold; font-size: 13px; padding: 7px 10px; }}
+                a {{ color: #0066cc; font-weight: bold; text-decoration: none; }}
+            </style>
+        </head>
+        <body>
+            <h1>Ended Cricket Matches ({index.get('ended_match_count', len(matches))})</h1>
+            <p class="hint">This page reads a small pre-built gold index file, so it should load quickly.</p>
+            <div class="filter-bar">
+                <label><b>League:</b></label>
+                <select id="leagueFilter" onchange="filterLeague()">{league_options}</select>
+            </div>
+            <table>
+                <thead><tr><th>Event ID</th><th>Bet365 FI</th><th>Match</th><th>League</th><th>Final Score</th><th>Start Time</th></tr></thead>
+                <tbody>{rows}</tbody>
+            </table>
+            <script>
+                function filterLeague() {{
+                    const sel = document.getElementById("leagueFilter").value;
+                    document.querySelectorAll("tr[data-league]").forEach(r => {{
+                        r.style.display = sel === "ALL" || r.dataset.league === sel ? "" : "none";
+                    }});
+                }}
+            </script>
+        </body>
+        </html>
+        """
         return func.HttpResponse(html, status_code=200, mimetype="text/html")
     except Exception as ex:
         logging.exception("Failed to render ended matches")
@@ -1862,23 +2203,33 @@ def get_matches_list_html(req: func.HttpRequest) -> func.HttpResponse:
         index = download_required_json(gold, "cricket/matches/latest/index.json")
         matches = index.get("matches", []) if isinstance(index, dict) else []
 
+        matches_sorted = sorted(matches, key=lambda m: (m.get("league_name") or "", m.get("match_name") or ""))
+        league_names = sorted({str(m.get("league_name") or "Unknown") for m in matches})
+        league_options = '<option value="ALL">All Leagues</option>'
+        for ln in league_names:
+            league_options += f'<option value="{escape(ln)}">{escape(ln)}</option>'
         rows = ""
-        for m in matches:
+        current_league = None
+        for m in matches_sorted:
+            league_name = str(m.get("league_name") or "Unknown")
             event_id = escape(str(m.get("event_id") or "-"))
             fi = escape(str(m.get("fi") or "-"))
             match_name = escape(str(m.get("match_name") or "-"))
-            league_name = escape(str(m.get("league_name") or "-"))
             league_id = escape(str(m.get("league_id") or "unknown"))
+            league_esc = escape(league_name)
             score = escape(str(m.get("score_summary") or "-"))
             markets = escape(str(m.get("current_market_count") or 0))
             selections = escape(str(m.get("current_market_selection_count") or 0))
             snapshot_time = escape(str(m.get("snapshot_time_utc") or "-"))
+            if league_name != current_league:
+                current_league = league_name
+                rows += f'<tr class="league-header" data-league="{league_esc}"><td colspan="9">{league_esc}</td></tr>'
             rows += f"""
-            <tr>
+            <tr data-league="{league_esc}">
                 <td>{event_id}</td>
                 <td>{fi}</td>
                 <td>{match_name}</td>
-                <td><a href="/api/leagues/{league_id}/matches/view">{league_name}</a></td>
+                <td><a href="/api/leagues/{league_id}/matches/view">{league_esc}</a></td>
                 <td>{score}</td>
                 <td>{markets}</td>
                 <td>{selections}</td>
@@ -1891,19 +2242,27 @@ def get_matches_list_html(req: func.HttpRequest) -> func.HttpResponse:
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Cricket Matches</title>
+            <title>Live Cricket Matches</title>
             <style>
                 body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
                 .nav {{ margin-bottom: 16px; }}
+                .filter-bar {{ margin-bottom: 16px; display: flex; align-items: center; gap: 12px; }}
+                select {{ padding: 8px 12px; font-size: 14px; border: 1px solid #ccc; border-radius: 6px; }}
                 table {{ width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 8px #ddd; }}
                 th, td {{ padding: 10px; border-bottom: 1px solid #ddd; text-align: left; font-size: 14px; }}
                 th {{ background: #222; color: white; }}
+                tr.league-header td {{ background: #e8f0fe; color: #1a3a6b; font-weight: bold; font-size: 13px; padding: 7px 10px; }}
                 a {{ color: #0066cc; font-weight: bold; text-decoration: none; }}
+                .live-badge {{ display: inline-block; background: #d00; color: white; font-size: 13px; font-weight: bold; padding: 3px 10px; border-radius: 999px; vertical-align: middle; margin-left: 10px; letter-spacing: 0.5px; }}
             </style>
         </head>
         <body>
-            <h1>Cricket Matches ({len(matches)})</h1>
+            <h1>Live Cricket Matches ({len(matches)}) <span class="live-badge">LIVE</span></h1>
             <div class="nav"><a href="/api/leagues/view">View leagues</a> | <a href="/api/matches">JSON</a></div>
+            <div class="filter-bar">
+                <label><b>League:</b></label>
+                <select id="leagueFilter" onchange="filterLeague()">{league_options}</select>
+            </div>
             <table>
                 <thead>
                     <tr>
@@ -1913,6 +2272,14 @@ def get_matches_list_html(req: func.HttpRequest) -> func.HttpResponse:
                 </thead>
                 <tbody>{rows}</tbody>
             </table>
+            <script>
+                function filterLeague() {{
+                    const sel = document.getElementById("leagueFilter").value;
+                    document.querySelectorAll("tr[data-league]").forEach(r => {{
+                        r.style.display = sel === "ALL" || r.dataset.league === sel ? "" : "none";
+                    }});
+                }}
+            </script>
         </body>
         </html>
         """
@@ -2096,6 +2463,7 @@ def get_match_page_html(req: func.HttpRequest) -> func.HttpResponse:
         <body>
             <h1>{match_name}</h1>
             <div class="score">Score: {score_text}</div>
+            <p><a href="/api/matches/{event_id}/lineage/view">View data lineage</a></p>
 
             <div class="cards">
                 <div class="card"><div class="label">Current Markets</div><div class="value">{current_markets.get('market_count', 0)}</div></div>
@@ -2140,6 +2508,90 @@ def get_match_page_html(req: func.HttpRequest) -> func.HttpResponse:
         logging.exception("Failed to render match HTML")
         return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
     
+@app.route(route="matches/{event_id}/lineage", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_match_lineage_json(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        event_id = req.route_params.get("event_id")
+        gold = get_named_container_client("gold")
+        lineage = download_json(gold, f"cricket/matches/latest/event_id={event_id}/lineage.json")
+        if not lineage:
+            page = download_required_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
+            lineage = page.get("data_lineage") or {}
+        return func.HttpResponse(json.dumps(lineage, indent=2, ensure_ascii=False), status_code=200, mimetype="application/json")
+    except Exception as ex:
+        logging.exception("Failed to return match lineage")
+        return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
+
+
+@app.route(route="matches/{event_id}/lineage/view", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_match_lineage_html(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        event_id = req.route_params.get("event_id")
+        gold = get_named_container_client("gold")
+        lineage = download_json(gold, f"cricket/matches/latest/event_id={event_id}/lineage.json")
+        if not lineage:
+            page = download_required_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
+            lineage = page.get("data_lineage") or {}
+
+        id_mapping = lineage.get("id_mapping", {}) if isinstance(lineage, dict) else {}
+        rows = ""
+        for call in lineage.get("api_calls", []) if isinstance(lineage, dict) else []:
+            rows += f"""
+            <tr>
+                <td>{escape(str(call.get('api_name') or '-'))}</td>
+                <td>{escape(str(call.get('purpose') or '-'))}</td>
+                <td><pre>{escape(json.dumps(call.get('id_used') or {}, ensure_ascii=False))}</pre></td>
+                <td>{escape(str(call.get('success')))}</td>
+                <td>{escape(str(call.get('http_status_code') or '-'))}</td>
+                <td>{escape(str(call.get('result_count') if call.get('result_count') is not None else '-'))}</td>
+                <td>{escape(str(call.get('elapsed_ms') or '-'))}</td>
+                <td>{escape(str(call.get('bronze_path') or '-'))}</td>
+            </tr>
+            """
+
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Data Lineage - {escape(str(event_id))}</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
+                .card {{ background: white; padding: 18px; border-radius: 10px; box-shadow: 0 2px 8px #ddd; margin-bottom: 20px; }}
+                table {{ width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 8px #ddd; }}
+                th, td {{ padding: 10px; border-bottom: 1px solid #ddd; text-align: left; vertical-align: top; font-size: 14px; }}
+                th {{ background: #222; color: white; position: sticky; top: 0; }}
+                pre {{ white-space: pre-wrap; margin: 0; }}
+                a {{ color: #0066cc; font-weight: bold; text-decoration: none; }}
+            </style>
+        </head>
+        <body>
+            <p><a href="/api/matches/{escape(str(event_id))}/view">← Back to match</a> | <a href="/api/matches/{escape(str(event_id))}/lineage">JSON</a></p>
+            <div class="card">
+                <h1>Data Lineage</h1>
+                <p><b>Event ID:</b> {escape(str(lineage.get('event_id') or event_id))}</p>
+                <p><b>Bet365 FI:</b> {escape(str(lineage.get('fi') or '-'))}</p>
+                <p><b>Bronze base path:</b> {escape(str(lineage.get('bronze_base_path') or '-'))}</p>
+                <p><b>ID mapping:</b></p>
+                <pre>{escape(json.dumps(id_mapping, indent=2, ensure_ascii=False))}</pre>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>API</th><th>Purpose</th><th>ID Used</th><th>Success</th><th>HTTP</th>
+                        <th>Result Count</th><th>Elapsed ms</th><th>Bronze Raw File</th>
+                    </tr>
+                </thead>
+                <tbody>{rows}</tbody>
+            </table>
+        </body>
+        </html>
+        """
+        return func.HttpResponse(html, status_code=200, mimetype="text/html")
+    except Exception as ex:
+        logging.exception("Failed to render match lineage")
+        return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
+
+
 @app.route(route="run-prematch-now", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def run_prematch_now(req: func.HttpRequest) -> func.HttpResponse:
     try:
@@ -2150,3 +2602,68 @@ def run_prematch_now(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as ex:
         logging.exception("Failed to run prematch pipeline manually")
         return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
+
+@app.route(route="home", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_home(req: func.HttpRequest) -> func.HttpResponse:
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Cricket Data Platform</title>
+        <style>
+            body { font-family: Arial; background:#f7f7f7; padding:40px; }
+            h1 { margin-bottom:10px; }
+            .card {
+                background:white;
+                padding:20px;
+                margin:15px 0;
+                border-radius:10px;
+                box-shadow:0 2px 8px #ddd;
+            }
+            a {
+                font-size:18px;
+                font-weight:bold;
+                color:#0066cc;
+                text-decoration:none;
+            }
+            p { margin:8px 0 0; color:#555; }
+        </style>
+    </head>
+    <body>
+
+        <h1>🏏 Cricket Analytics Platform</h1>
+        <p>Browse live, upcoming and historical betting data</p>
+
+        <div class="card">
+            <a href="/api/matches/view">Live Matches</a>
+            <p>Real-time matches with live odds and Bet365 markets</p>
+        </div>
+
+        <div class="card">
+            <a href="/api/prematch/view">Upcoming Matches</a>
+            <p>Prematch odds and markets before the game starts</p>
+        </div>
+
+        <div class="card">
+            <a href="/api/leagues/view">Leagues</a>
+            <p>Browse matches grouped by leagues</p>
+        </div>
+
+        <div class="card">
+            <a href="/api/prematch/leagues/view">Prematch Leagues</a>
+            <p>Upcoming matches grouped by leagues</p>
+        </div>
+
+        <div class="card">
+            <a href="/api/ended/view">Ended Matches</a>
+            <p>Recently finished matches with final results</p>
+        </div>
+
+    </body>
+    </html>
+    """
+    return func.HttpResponse(html, mimetype="text/html")
+
+@app.route(route="", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def root(req: func.HttpRequest) -> func.HttpResponse:
+    return get_home(req)
