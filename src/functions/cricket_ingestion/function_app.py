@@ -199,6 +199,9 @@ def summarize_inplay_items(items: List[Dict[str, Any]], max_live_matches: int) -
         event_id = get_event_id_from_inplay_item(item)
         if not fi:
             continue
+        # time_status=1 means in-play; skip ended (3) and not-started (0) matches
+        if str(item.get("time_status", "1")) != "1":
+            continue
         live.append({
             "fi": fi,
             "event_id": event_id or fi,
@@ -408,7 +411,7 @@ def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
         event_odds_payload = call_betsapi(path="/v2/event/odds", params={"event_id": event_id})
 
         # Use FI / bet365_id for Bet365 live markets.
-        bet365_event_payload = call_betsapi(path="/v1/bet365/event", params={"FI": fi, "stats": 1})
+        bet365_event_payload = call_betsapi(path="/v1/bet365/event", params={"FI": fi})
 
         base_path = f"betsapi/inplay_snapshot/sport_id={sport_id}/event_id={event_id}/fi={fi}/snapshot_id={snapshot_id}"
 
@@ -479,18 +482,6 @@ def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
         upload_json(container, f"{base_path}/event_odds.json", event_odds_payload)
         upload_json(container, f"{base_path}/manifest.json", manifest)
 
-        logging.info(json.dumps({
-            "event": "capture_cricket_inplay_snapshot_completed",
-            "snapshot_id": snapshot_id,
-            "event_id": event_id,
-            "fi": fi,
-            "events_inplay_success": events_inplay_payload["response"]["success"],
-            "event_view_success": event_view_payload["response"]["success"],
-            "event_odds_summary_success": event_odds_summary_payload["response"]["success"],
-            "event_odds_success": event_odds_payload["response"]["success"],
-            "bet365_event_success": bet365_event_payload["response"]["success"],
-            "base_path": f"bronze/{base_path}",
-        }))
 
 # -----------------------------
 # Silver parsing helpers
@@ -523,7 +514,8 @@ def parse_runs_wickets(raw: Optional[str]) -> Dict[str, Optional[int]]:
 
 
 def extract_bet365_records(bet365_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    body = bet365_payload.get("response", {}).get("body", {})
+    # Use `or {}` so an explicit None body (failed API call) is treated as empty.
+    body = bet365_payload.get("response", {}).get("body") or {}
     results = body.get("results", [])
     if results and isinstance(results[0], list):
         return results[0]
@@ -917,7 +909,17 @@ def write_silver_outputs(silver_container, parsed: Dict[str, Any]) -> None:
     upload_json(silver_container, f"{base}/team_scores.json", {"rows": parsed["team_scores"]}, overwrite=True)
     upload_json(silver_container, f"{base}/player_entries.json", {"rows": parsed["player_entries"]}, overwrite=True)
     upload_json(silver_container, f"{base}/odds_records.json", {"rows": parsed["odds_records"]}, overwrite=True)
-    upload_json(silver_container, f"{base}/current_markets.json", {"rows": parsed.get("current_markets", [])}, overwrite=True)
+    current_market_rows = parsed.get("current_markets", [])
+    upload_json(silver_container, f"{base}/current_markets.json", {"rows": current_market_rows}, overwrite=True)
+    # Keep a stable per-event file with the last non-empty market snapshot so the
+    # gold page never shows 0 markets just because Bet365 suspended prices momentarily.
+    if current_market_rows:
+        control_path = f"cricket/inplay/control/event_id={match['event_id']}/last_known_markets.json"
+        upload_json(silver_container, control_path, {
+            "rows": current_market_rows,
+            "snapshot_id": match["snapshot_id"],
+            "snapshot_time_utc": match["snapshot_time_utc"],
+        }, overwrite=True)
     if match.get("api_lineage"):
         upload_json(silver_container, f"{base}/lineage.json", match["api_lineage"], overwrite=True)
 
@@ -1106,6 +1108,7 @@ def build_match_index_row(page: Dict[str, Any]) -> Dict[str, Any]:
         "away_team_name": away_name,
         "score_summary": score.get("summary_from_events") or score.get("summary_from_bet365"),
         "odds_count": (page.get("odds") or {}).get("count"),
+        "time_status": header.get("time_status"),
         "current_market_count": current_markets.get("market_count"),
         "current_market_selection_count": current_markets.get("selection_count"),
         "latest_gold_path": f"gold/cricket/matches/latest/event_id={event_id}/match_page.json",
@@ -1131,12 +1134,15 @@ def write_gold_index(gold_container, pages: List[Dict[str, Any]]) -> None:
             event_id = str(row.get("event_id") or "")
             if not event_id:
                 continue
+            # Drop ended matches immediately
+            if str(row.get("time_status") or "") == "3":
+                continue
             snapshot_time = row.get("snapshot_time_utc")
             if snapshot_time:
                 try:
                     dt = datetime.fromisoformat(snapshot_time.replace("Z", "+00:00"))
                     if dt < cutoff:
-                        continue  # prune: match ended or no longer live
+                        continue  # prune: stale / no longer live
                 except Exception:
                     pass
             latest_by_event[event_id] = row
@@ -1145,6 +1151,10 @@ def write_gold_index(gold_container, pages: List[Dict[str, Any]]) -> None:
         row = build_match_index_row(page)
         event_id = str(row.get("event_id") or "")
         if not event_id:
+            continue
+        # Never add ended matches to the live index
+        if str(row.get("time_status") or "") == "3":
+            latest_by_event.pop(event_id, None)
             continue
         current = latest_by_event.get(event_id)
         if current is None or (row.get("snapshot_time_utc") or "") >= (current.get("snapshot_time_utc") or ""):
@@ -1253,6 +1263,14 @@ def build_cricket_gold_match_pages(timer: func.TimerRequest) -> None:
                 current_markets = download_required_json(silver, f"{base_path}/current_markets.json")
             except ResourceNotFoundError:
                 current_markets = {"rows": []}
+            # If this snapshot has no markets (Bet365 suspended/ended), use the last
+            # known non-empty markets for this event so the page doesn't go blank.
+            if not current_markets.get("rows"):
+                event_id_for_control = match_snapshot.get("event_id")
+                control_path = f"cricket/inplay/control/event_id={event_id_for_control}/last_known_markets.json"
+                fallback = download_json(silver, control_path)
+                if fallback and fallback.get("rows"):
+                    current_markets = fallback
             match_page = build_match_page(match_snapshot, team_scores, player_entries, odds_records, current_markets)
             write_gold_match_page(gold, match_page)
             built_pages.append(match_page)
@@ -1884,6 +1902,22 @@ def get_prematch_match_json(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
 
 
+@app.route(route="prematch/{event_id}/results", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+def save_prematch_results(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        event_id = req.route_params.get("event_id")
+        gold = get_named_container_client("gold")
+        body = req.get_json()
+        new_results = body.get("results", {})
+        existing = download_json(gold, f"cricket/prematch/results/event_id={event_id}/results.json") or {}
+        existing.update(new_results)
+        upload_json(gold, f"cricket/prematch/results/event_id={event_id}/results.json", existing, overwrite=True)
+        return func.HttpResponse(json.dumps({"ok": True, "saved": len(new_results)}), status_code=200, mimetype="application/json")
+    except Exception as ex:
+        logging.exception("Failed to save prematch results")
+        return func.HttpResponse(json.dumps({"ok": False, "error": str(ex)}), status_code=500, mimetype="application/json")
+
+
 @app.route(route="prematch/{event_id}/view", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_prematch_match_html(req: func.HttpRequest) -> func.HttpResponse:
     try:
@@ -1891,19 +1925,34 @@ def get_prematch_match_html(req: func.HttpRequest) -> func.HttpResponse:
         market_filter = req.params.get("market")
         gold = get_named_container_client("gold")
         page = download_required_json(gold, f"cricket/prematch/latest/event_id={event_id}/prematch_page.json")
+        saved_results = download_json(gold, f"cricket/prematch/results/event_id={event_id}/results.json") or {}
         header = page.get("match_header", {}) or {}
         markets = (page.get("prematch_markets", {}) or {}).get("records", [])
 
         home_team_name = ((header.get("home_team") or {}).get("name")) or "Home Team"
         away_team_name = ((header.get("away_team") or {}).get("name")) or "Away Team"
 
-        def team_or_player_label(value: Any) -> str:
+        def team_label(value: Any) -> str:
             raw = str(value or "").strip()
             if raw == "1":
                 return home_team_name
             if raw == "2":
                 return away_team_name
             return raw or "-"
+
+        def sel_key(mn: str, cat: str, sn: str, hcap: str, suffix: str = "") -> str:
+            base = f"{mn}||{cat}||{sn}||{hcap or '-'}"
+            return f"{base}||{suffix}" if suffix else base
+
+        def single_opts(sv: str) -> str:
+            def o(val: str, lbl: str) -> str:
+                return f'<option value="{val}"{" selected" if sv == val else ""}>{lbl}</option>'
+            return o("pending", "Pending") + o("pass", "Pass") + o("fail", "Fail")
+
+        def pair_opts(combined: str) -> str:
+            def o(val: str, lbl: str) -> str:
+                return f'<option value="{val}"{" selected" if combined == val else ""}>{lbl}</option>'
+            return o("pending", "Pending") + o("over_wins", "Over Wins ↑") + o("under_wins", "Under Wins ↓")
 
         if market_filter:
             markets = [
@@ -1916,46 +1965,104 @@ def get_prematch_match_html(req: func.HttpRequest) -> func.HttpResponse:
 
         grouped_markets: Dict[str, List[Dict[str, Any]]] = {}
         for m in markets:
-            market_name = str(m.get("market_name") or m.get("market_key") or "Unknown Market")
-            grouped_markets.setdefault(market_name, []).append(m)
+            mn = str(m.get("market_name") or m.get("market_key") or "Unknown Market")
+            grouped_markets.setdefault(mn, []).append(m)
 
         sections_html = ""
         for market_name in sorted(grouped_markets.keys()):
             selections = grouped_markets[market_name]
-            rows = ""
-            for m in selections[:1000]:
-                option = m.get("selection_name") or m.get("selection_header") or "-"
-                team_player = team_or_player_label(m.get("selection_header"))
-                if team_player == str(option).strip():
-                    team_player = "-"
 
-                rows += f"""
-                <tr>
-                    <td>{escape(str(m.get('category_key') or '-'))}</td>
-                    <td>{escape(str(option))}</td>
-                    <td>{escape(str(team_player))}</td>
-                    <td>{escape(str(m.get('handicap') or '-'))}</td>
-                    <td>{escape(str(m.get('odds') or '-'))}</td>
-                    <td>{escape(str(m.get('category_updated_at_utc') or '-'))}</td>
-                    <td><span class="pending">Pending</span></td>
-                </tr>
-                """
+            # Find Over/Under pairs: group by (category_key, selection_name, handicap)
+            pair_groups: Dict[tuple, Dict[str, Any]] = {}
+            for idx, m in enumerate(selections):
+                sh = str(m.get("selection_header") or "").strip()
+                sn = str(m.get("selection_name") or "").strip()
+                if sh in ("Over", "Under") and sn:
+                    cat = str(m.get("category_key") or "-")
+                    hcap = str(m.get("handicap") or "-")
+                    pk = (cat, sn, hcap)
+                    pair_groups.setdefault(pk, {})
+                    pair_groups[pk][sh] = (idx, m)
+
+            complete_pairs = {pk: g for pk, g in pair_groups.items() if "Over" in g and "Under" in g}
+            paired_indices: set = set()
+            for pk, g in complete_pairs.items():
+                paired_indices.add(g["Over"][0])
+                paired_indices.add(g["Under"][0])
+
+            rows = ""
+            for idx, m in enumerate(selections[:1000]):
+                cat = str(m.get("category_key") or "-")
+                sn_raw = str(m.get("selection_name") or "").strip()
+                sh_raw = str(m.get("selection_header") or "").strip()
+                hcap = str(m.get("handicap") or "-")
+
+                if idx in paired_indices:
+                    if sh_raw == "Under":
+                        continue  # rendered together with its Over row
+                    # sh_raw == "Over": render the combined pair row
+                    pk = (cat, sn_raw, hcap)
+                    over_m = complete_pairs[pk]["Over"][1]
+                    under_m = complete_pairs[pk]["Under"][1]
+                    option_display = team_label(sn_raw)
+                    over_key = sel_key(market_name, cat, sn_raw, hcap, "Over")
+                    under_key = sel_key(market_name, cat, sn_raw, hcap, "Under")
+                    over_val = saved_results.get(over_key, "pending")
+                    under_val = saved_results.get(under_key, "pending")
+                    if over_val == "pass" and under_val == "fail":
+                        combined = "over_wins"
+                    elif under_val == "pass" and over_val == "fail":
+                        combined = "under_wins"
+                    else:
+                        combined = "pending"
+                    over_odds = escape(str(over_m.get("odds") or "-"))
+                    under_odds = escape(str(under_m.get("odds") or "-"))
+                    over_key_esc = escape(over_key)
+                    under_key_esc = escape(under_key)
+                    rows += f"""
+                    <tr class="pair-row">
+                        <td>{escape(cat)}</td>
+                        <td>{escape(option_display)}</td>
+                        <td>Over / Under</td>
+                        <td>{escape(hcap) if hcap != "-" else "-"}</td>
+                        <td>&#8593;{over_odds} / &#8595;{under_odds}</td>
+                        <td>{escape(str(over_m.get("category_updated_at_utc") or "-"))}</td>
+                        <td><select class="result-sel result-sel-{combined}"
+                                data-over-key="{over_key_esc}" data-under-key="{under_key_esc}"
+                                data-type="pair" onchange="onPairChange(this)">{pair_opts(combined)}</select></td>
+                    </tr>
+                    """
+                else:
+                    option_raw = sn_raw or sh_raw or "-"
+                    option_display = team_label(option_raw)
+                    team_player = team_label(sh_raw)
+                    # hide team_player column if it duplicates the option display
+                    if team_player == option_display or team_player == option_raw:
+                        team_player = "-"
+                    key = sel_key(market_name, cat, option_raw, hcap)
+                    saved_val = saved_results.get(key, "pending")
+                    key_esc = escape(key)
+                    rows += f"""
+                    <tr>
+                        <td>{escape(cat)}</td>
+                        <td>{escape(option_display)}</td>
+                        <td>{escape(team_player)}</td>
+                        <td>{escape(hcap)}</td>
+                        <td>{escape(str(m.get("odds") or "-"))}</td>
+                        <td>{escape(str(m.get("category_updated_at_utc") or "-"))}</td>
+                        <td><select class="result-sel result-sel-{saved_val}" data-key="{key_esc}"
+                                onchange="onSelChange(this)">{single_opts(saved_val)}</select></td>
+                    </tr>
+                    """
 
             sections_html += f"""
             <div class="market-section">
                 <h2>{escape(market_name)} <span>{len(selections)} selections</span></h2>
                 <table>
-                    <thead>
-                        <tr>
-                            <th>Category</th>
-                            <th>Option</th>
-                            <th>Team / Player</th>
-                            <th>Line</th>
-                            <th>Odds</th>
-                            <th>Updated</th>
-                            <th>Result</th>
-                        </tr>
-                    </thead>
+                    <thead><tr>
+                        <th>Category</th><th>Option</th><th>Team / Player</th>
+                        <th>Line</th><th>Odds</th><th>Updated</th><th>Result</th>
+                    </tr></thead>
                     <tbody>{rows}</tbody>
                 </table>
             </div>
@@ -1974,29 +2081,91 @@ def get_prematch_match_html(req: func.HttpRequest) -> func.HttpResponse:
             <style>
                 body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
                 .card {{ background: white; padding: 18px; border-radius: 10px; box-shadow: 0 2px 8px #ddd; margin-bottom: 20px; }}
+                .save-bar {{ position: sticky; top: 0; z-index: 100; background: #222; color: white; padding: 10px 20px; display: flex; align-items: center; gap: 16px; border-radius: 8px; margin-bottom: 20px; }}
+                .save-bar button {{ padding: 8px 22px; font-size: 15px; font-weight: bold; border: none; border-radius: 6px; cursor: pointer; background: #4caf50; color: white; }}
+                .save-bar button:hover {{ background: #388e3c; }}
+                #save-status {{ font-size: 14px; }}
                 .market-section {{ background: white; padding: 18px; border-radius: 10px; box-shadow: 0 2px 8px #ddd; margin: 24px 0; }}
                 .market-section h2 {{ margin-top: 0; border-bottom: 2px solid #222; padding-bottom: 8px; }}
                 .market-section h2 span {{ color: #666; font-size: 16px; font-weight: normal; }}
                 table {{ width: 100%; border-collapse: collapse; background: white; }}
-                th, td {{ padding: 10px; border-bottom: 1px solid #ddd; text-align: left; }}
-                th {{ background: #222; color: white; position: sticky; top: 0; }}
+                th, td {{ padding: 10px; border-bottom: 1px solid #ddd; text-align: left; font-size: 14px; }}
+                th {{ background: #222; color: white; position: sticky; top: 48px; }}
+                tr.pair-row td {{ background: #f0f4ff; }}
                 a {{ color: #0066cc; font-weight: bold; text-decoration: none; }}
-                .pending {{ display: inline-block; padding: 4px 10px; background: #eee; border-radius: 999px; font-weight: bold; }}
+                select.result-sel {{ padding: 4px 8px; border-radius: 6px; font-weight: bold; font-size: 13px; border: 2px solid #ccc; cursor: pointer; }}
+                select.result-sel-pending   {{ background: #eee;    color: #555;    border-color: #ccc;    }}
+                select.result-sel-pass      {{ background: #d4edda; color: #155724; border-color: #28a745; }}
+                select.result-sel-fail      {{ background: #f8d7da; color: #721c24; border-color: #dc3545; }}
+                select.result-sel-over_wins  {{ background: #d4edda; color: #155724; border-color: #28a745; }}
+                select.result-sel-under_wins {{ background: #fff3cd; color: #856404; border-color: #ffc107; }}
             </style>
         </head>
         <body>
-            <p><a href="/api/prematch/view">← Back to prematch matches</a></p>
+            <p><a href="/api/prematch/view">&#8592; Back to prematch matches</a></p>
+            <div class="save-bar">
+                <button onclick="saveResults()">Save Results</button>
+                <span id="save-status"></span>
+            </div>
             <div class="card">
                 <h1>{escape(str(title))}</h1>
-                <p><b>League:</b> {escape(str(header.get('league_name') or '-'))}</p>
+                <p><b>League:</b> {escape(str(header.get("league_name") or "-"))}</p>
                 <p><b>Teams:</b> {escape(str(home_team_name))} vs {escape(str(away_team_name))}</p>
-                <p><b>Event ID:</b> {escape(str(event_id))} &nbsp; <b>Bet365 FI:</b> {escape(str((page.get('snapshot') or {}).get('fi') or '-'))}</p>
-                <p><b>Start time:</b> {escape(str(header.get('event_time_utc') or '-'))}</p>
-                <p><b>Markets:</b> {escape(str((page.get('prematch_markets') or {}).get('market_count') or 0))}
-                   &nbsp; <b>Selections:</b> {escape(str((page.get('prematch_markets') or {}).get('selection_count') or 0))}</p>
-                <p><b>Market names:</b> {escape(market_summary or '-')}</p>
+                <p><b>Event ID:</b> {escape(str(event_id))} &nbsp; <b>Bet365 FI:</b> {escape(str((page.get("snapshot") or {{}}).get("fi") or "-"))}</p>
+                <p><b>Start time:</b> {escape(str(header.get("event_time_utc") or "-"))}</p>
+                <p><b>Markets:</b> {escape(str((page.get("prematch_markets") or {{}}).get("market_count") or 0))}
+                   &nbsp; <b>Selections:</b> {escape(str((page.get("prematch_markets") or {{}}).get("selection_count") or 0))}</p>
+                <p><b>Market names:</b> {escape(market_summary or "-")}</p>
             </div>
             {sections_html}
+            <script>
+                function onSelChange(el) {{
+                    el.className = 'result-sel result-sel-' + el.value;
+                }}
+                function onPairChange(el) {{
+                    el.className = 'result-sel result-sel-' + el.value;
+                }}
+                async function saveResults() {{
+                    const status = document.getElementById('save-status');
+                    status.textContent = 'Saving...';
+                    status.style.color = '#aaa';
+                    const results = {{}};
+                    document.querySelectorAll('.result-sel[data-key]').forEach(s => {{
+                        results[s.dataset.key] = s.value;
+                    }});
+                    document.querySelectorAll('.result-sel[data-type="pair"]').forEach(s => {{
+                        const v = s.value;
+                        if (v === 'over_wins') {{
+                            results[s.dataset.overKey] = 'pass';
+                            results[s.dataset.underKey] = 'fail';
+                        }} else if (v === 'under_wins') {{
+                            results[s.dataset.overKey] = 'fail';
+                            results[s.dataset.underKey] = 'pass';
+                        }} else {{
+                            results[s.dataset.overKey] = 'pending';
+                            results[s.dataset.underKey] = 'pending';
+                        }}
+                    }});
+                    try {{
+                        const resp = await fetch('/api/prematch/{event_id}/results', {{
+                            method: 'POST',
+                            headers: {{'Content-Type': 'application/json'}},
+                            body: JSON.stringify({{results}})
+                        }});
+                        const data = await resp.json();
+                        if (data.ok) {{
+                            status.textContent = 'Saved ' + data.saved + ' results ✓';
+                            status.style.color = '#4caf50';
+                        }} else {{
+                            status.textContent = 'Save failed: ' + data.error;
+                            status.style.color = '#f44336';
+                        }}
+                    }} catch (e) {{
+                        status.textContent = 'Error: ' + e.message;
+                        status.style.color = '#f44336';
+                    }}
+                }}
+            </script>
         </body>
         </html>
         """
@@ -2119,7 +2288,7 @@ def get_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
             league_esc = escape(league_name)
             if league_name != current_league:
                 current_league = league_name
-                rows += f'<tr class="league-header" data-league="{league_esc}"><td colspan="6">{league_esc}</td></tr>'
+                rows += f'<tr class="league-header" data-league="{league_esc}"><td colspan="7">{league_esc}</td></tr>'
             rows += f"""
             <tr data-league="{league_esc}">
                 <td>{event_id}</td>
@@ -2128,6 +2297,7 @@ def get_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
                 <td>{league_esc}</td>
                 <td>{escape(str(m.get("score") or "-"))}</td>
                 <td>{escape(str(m.get("event_time_utc") or "-"))}</td>
+                <td><a href="/api/prematch/{event_id}/view">Open</a></td>
             </tr>
             """
         html = f"""
@@ -2155,7 +2325,7 @@ def get_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
                 <select id="leagueFilter" onchange="filterLeague()">{league_options}</select>
             </div>
             <table>
-                <thead><tr><th>Event ID</th><th>Bet365 FI</th><th>Match</th><th>League</th><th>Final Score</th><th>Start Time</th></tr></thead>
+                <thead><tr><th>Event ID</th><th>Bet365 FI</th><th>Match</th><th>League</th><th>Final Score</th><th>Start Time</th><th>Prematch Odds</th></tr></thead>
                 <tbody>{rows}</tbody>
             </table>
             <script>
@@ -2391,8 +2561,33 @@ def get_match_page_html(req: func.HttpRequest) -> func.HttpResponse:
         header = data.get("match_header", {})
         score = data.get("score", {})
         odds = data.get("odds", {}).get("records", [])
-        current_markets = data.get("current_markets", {})
-        current_market_rows = current_markets.get("records", []) if isinstance(current_markets, dict) else []
+
+        # Always fetch live markets directly from Bet365 so the page never shows
+        # stale-zero markets from gold cache (e.g. after stats=1 was removed).
+        snapshot = data.get("snapshot") or {}
+        fi = snapshot.get("fi") or (data.get("current_markets") or {}).get("fi")
+        if not fi:
+            # Try reading fi from match_header fallback path in gold
+            fi = header.get("fi")
+
+        current_market_rows: List[Dict[str, Any]] = []
+        markets_source = "cached"
+        if fi:
+            try:
+                live_payload = call_betsapi(path="/v1/bet365/event", params={"FI": fi})
+                if live_payload["response"]["success"]:
+                    now = utc_now().isoformat()
+                    current_market_rows = extract_bet365_current_markets(
+                        live_payload, "live", now, event_id, fi, {}
+                    )
+                    markets_source = "live"
+            except Exception:
+                pass  # fall through to cached below
+
+        if not current_market_rows:
+            cached = data.get("current_markets", {})
+            current_market_rows = cached.get("records", []) if isinstance(cached, dict) else []
+            markets_source = "cached"
 
         match_name = header.get("match_name") or (
             f"{header.get('home_team', {}).get('name')} vs {header.get('away_team', {}).get('name')}"
@@ -2466,14 +2661,14 @@ def get_match_page_html(req: func.HttpRequest) -> func.HttpResponse:
             <p><a href="/api/matches/{event_id}/lineage/view">View data lineage</a></p>
 
             <div class="cards">
-                <div class="card"><div class="label">Current Markets</div><div class="value">{current_markets.get('market_count', 0)}</div></div>
-                <div class="card"><div class="label">Current Selections</div><div class="value">{current_markets.get('selection_count', 0)}</div></div>
+                <div class="card"><div class="label">Current Markets</div><div class="value">{len({m.get('market_group_id') or m.get('market_group_name') for m in current_market_rows})}</div></div>
+                <div class="card"><div class="label">Current Selections</div><div class="value">{len(current_market_rows)}</div></div>
                 <div class="card"><div class="label">Odds History Rows</div><div class="value">{len(odds)}</div></div>
                 <div class="card"><div class="label">Event ID</div><div class="value" style="font-size:16px;">{event_id}</div></div>
             </div>
 
             <div class="section">
-                <h2>Current Bet365 Markets</h2>
+                <h2>Current Bet365 Markets <span style="font-size:13px;font-weight:normal;color:#888;">({markets_source})</span></h2>
                 <label><b>Filter market:</b></label><br>
                 <select id="currentMarketFilter" onchange="filterCurrentMarket()">{market_options}</select>
                 <table>
@@ -2590,6 +2785,173 @@ def get_match_lineage_html(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as ex:
         logging.exception("Failed to render match lineage")
         return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
+
+
+@app.route(route="matches/{event_id}/markets/live", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_match_live_markets(req: func.HttpRequest) -> func.HttpResponse:
+    """Fetch current Bet365 markets directly from the API (bypasses pipeline cache)."""
+    try:
+        event_id = req.route_params.get("event_id")
+        gold = get_named_container_client("gold")
+        page = download_required_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
+        fi = (page.get("snapshot") or {}).get("fi")
+        if not fi:
+            return func.HttpResponse("FI not found for this event in gold data.", status_code=404)
+
+        payload = call_betsapi(path="/v1/bet365/event", params={"FI": fi})
+        if not payload["response"]["success"]:
+            return func.HttpResponse(
+                json.dumps({"error": "BetsAPI call failed", "detail": payload["response"]}, indent=2),
+                status_code=502, mimetype="application/json",
+            )
+
+        now = utc_now().isoformat()
+        markets = extract_bet365_current_markets(payload, "live", now, event_id, fi, {})
+
+        # Debug: count raw records so we can tell if 0 markets is an API vs parse issue
+        raw_body = (payload.get("response") or {}).get("body") or {}
+        raw_results = raw_body.get("results", [])
+        if raw_results and isinstance(raw_results[0], list):
+            flat_records = raw_results[0]
+        elif isinstance(raw_results, list):
+            flat_records = raw_results
+        else:
+            flat_records = []
+        type_counts: Dict[str, int] = {}
+        for _r in flat_records:
+            if isinstance(_r, dict):
+                _t = _r.get("type", "?")
+                type_counts[_t] = type_counts.get(_t, 0) + 1
+        debug_summary = ", ".join(f"{k}={v}" for k, v in sorted(type_counts.items())) or "no records"
+
+        match_name = (page.get("match_header") or {}).get("match_name") or f"Event {event_id}"
+        header = page.get("match_header", {}) or {}
+
+        market_names = sorted({m.get("market_group_name") or "Unknown" for m in markets})
+        market_options = '<option value="ALL">All Markets</option>'
+        for mn in market_names:
+            market_options += f'<option value="{escape(mn)}">{escape(mn)}</option>'
+
+        rows = ""
+        for m in markets:
+            group = escape(str(m.get("market_group_name") or "-"))
+            market_nm = escape(str(m.get("market_name") or group))
+            selection = escape(str(m.get("display_selection_name") or m.get("selection_name") or "-"))
+            odds_dec = m.get("odds_decimal")
+            odds_frac = escape(str(m.get("odds_fractional") or "-"))
+            odds_display = f"{odds_dec} ({odds_frac})" if odds_dec is not None else odds_frac
+            line = escape(str(m.get("line") or "-"))
+            suspended = "Yes" if m.get("suspended") else "No"
+            rows += f"""
+            <tr data-group="{group}">
+                <td>{group}</td>
+                <td>{market_nm}</td>
+                <td>{selection}</td>
+                <td>{escape(odds_display)}</td>
+                <td>{line}</td>
+                <td>{suspended}</td>
+            </tr>
+            """
+
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Live Markets – {escape(match_name)}</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
+                .card {{ background: white; padding: 18px; border-radius: 10px; box-shadow: 0 2px 8px #ddd; margin-bottom: 20px; }}
+                .filter-bar {{ margin-bottom: 16px; display: flex; align-items: center; gap: 12px; }}
+                select {{ padding: 8px 12px; font-size: 14px; border: 1px solid #ccc; border-radius: 6px; }}
+                table {{ width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 8px #ddd; }}
+                th, td {{ padding: 10px; border-bottom: 1px solid #ddd; text-align: left; font-size: 14px; }}
+                th {{ background: #222; color: white; position: sticky; top: 0; }}
+                a {{ color: #0066cc; font-weight: bold; text-decoration: none; }}
+                .live-badge {{ display: inline-block; background: #d00; color: white; font-size: 13px; font-weight: bold; padding: 3px 10px; border-radius: 999px; vertical-align: middle; margin-left: 10px; }}
+            </style>
+        </head>
+        <body>
+            <p><a href="/api/matches/{escape(str(event_id))}/view">← Back to match page</a></p>
+            <div class="card">
+                <h1>{escape(match_name)} <span class="live-badge">LIVE</span></h1>
+                <p><b>League:</b> {escape(str(header.get('league_name') or '-'))}</p>
+                <p><b>Event ID:</b> {escape(str(event_id))} &nbsp; <b>Bet365 FI:</b> {escape(str(fi))}</p>
+                <p><b>Markets fetched at:</b> {escape(now)}</p>
+                <p><b>Total selections:</b> {len(markets)} across {len(market_names)} market groups</p>
+                <p><b>Raw API records:</b> {escape(debug_summary)}</p>
+            </div>
+            <div class="filter-bar">
+                <label><b>Market group:</b></label>
+                <select id="marketFilter" onchange="filterMarket()">{market_options}</select>
+            </div>
+            <table>
+                <thead>
+                    <tr><th>Group</th><th>Market</th><th>Selection</th><th>Odds Decimal (Fractional)</th><th>Line</th><th>Suspended</th></tr>
+                </thead>
+                <tbody>{rows}</tbody>
+            </table>
+            <script>
+                function filterMarket() {{
+                    const sel = document.getElementById("marketFilter").value;
+                    document.querySelectorAll("tr[data-group]").forEach(r => {{
+                        r.style.display = sel === "ALL" || r.dataset.group === sel ? "" : "none";
+                    }});
+                }}
+            </script>
+        </body>
+        </html>
+        """
+        return func.HttpResponse(html, status_code=200, mimetype="text/html")
+    except Exception as ex:
+        logging.exception("Failed to render live markets")
+        return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
+
+
+@app.route(route="matches/{event_id}/markets/raw", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_match_markets_raw(req: func.HttpRequest) -> func.HttpResponse:
+    """Return the raw BetsAPI /v1/bet365/event JSON so you can inspect the actual response structure."""
+    try:
+        event_id = req.route_params.get("event_id")
+        gold = get_named_container_client("gold")
+        page = download_required_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
+        fi = (page.get("snapshot") or {}).get("fi")
+        if not fi:
+            return func.HttpResponse(
+                json.dumps({"error": "FI not found in gold data for this event"}),
+                status_code=404, mimetype="application/json",
+            )
+
+        payload = call_betsapi(path="/v1/bet365/event", params={"FI": fi})
+        body = (payload.get("response") or {}).get("body") or {}
+        results = body.get("results", [])
+
+        # Summarise the record types so the caller can see what arrived
+        if results and isinstance(results[0], list):
+            flat_records = results[0]
+        elif isinstance(results, list):
+            flat_records = results
+        else:
+            flat_records = []
+
+        type_counts: Dict[str, int] = {}
+        for r in flat_records:
+            if isinstance(r, dict):
+                t = r.get("type", "UNKNOWN")
+                type_counts[t] = type_counts.get(t, 0) + 1
+
+        debug = {
+            "event_id": event_id,
+            "fi": fi,
+            "api_success": payload["response"]["success"],
+            "http_status": payload["response"]["http_status_code"],
+            "total_records": len(flat_records),
+            "record_type_counts": type_counts,
+            "raw_body": body,
+        }
+        return func.HttpResponse(json.dumps(debug, indent=2, default=str), status_code=200, mimetype="application/json")
+    except Exception as ex:
+        logging.exception("Failed to fetch raw markets")
+        return func.HttpResponse(json.dumps({"error": str(ex)}), status_code=500, mimetype="application/json")
 
 
 @app.route(route="run-prematch-now", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
