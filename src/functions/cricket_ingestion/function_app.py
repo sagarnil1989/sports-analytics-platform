@@ -2310,6 +2310,23 @@ def discover_cricket_ended(timer: func.TimerRequest) -> None:
     upload_json(bronze, raw_path, api_payload)
 
     ended_matches = summarize_event_items(extract_results(api_payload), max_ended, require_bet365_id=False)
+
+    # Enrich FI from the live index and the previous ended index — /v3/events/ended never returns bet365_id.
+    fi_lookup: Dict[str, str] = {}
+    for index_path in ("cricket/matches/latest/index.json", "cricket/ended/latest/index.json"):
+        idx = download_json(gold, index_path) or {}
+        for row in idx.get("matches", []):
+            eid = str(row.get("event_id") or "")
+            fi_val = row.get("fi")
+            if eid and fi_val:
+                fi_lookup[eid] = str(fi_val)
+
+    for m in ended_matches:
+        if not m.get("fi"):
+            eid = str(m.get("event_id") or "")
+            if eid in fi_lookup:
+                m["fi"] = fi_lookup[eid]
+
     ended_index = {
         "generated_at_utc": now.isoformat(),
         "sport_id": sport_id,
