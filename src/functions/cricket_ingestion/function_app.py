@@ -165,20 +165,42 @@ def write_to_cricwebsite_db(
             # Find the team row that has over data (the batting team)
             stats_id = None
             for ts_row in team_scores:
-                raw_text = str(ts_row.get("raw_score_text") or "")
                 over_str = None
-                m_ov = re.match(r'^(\d+)\.?(\d?)$', raw_text.strip())
-                if m_ov:
-                    full_overs = int(m_ov.group(1))
-                    balls = int(m_ov.group(2)) if m_ov.group(2) else 0
-                    over_str = round(full_overs + balls / 6.0, 4)
+
+                # Priority 1: PG field from stats=1 call
+                pg_over = ts_row.get("pg_over")
+
+                if pg_over is not None:
+                    try:
+                        pg_raw = str(pg_over).strip()
+
+                        # Case 1: raw PG format, e.g. "4:6:0:1wd:1:4#16:2:1"
+                        if "#" in pg_raw:
+                            stats_part = pg_raw.split("#", 1)[1]
+                            stats = stats_part.split(":")
+
+                            full_overs = int(stats[0]) - 1
+                            balls = int(stats[1]) - 1
+
+                            if full_overs >= 0 and balls >= 0:
+                                over_str = f"{full_overs}.{balls}"
+
+                        # Case 2: already parsed cricket over format, e.g. "15.2"
+                        else:
+                            over_str = pg_raw
+
+                    except (ValueError, IndexError):
+                        pass
+
+
+                # Priority 2: S3 field
                 if over_str is None:
                     s3 = str(ts_row.get("s3") or "").strip()
                     m_s3 = re.match(r'^(\d+)\.?(\d?)$', s3)
                     if m_s3:
                         full_overs = int(m_s3.group(1))
                         balls = int(m_s3.group(2)) if m_s3.group(2) else 0
-                        over_str = round(full_overs + balls / 6.0, 4)
+                        over_str = f"{full_overs}.{balls}"
                 if over_str is None:
                     continue
 
@@ -742,6 +764,8 @@ def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
 
         # Use FI / bet365_id for Bet365 live markets.
         bet365_event_payload = call_betsapi(path="/v1/bet365/event", params={"FI": fi})
+        # stats=1 adds PG field (over progress) to TE records but suppresses markets — call separately.
+        bet365_event_stats_payload = call_betsapi(path="/v1/bet365/event", params={"FI": fi, "stats": 1})
 
         base_path = f"betsapi/inplay_snapshot/sport_id={sport_id}/event_id={event_id}/fi={fi}/snapshot_id={snapshot_id}"
 
@@ -797,6 +821,7 @@ def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
         upload_json(container, f"{base_path}/api_event_odds_summary.json", event_odds_summary_payload)
         upload_json(container, f"{base_path}/api_event_odds.json", event_odds_payload)
         upload_json(container, f"{base_path}/api_live_market_odds.json", bet365_event_payload)
+        upload_json(container, f"{base_path}/api_live_market_stats.json", bet365_event_stats_payload)
         upload_json(container, f"{base_path}/lineage.json", lineage)
         upload_json(container, f"{base_path}/manifest.json", manifest)
 
@@ -942,6 +967,7 @@ def extract_event_odds_records(
                 "odds_id": str(item.get("id")) if item.get("id") is not None else None,
                 "score_from_match_snapshot": score_context.get("score"),
                 "score_from_odds": item.get("ss"),
+                "over_from_score": parse_overs_string(item.get("ss")),
                 "home_odds": item.get("home_od"),
                 "home_odds_decimal": safe_float(item.get("home_od")),
                 "away_odds": item.get("away_od"),
@@ -1111,12 +1137,33 @@ def parse_silver_snapshot(
     event_view_payload: Optional[Dict[str, Any]] = None,
     event_odds_summary_payload: Optional[Dict[str, Any]] = None,
     lineage_payload: Optional[Dict[str, Any]] = None,
+    bet365_event_stats_payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     snapshot_id = manifest["snapshot_id"]
     snapshot_time_utc = manifest["snapshot_time_utc"]
     event_id = str(manifest["event_id"])
     fi = str(manifest["fi"])
     sport_id = str(manifest.get("sport_id", "3"))
+
+    # Build a name→PG_over map from the stats=1 response (TE records have PG field with over info).
+    pg_overs_by_name: Dict[str, str] = {}
+    fallback_pg_over: Optional[str] = None
+
+    if bet365_event_stats_payload:
+        for r in extract_bet365_records(bet365_event_stats_payload):
+            r_type = r.get("type")
+
+            # RV/RG records can carry team/player-specific PG values
+            if r_type in ("RV", "RG") and r.get("NA") and r.get("PG"):
+                pg_over = parse_over_from_pg(r["PG"])
+                if pg_over is not None:
+                    pg_overs_by_name[r["NA"]] = pg_over
+
+            # EV record can carry match-level/current PG value
+            elif r_type == "EV" and r.get("PG"):
+                pg_over = parse_over_from_pg(r["PG"])
+                if pg_over is not None:
+                    fallback_pg_over = pg_over
 
     records = extract_bet365_records(bet365_event_payload)
     ev = next((r for r in records if r.get("type") == "EV"), {})
@@ -1186,6 +1233,7 @@ def parse_silver_snapshot(
                 "s7": r.get("S7"),
                 "s8": r.get("S8"),
                 "raw": r,
+                "pg_over": pg_overs_by_name.get(r.get("NA", "")) or fallback_pg_over,
             })
         elif r_type == "TE" and r.get("NA"):
             player_entries.append({
@@ -1336,6 +1384,7 @@ def parse_cricket_bronze_to_silver(timer: func.TimerRequest) -> None:
                 or download_json(bronze, f"{base_path}/bet365_event_by_fi.json")
                 or download_required_json(bronze, f"{base_path}/bet365_event.json")
             )
+            bet365_event_stats_payload = download_json(bronze, f"{base_path}/api_live_market_stats.json")
             event_odds_payload = (
                 download_json(bronze, f"{base_path}/api_event_odds.json")
                 or download_json(bronze, f"{base_path}/event_odds_by_event_id.json")
@@ -1358,6 +1407,7 @@ def parse_cricket_bronze_to_silver(timer: func.TimerRequest) -> None:
                 event_view_payload=event_view_payload,
                 event_odds_summary_payload=event_odds_summary_payload,
                 lineage_payload=lineage_payload,
+                bet365_event_stats_payload=bet365_event_stats_payload,
             )
             write_silver_outputs(silver, parsed)
             processed += 1
@@ -1691,6 +1741,33 @@ def build_cricket_gold_match_pages(timer: func.TimerRequest) -> None:
 _OVERS_RE = re.compile(r'(?<!\d)(\d+)\.([0-5])(?!\d)')
 
 
+def parse_over_from_pg(pg: str) -> Optional[str]:
+    """Extract overs from Bet365 PG field (from stats=1 response).
+
+    Format: 'deliveries_in_over#over_1indexed:balls_in_over:wickets'
+    e.g. '1:1:1:1:4:6#15:5:4' → '14.5'  (15-1=14 completed overs, 5 balls)
+         '1:4:6:0:1wd:1#16:1:0' → '15.1' (15 completed overs, 1 ball)
+    """
+    if not pg:
+        return None
+    try:
+        parts = pg.split("#")
+        if len(parts) < 2:
+            return None
+        stats = parts[-1].split(":")
+        if len(stats) < 2:
+            return None
+        completed_overs = int(stats[0]) - 1
+        balls = int(stats[1]) -1 
+        if completed_overs < 0:
+            return None
+        if balls > 0:
+            return f"{completed_overs}.{balls}"
+        return str(completed_overs)
+    except (ValueError, IndexError):
+        return None
+
+
 def parse_overs_string(text: Optional[str]) -> Optional[str]:
     """Return overs like '17.3' from text like '185/5 (17.3 ov)'. Returns None if not found."""
     if not text:
@@ -1699,20 +1776,6 @@ def parse_overs_string(text: Optional[str]) -> Optional[str]:
     if m:
         return f"{m.group(1)}.{m.group(2)}"
     return None
-
-
-def overs_to_float(overs_str: Optional[str]) -> Optional[float]:
-    """Convert cricket overs notation '17.3' (17 overs 3 balls) to a decimal float (17.5)."""
-    if not overs_str:
-        return None
-    try:
-        parts = str(overs_str).split(".")
-        full_overs = int(parts[0])
-        balls = int(parts[1]) if len(parts) > 1 else 0
-        return round(full_overs + balls / 6.0, 4)
-    except Exception:
-        return None
-
 
 def extract_innings_snapshot(
     match_snapshot: Dict[str, Any],
@@ -1734,10 +1797,15 @@ def extract_innings_snapshot(
     batting_team: Optional[str] = None
 
     for row in team_score_rows:
-        raw_text = str(row.get("raw_score_text") or "")
-        over_str = parse_overs_string(raw_text)
+        # Priority 1: PG field from stats=1 call — most accurate over source.
+        over_str = row.get("pg_over")
 
-        # Also try s3 field which carries overs as "17.3" or plain integer "17" / "0"
+        # Priority 2: SC field (raw score text like "185/5 (17.3 ov)")
+        if not over_str:
+            raw_text = str(row.get("raw_score_text") or "")
+            over_str = parse_overs_string(raw_text)
+
+        # Priority 3: S3 field which carries overs as "17.3" or plain integer "17" / "0"
         s3 = str(row.get("s3") or "").strip()
         if not over_str and s3:
             over_str = parse_overs_string(s3)
@@ -1856,7 +1924,7 @@ def extract_innings_snapshot(
     innings_market_name = innings_rows[0].get("market_group_name") if innings_rows else None
     return {
         "over": current_over,
-        "over_float": overs_to_float(current_over),
+        "over_float": current_over,
         "score": current_score,
         "wickets": current_wickets,
         "batting_team": batting_team or home_team,
@@ -3447,6 +3515,7 @@ or the data was not processed in time.</p>
         for o in mw_rows[:500]:
             odds_rows += f"""
             <tr>
+                <td>{escape(str(o.get('over_from_score') or '-'))}</td>
                 <td>{escape(str(o.get('score_from_odds') or o.get('score_from_match_snapshot') or '-'))}</td>
                 <td>{escape(str(o.get('home_odds') or '-'))}</td>
                 <td>{escape(str(o.get('away_odds') or '-'))}</td>
@@ -3454,7 +3523,7 @@ or the data was not processed in time.</p>
             </tr>
             """
         if not odds_rows:
-            odds_rows = '<tr><td colspan="4" style="color:#999;">No Match Winner timeline data captured yet.</td></tr>'
+            odds_rows = '<tr><td colspan="5" style="color:#999;">No Match Winner timeline data captured yet.</td></tr>'
 
         html = f"""
         <!DOCTYPE html>
@@ -3507,7 +3576,7 @@ or the data was not processed in time.</p>
             <div class="section">
                 <h2>Match Winner 2-Way Timeline <span style="font-size:13px;font-weight:normal;color:#888;">({len(mw_rows)} data points from /v2/event/odds)</span></h2>
                 <table>
-                    <thead><tr><th>Score</th><th>{home_name}</th><th>{away_name}</th><th>Time</th></tr></thead>
+                    <thead><tr><th>Over</th><th>Score</th><th>{home_name}</th><th>{away_name}</th><th>Time</th></tr></thead>
                     <tbody>{odds_rows}</tbody>
                 </table>
             </div>
