@@ -12,7 +12,254 @@ import requests
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.core.exceptions import ResourceNotFoundError, ResourceExistsError
 
+try:
+    import psycopg2
+    import psycopg2.extras
+    _PSYCOPG2_AVAILABLE = True
+except ImportError:
+    _PSYCOPG2_AVAILABLE = False
+
 app = func.FunctionApp()
+
+# ------------------------------------------------------------------
+# Module-level innings market detection (shared by extraction + DB writer)
+# ------------------------------------------------------------------
+_INNINGS_MARKET_RE = re.compile(
+    r'\b\d+\s+overs?\s+runs?\b'      # "50 Overs Runs", "20 Overs Run"
+    r'|'
+    r'\bruns?\s+in\s+\d+\s+overs?\b', # "Runs in 20 Overs"
+    re.IGNORECASE,
+)
+_INNINGS_KEYWORDS = ["current inn", "innings run", "1st inn", "inning run"]
+
+def _is_innings_market(name: str) -> bool:
+    n = name.lower()
+    if any(kw in n for kw in _INNINGS_KEYWORDS):
+        return True
+    return bool(_INNINGS_MARKET_RE.search(name))
+
+# ------------------------------------------------------------------
+# CricWebsite PostgreSQL writer
+# ------------------------------------------------------------------
+_cricwebsite_conn = None
+_market_id_cache: Dict[str, Optional[int]] = {}
+
+def _get_cricwebsite_conn():
+    global _cricwebsite_conn
+    host = os.environ.get("CRICWEBSITE_DB_HOST", "")
+    if not host:
+        return None
+    try:
+        if _cricwebsite_conn is None or _cricwebsite_conn.closed:
+            _cricwebsite_conn = psycopg2.connect(
+                host=host,
+                port=int(os.environ.get("CRICWEBSITE_DB_PORT", "5432")),
+                dbname=os.environ.get("CRICWEBSITE_DB_NAME", "oddsdb"),
+                user=os.environ.get("CRICWEBSITE_DB_USER", ""),
+                password=os.environ.get("CRICWEBSITE_DB_PASSWORD", ""),
+                sslmode="require",
+                connect_timeout=10,
+            )
+            logging.info("CricWebsite DB connection established")
+        return _cricwebsite_conn
+    except Exception as e:
+        logging.warning(f"CricWebsite DB connect failed: {e}")
+        _cricwebsite_conn = None
+        return None
+
+def _get_market_id(conn, name: str) -> Optional[int]:
+    if name in _market_id_cache:
+        return _market_id_cache[name]
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT market_id FROM tbl_markets WHERE name = %s LIMIT 1", (name,))
+            row = cur.fetchone()
+            _market_id_cache[name] = row[0] if row else None
+            return _market_id_cache[name]
+    except Exception as e:
+        logging.warning(f"_get_market_id({name}) failed: {e}")
+        return None
+
+def write_to_cricwebsite_db(
+    match: Dict[str, Any],
+    team_scores: List[Dict[str, Any]],
+    current_market_rows: List[Dict[str, Any]],
+) -> None:
+    """Write match, per-over score, and key market odds to CricWebsite oddsdb.
+
+    Fails silently — never interrupts the main bronze→silver pipeline.
+    Writes two markets only: 'Full time' (match winner) and 'Current innings runs'.
+    """
+    if not _PSYCOPG2_AVAILABLE or not os.environ.get("CRICWEBSITE_DB_HOST"):
+        return
+
+    try:
+        conn = _get_cricwebsite_conn()
+        if conn is None:
+            return
+
+        event_id = match.get("event_id")
+        if not event_id:
+            return
+        try:
+            event_id = int(event_id)
+        except (TypeError, ValueError):
+            return
+
+        # status
+        ts = str(match.get("time_status") or "")
+        status = {"1": "inprogress", "3": "finished"}.get(ts, "notstarted")
+
+        # format (T20 / ODI / default)
+        league = str(match.get("league_name") or "")
+        if any(k in league for k in ("ODI", "One Day")):
+            formate = "ODI"
+        elif any(k in league for k in ("T20", "Twenty20")):
+            formate = "T20"
+        else:
+            formate = "default"
+
+        # score strings for tbl_matches ("127-1" style, home vs away)
+        ss = str(match.get("score_summary_events") or match.get("score_summary_bet365") or "")
+        ss_parts = [p.strip().replace("/", "-") for p in ss.split(",")]
+        home_score = ss_parts[0] if ss_parts else None
+        away_score = ss_parts[1] if len(ss_parts) > 1 else None
+
+        # inning_no heuristic: no comma in SS = inning 1 still in progress
+        inning_no = 2 if "," in ss else 1
+
+        with conn.cursor() as cur:
+            # 1 — upsert tbl_matches (unique on event_id)
+            cur.execute("""
+                INSERT INTO tbl_matches
+                    (event_id, home_team_name, away_team_name, season_name,
+                     status, venue, formate, start_timestamp, home_score, away_score, created_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                ON CONFLICT (event_id) DO UPDATE SET
+                    status      = EXCLUDED.status,
+                    home_score  = EXCLUDED.home_score,
+                    away_score  = EXCLUDED.away_score,
+                    venue       = COALESCE(EXCLUDED.venue,       tbl_matches.venue),
+                    season_name = COALESCE(EXCLUDED.season_name, tbl_matches.season_name),
+                    formate     = COALESCE(EXCLUDED.formate,     tbl_matches.formate)
+                RETURNING match_id
+            """, (
+                event_id,
+                match.get("home_team_name"),
+                match.get("away_team_name"),
+                match.get("league_name"),
+                status,
+                match.get("venue"),
+                formate,
+                match.get("event_time_utc"),
+                home_score,
+                away_score,
+            ))
+            row = cur.fetchone()
+            if not row:
+                conn.rollback()
+                return
+            match_id = row[0]
+
+            # 2 — upsert tbl_match_stats for the currently batting team's over/score
+            # Find the team row that has over data (the batting team)
+            stats_id = None
+            for ts_row in team_scores:
+                raw_text = str(ts_row.get("raw_score_text") or "")
+                over_str = None
+                m_ov = re.match(r'^(\d+)\.?(\d?)$', raw_text.strip())
+                if m_ov:
+                    full_overs = int(m_ov.group(1))
+                    balls = int(m_ov.group(2)) if m_ov.group(2) else 0
+                    over_str = round(full_overs + balls / 6.0, 4)
+                if over_str is None:
+                    s3 = str(ts_row.get("s3") or "").strip()
+                    m_s3 = re.match(r'^(\d+)\.?(\d?)$', s3)
+                    if m_s3:
+                        full_overs = int(m_s3.group(1))
+                        balls = int(m_s3.group(2)) if m_s3.group(2) else 0
+                        over_str = round(full_overs + balls / 6.0, 4)
+                if over_str is None:
+                    continue
+
+                runs = ts_row.get("runs")
+                wickets = ts_row.get("wickets")
+                cur.execute("""
+                    INSERT INTO tbl_match_stats
+                        (match_id, inning_no, over, score, wicket, created_at)
+                    VALUES (%s,%s,%s,%s,%s,NOW())
+                    ON CONFLICT (match_id, inning_no, over) DO NOTHING
+                    RETURNING match_stats_id
+                """, (match_id, inning_no, over_str, runs, wickets))
+                r2 = cur.fetchone()
+                if r2:
+                    stats_id = r2[0]
+                break  # only the batting team row matters
+
+            # 3 — insert market odds for the two key markets
+            if stats_id:
+                full_time_id = _get_market_id(conn, "Full time")
+                innings_id   = _get_market_id(conn, "Current innings runs")
+
+                # Full time: match winner odds
+                if full_time_id:
+                    winner_rows = [
+                        r for r in current_market_rows
+                        if r.get("market_group_name") and any(
+                            kw in r["market_group_name"].lower()
+                            for kw in ("full time", "match winner", "match betting", "to win")
+                        ) and r.get("odds_decimal") and not r.get("suspended")
+                    ]
+                    home = str(match.get("home_team_name") or "").lower()
+                    for r in winner_rows:
+                        sel = str(r.get("selection_name") or "").lower()
+                        choice = "1" if home and home in sel else "2"
+                        cur.execute("""
+                            INSERT INTO tbl_market_odds
+                                (match_stats_id, market_id, option, choice, odd, is_suspended, created_at)
+                            VALUES (%s,%s,%s,%s,%s,%s,NOW())
+                        """, (stats_id, full_time_id,
+                              r.get("market_group_name"), choice,
+                              r.get("odds_decimal"), bool(r.get("suspended"))))
+
+                # Current innings runs: over/under odds
+                if innings_id:
+                    _SIMPLE_OV = re.compile(r'^[Oo]ver\s+([\d.]+)$')
+                    _SIMPLE_UN = re.compile(r'^[Uu]nder\s+([\d.]+)$')
+                    innings_rows = [
+                        r for r in current_market_rows
+                        if r.get("market_group_name") and _is_innings_market(r["market_group_name"])
+                        and r.get("odds_decimal")
+                    ]
+                    for r in innings_rows:
+                        sel = str(r.get("display_selection_name") or r.get("selection_name") or "").strip()
+                        if _SIMPLE_OV.match(sel):
+                            choice = "over"
+                        elif _SIMPLE_UN.match(sel):
+                            choice = "under"
+                        else:
+                            continue
+                        cur.execute("""
+                            INSERT INTO tbl_market_odds
+                                (match_stats_id, market_id, option, choice, odd,
+                                 detail, is_suspended, created_at)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,NOW())
+                        """, (stats_id, innings_id,
+                              r.get("market_group_name"), choice,
+                              r.get("odds_decimal"),
+                              str(r.get("line") or r.get("handicap") or ""),
+                              bool(r.get("suspended"))))
+
+        conn.commit()
+        logging.debug(f"CricWebsite DB write OK event_id={event_id} match_id={match_id}")
+
+    except Exception as e:
+        logging.warning(f"write_to_cricwebsite_db failed for event {match.get('event_id')}: {e}")
+        try:
+            if _cricwebsite_conn and not _cricwebsite_conn.closed:
+                _cricwebsite_conn.rollback()
+        except Exception:
+            pass
 
 
 # -----------------------------
@@ -202,11 +449,14 @@ def summarize_inplay_items(items: List[Dict[str, Any]], max_live_matches: int) -
         # time_status=1 means in-play; skip ended (3) and not-started (0) matches
         if str(item.get("time_status", "1")) != "1":
             continue
+        _league = item.get("league") or {}
         live.append({
             "fi": fi,
             "event_id": event_id or fi,
             "sport_id": str(item.get("sport_id", os.environ.get("SPORT_ID", "3"))),
-            "league": item.get("league"),
+            "league_id": str(_league.get("id")) if _league.get("id") is not None else None,
+            "league_name": _league.get("name"),
+            "league": _league,
             "home": item.get("home"),
             "away": item.get("away"),
             "time_status": item.get("time_status"),
@@ -278,35 +528,35 @@ def build_live_snapshot_lineage(
             "events_inplay",
             payloads.get("events_inplay"),
             {"sport_id": sport_id},
-            f"{bronze_base}/events_inplay_full.json",
+            f"{bronze_base}/api_inplay_event_list.json",
             "Find live cricket matches and current score/status from /v3/events/inplay.",
         ),
         build_api_call_lineage(
             "event_view",
             payloads.get("event_view"),
             {"event_id": event_id},
-            f"{bronze_base}/event_view_by_event_id.json",
+            f"{bronze_base}/api_event_view.json",
             "Get event scoreboard/details from /v1/event/view using event_id.",
         ),
         build_api_call_lineage(
             "event_odds_summary",
             payloads.get("event_odds_summary"),
             {"event_id": event_id},
-            f"{bronze_base}/event_odds_summary_by_event_id.json",
+            f"{bronze_base}/api_event_odds_summary.json",
             "Get compact odds summary from /v2/event/odds/summary using event_id.",
         ),
         build_api_call_lineage(
             "event_odds",
             payloads.get("event_odds"),
             {"event_id": event_id},
-            f"{bronze_base}/event_odds_by_event_id.json",
+            f"{bronze_base}/api_event_odds.json",
             "Get event odds history from /v2/event/odds using event_id.",
         ),
         build_api_call_lineage(
             "bet365_event",
             payloads.get("bet365_event"),
             {"FI": fi},
-            f"{bronze_base}/bet365_event_by_fi.json",
+            f"{bronze_base}/api_live_market_odds.json",
             "Get live Bet365 market stream from /v1/bet365/event using FI/bet365_id.",
         ),
     ]
@@ -329,6 +579,82 @@ def build_live_snapshot_lineage(
         "bronze_base_path": f"bronze/{base_path}",
         "api_calls": calls,
     }
+
+
+# -----------------------------
+# League preferences
+# -----------------------------
+
+_LEAGUE_PREFS_PATH = "cricket/config/league_preferences.json"
+
+
+def load_excluded_league_ids() -> set:
+    """Return a set of league_id strings that are excluded from capture."""
+    gold = get_named_container_client("gold")
+    prefs = download_json(gold, _LEAGUE_PREFS_PATH) or {}
+    return set(str(lid) for lid in prefs.get("excluded_league_ids", []))
+
+
+def save_league_preferences(excluded_ids: set) -> None:
+    gold = get_named_container_client("gold")
+    upload_json(
+        gold,
+        _LEAGUE_PREFS_PATH,
+        {"excluded_league_ids": sorted(excluded_ids), "updated_at_utc": utc_now().isoformat()},
+        overwrite=True,
+    )
+
+
+def collect_known_leagues() -> List[Dict[str, Any]]:
+    """Gather all leagues seen across live, prematch, ended, league, and innings-tracker indexes."""
+    gold = get_named_container_client("gold")
+    leagues: Dict[str, Dict[str, Any]] = {}
+
+    def merge(lid: Optional[str], lname: Optional[str], source: str) -> None:
+        lid = str(lid or "").strip()
+        if not lid:
+            return
+        if lid not in leagues:
+            leagues[lid] = {"league_id": lid, "league_name": lname or lid, "sources": []}
+        if source not in leagues[lid]["sources"]:
+            leagues[lid]["sources"].append(source)
+        if lname and lname != lid and not leagues[lid].get("league_name"):
+            leagues[lid]["league_name"] = lname
+
+    # Match-level indexes: live, prematch, ended
+    for idx_path, source in [
+        ("cricket/matches/latest/index.json", "live"),
+        ("cricket/prematch/latest/index.json", "prematch"),
+        ("cricket/ended/latest/index.json", "ended"),
+    ]:
+        try:
+            idx = download_json(gold, idx_path) or {}
+            for m in (idx.get("matches") or []):
+                merge(m.get("league_id"), m.get("league_name"), source)
+        except Exception:
+            pass
+
+    # Prebuilt league-level indexes (more stable than match-level)
+    for idx_path, source in [
+        ("cricket/leagues/index.json", "live_leagues"),
+        ("cricket/prematch/leagues/index.json", "prematch_leagues"),
+    ]:
+        try:
+            idx = download_json(gold, idx_path) or {}
+            for lg in (idx.get("leagues") or []):
+                merge(lg.get("league_id"), lg.get("league_name"), source)
+        except Exception:
+            pass
+
+    # Innings tracker index — captures historical leagues even if gold indexes are stale
+    try:
+        tracker_idx = download_json(gold, "cricket/innings_tracker/index.json") or {}
+        for m in (tracker_idx.get("matches") or []):
+            merge(m.get("league_id"), m.get("league_name"), "innings_tracker")
+    except Exception:
+        pass
+
+    return sorted(leagues.values(), key=lambda x: x.get("league_name") or "")
 
 
 # -----------------------------
@@ -394,12 +720,16 @@ def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
         return
 
     active_matches = control["active_matches"]
+    excluded_leagues = load_excluded_league_ids()
 
     # Capture the full inplay response once per run and copy it into every
     # snapshot folder for lineage/debugging.
     events_inplay_payload = call_betsapi(path="/v3/events/inplay", params={"sport_id": sport_id})
 
     for match in active_matches:
+        if excluded_leagues and str(match.get("league_id") or "") in excluded_leagues:
+            logging.info(json.dumps({"event": "inplay_snapshot_skipped_league", "league_id": match.get("league_id"), "league_name": match.get("league_name")}))
+            continue
         snapshot_time = utc_now()
         snapshot_id = ts_compact(snapshot_time)
         fi = str(match["fi"])
@@ -437,18 +767,12 @@ def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
             "fi": fi,
             "match_from_filter": match,
             "files": {
-                # New explicit names.
-                "events_inplay_full": f"bronze/{base_path}/events_inplay_full.json",
-                "event_view_by_event_id": f"bronze/{base_path}/event_view_by_event_id.json",
-                "event_odds_summary_by_event_id": f"bronze/{base_path}/event_odds_summary_by_event_id.json",
-                "event_odds_by_event_id": f"bronze/{base_path}/event_odds_by_event_id.json",
-                "bet365_event_by_fi": f"bronze/{base_path}/bet365_event_by_fi.json",
+                "api_inplay_event_list": f"bronze/{base_path}/api_inplay_event_list.json",
+                "api_event_view": f"bronze/{base_path}/api_event_view.json",
+                "api_event_odds_summary": f"bronze/{base_path}/api_event_odds_summary.json",
+                "api_event_odds": f"bronze/{base_path}/api_event_odds.json",
+                "api_live_market_odds": f"bronze/{base_path}/api_live_market_odds.json",
                 "lineage": f"bronze/{base_path}/lineage.json",
-
-                # Legacy names kept so older silver code/pages do not break.
-                "events_inplay": f"bronze/{base_path}/events_inplay.json",
-                "bet365_event": f"bronze/{base_path}/bet365_event.json",
-                "event_odds": f"bronze/{base_path}/event_odds.json",
             },
             "api_lineage": lineage,
             "status": {
@@ -468,18 +792,12 @@ def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
             },
         }
 
-        # New explicit raw files.
-        upload_json(container, f"{base_path}/events_inplay_full.json", events_inplay_payload)
-        upload_json(container, f"{base_path}/event_view_by_event_id.json", event_view_payload)
-        upload_json(container, f"{base_path}/event_odds_summary_by_event_id.json", event_odds_summary_payload)
-        upload_json(container, f"{base_path}/event_odds_by_event_id.json", event_odds_payload)
-        upload_json(container, f"{base_path}/bet365_event_by_fi.json", bet365_event_payload)
+        upload_json(container, f"{base_path}/api_inplay_event_list.json", events_inplay_payload)
+        upload_json(container, f"{base_path}/api_event_view.json", event_view_payload)
+        upload_json(container, f"{base_path}/api_event_odds_summary.json", event_odds_summary_payload)
+        upload_json(container, f"{base_path}/api_event_odds.json", event_odds_payload)
+        upload_json(container, f"{base_path}/api_live_market_odds.json", bet365_event_payload)
         upload_json(container, f"{base_path}/lineage.json", lineage)
-
-        # Legacy copies for backward compatibility.
-        upload_json(container, f"{base_path}/events_inplay.json", events_inplay_payload)
-        upload_json(container, f"{base_path}/bet365_event.json", bet365_event_payload)
-        upload_json(container, f"{base_path}/event_odds.json", event_odds_payload)
         upload_json(container, f"{base_path}/manifest.json", manifest)
 
 
@@ -829,6 +1147,9 @@ def parse_silver_snapshot(
         "time_status": matching_event.get("time_status") or match_from_filter.get("time_status"),
         "score_summary_events": matching_event.get("ss") or event_view_item.get("ss") or match_from_filter.get("raw_item", {}).get("ss"),
         "score_summary_bet365": ev.get("SS"),
+        "venue": event_view_item.get("venue") or event_view_item.get("ve") or matching_event.get("venue") or None,
+        "event_time_unix": matching_event.get("time") or match_from_filter.get("event_time_unix"),
+        "event_time_utc": format_unix_ts(matching_event.get("time") or match_from_filter.get("event_time_unix")),
         "bet365_event_success": manifest.get("status", {}).get("bet365_event_success"),
         "events_inplay_success": manifest.get("status", {}).get("events_inplay_success"),
         "event_odds_success": manifest.get("status", {}).get("event_odds_success"),
@@ -901,39 +1222,85 @@ def parse_silver_snapshot(
 def write_silver_outputs(silver_container, parsed: Dict[str, Any]) -> None:
     match = parsed["match_snapshot"]
     dt = datetime.fromisoformat(match["snapshot_time_utc"].replace("Z", "+00:00"))
+    event_id = match["event_id"]
     base = (
         f"cricket/inplay/year={dt.year}/month={dt.month:02d}/day={dt.day:02d}/hour={dt.hour:02d}/"
-        f"event_id={match['event_id']}/snapshot_id={match['snapshot_id']}"
+        f"event_id={event_id}/snapshot_id={match['snapshot_id']}"
     )
-    upload_json(silver_container, f"{base}/match_snapshot.json", parsed["match_snapshot"], overwrite=True)
+    upload_json(silver_container, f"{base}/match_state.json", parsed["match_snapshot"], overwrite=True)
     upload_json(silver_container, f"{base}/team_scores.json", {"rows": parsed["team_scores"]}, overwrite=True)
     upload_json(silver_container, f"{base}/player_entries.json", {"rows": parsed["player_entries"]}, overwrite=True)
-    upload_json(silver_container, f"{base}/odds_records.json", {"rows": parsed["odds_records"]}, overwrite=True)
+    upload_json(silver_container, f"{base}/market_odds.json", {"rows": parsed["odds_records"]}, overwrite=True)
     current_market_rows = parsed.get("current_markets", [])
-    upload_json(silver_container, f"{base}/current_markets.json", {"rows": current_market_rows}, overwrite=True)
+    upload_json(silver_container, f"{base}/active_markets.json", {"rows": current_market_rows}, overwrite=True)
+
     # Keep a stable per-event file with the last non-empty market snapshot so the
     # gold page never shows 0 markets just because Bet365 suspended prices momentarily.
     if current_market_rows:
-        control_path = f"cricket/inplay/control/event_id={match['event_id']}/last_known_markets.json"
+        control_path = f"cricket/inplay/control/event_id={event_id}/last_known_markets.json"
         upload_json(silver_container, control_path, {
             "rows": current_market_rows,
             "snapshot_id": match["snapshot_id"],
             "snapshot_time_utc": match["snapshot_time_utc"],
         }, overwrite=True)
+
+    # --- Write to CricWebsite PostgreSQL (oddsdb) ---
+    write_to_cricwebsite_db(match, parsed["team_scores"], current_market_rows)
+
+    # --- Innings tracker: extract data point here (bronze→silver), not in gold ---
+    # The raw ingredients (team_scores + active_markets) are already parsed above.
+    # We write one innings_snapshot.json per snapshot and maintain a per-event
+    # accumulator so the gold builder only needs to read from silver.
+    innings_point = extract_innings_snapshot(
+        match,
+        parsed["team_scores"],
+        current_market_rows,
+    )
+    if innings_point is not None:
+        upload_json(silver_container, f"{base}/innings_snapshot.json", innings_point, overwrite=True)
+        acc_path = f"cricket/inplay/control/event_id={event_id}/innings_accumulator.json"
+        acc = download_json(silver_container, acc_path) or {
+            "event_id": event_id,
+            "match_name": match.get("match_name"),
+            "league_id": match.get("league_id"),
+            "league_name": match.get("league_name"),
+            "home_team_name": match.get("home_team_name"),
+            "away_team_name": match.get("away_team_name"),
+            "venue": match.get("venue"),
+            "match_date_utc": match.get("event_time_utc"),
+            "rows": [],
+        }
+        rows: List[Dict[str, Any]] = acc.get("rows", [])
+        last = rows[-1] if rows else None
+        if last is None or last.get("over") != innings_point.get("over") or last.get("score") != innings_point.get("score"):
+            rows.append(innings_point)
+        elif innings_point.get("predicted_total") is not None and last.get("predicted_total") != innings_point.get("predicted_total"):
+            # Same over/score but prediction changed (e.g. market detection improved) — update in place
+            rows[-1] = innings_point
+        acc["rows"] = rows
+        acc["last_updated_utc"] = utc_now().isoformat()
+        # Propagate latest match metadata in case earlier snapshots lacked it
+        if match.get("match_name") and not acc.get("match_name"):
+            acc["match_name"] = match["match_name"]
+        if match.get("venue") and not acc.get("venue"):
+            acc["venue"] = match["venue"]
+        upload_json(silver_container, acc_path, acc, overwrite=True)
+
     if match.get("api_lineage"):
         upload_json(silver_container, f"{base}/lineage.json", match["api_lineage"], overwrite=True)
 
-    marker_path = f"cricket/control/processed_snapshots/{match['snapshot_id']}_{match['event_id']}_{match['fi']}.json"
+    marker_path = f"cricket/control/processed_snapshots/{match['snapshot_id']}_{event_id}_{match['fi']}.json"
     marker = {
         "processed_at_utc": utc_now().isoformat(),
         "snapshot_id": match["snapshot_id"],
-        "event_id": match["event_id"],
+        "event_id": event_id,
         "fi": match["fi"],
         "silver_base_path": f"silver/{base}",
         "team_score_count": len(parsed["team_scores"]),
         "player_entry_count": len(parsed["player_entries"]),
         "odds_record_count": len(parsed["odds_records"]),
-        "current_market_selection_count": len(parsed.get("current_markets", [])),
+        "current_market_selection_count": len(current_market_rows),
+        "innings_snapshot_written": innings_point is not None,
         "lineage_path": f"silver/{base}/lineage.json" if match.get("api_lineage") else None,
     }
     upload_json(silver_container, marker_path, marker, overwrite=True)
@@ -960,19 +1327,28 @@ def parse_cricket_bronze_to_silver(timer: func.TimerRequest) -> None:
                 continue
             base_path = manifest_path.removesuffix("/manifest.json")
             events_inplay_payload = (
-                download_json(bronze, f"{base_path}/events_inplay_full.json")
+                download_json(bronze, f"{base_path}/api_inplay_event_list.json")
+                or download_json(bronze, f"{base_path}/events_inplay_full.json")
                 or download_required_json(bronze, f"{base_path}/events_inplay.json")
             )
             bet365_event_payload = (
-                download_json(bronze, f"{base_path}/bet365_event_by_fi.json")
+                download_json(bronze, f"{base_path}/api_live_market_odds.json")
+                or download_json(bronze, f"{base_path}/bet365_event_by_fi.json")
                 or download_required_json(bronze, f"{base_path}/bet365_event.json")
             )
             event_odds_payload = (
-                download_json(bronze, f"{base_path}/event_odds_by_event_id.json")
+                download_json(bronze, f"{base_path}/api_event_odds.json")
+                or download_json(bronze, f"{base_path}/event_odds_by_event_id.json")
                 or download_required_json(bronze, f"{base_path}/event_odds.json")
             )
-            event_view_payload = download_json(bronze, f"{base_path}/event_view_by_event_id.json")
-            event_odds_summary_payload = download_json(bronze, f"{base_path}/event_odds_summary_by_event_id.json")
+            event_view_payload = (
+                download_json(bronze, f"{base_path}/api_event_view.json")
+                or download_json(bronze, f"{base_path}/event_view_by_event_id.json")
+            )
+            event_odds_summary_payload = (
+                download_json(bronze, f"{base_path}/api_event_odds_summary.json")
+                or download_json(bronze, f"{base_path}/event_odds_summary_by_event_id.json")
+            )
             lineage_payload = download_json(bronze, f"{base_path}/lineage.json")
             parsed = parse_silver_snapshot(
                 manifest,
@@ -1007,14 +1383,14 @@ def list_latest_silver_match_snapshots(silver_container, limit: int) -> List[str
     snapshots = []
     for blob in silver_container.list_blobs(name_starts_with=prefix):
         name = blob.name
-        if name.endswith("/match_snapshot.json"):
+        if name.endswith("/match_state.json"):
             snapshots.append((getattr(blob, "last_modified", None), name))
     snapshots.sort(key=lambda x: x[0] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     return [name for _, name in snapshots[:limit]]
 
 
 def base_path_from_match_snapshot_path(match_snapshot_path: str) -> str:
-    return match_snapshot_path.removesuffix("/match_snapshot.json")
+    return match_snapshot_path.removesuffix("/match_state.json")
 
 
 def build_match_page(
@@ -1048,6 +1424,9 @@ def build_match_page(
             "home_team": {"id": match_snapshot.get("home_team_id"), "name": match_snapshot.get("home_team_name")},
             "away_team": {"id": match_snapshot.get("away_team_id"), "name": match_snapshot.get("away_team_name")},
             "time_status": match_snapshot.get("time_status"),
+            "venue": match_snapshot.get("venue"),
+            "event_time_unix": match_snapshot.get("event_time_unix"),
+            "event_time_utc": match_snapshot.get("event_time_utc"),
         },
         "score": {
             "summary_from_events": match_snapshot.get("score_summary_events"),
@@ -1080,8 +1459,8 @@ def write_gold_match_page(gold_container, match_page: Dict[str, Any]) -> None:
         f"cricket/matches/history/event_id={event_id}/year={dt.year}/month={dt.month:02d}/day={dt.day:02d}/hour={dt.hour:02d}/snapshot_id={snapshot_id}"
     )
     latest_base = f"cricket/matches/latest/event_id={event_id}"
-    upload_json(gold_container, f"{history_base}/match_page.json", match_page, overwrite=True)
-    upload_json(gold_container, f"{latest_base}/match_page.json", match_page, overwrite=True)
+    upload_json(gold_container, f"{history_base}/match_dashboard.json", match_page, overwrite=True)
+    upload_json(gold_container, f"{latest_base}/match_dashboard.json", match_page, overwrite=True)
     if match_page.get("data_lineage"):
         upload_json(gold_container, f"{history_base}/lineage.json", match_page["data_lineage"], overwrite=True)
         upload_json(gold_container, f"{latest_base}/lineage.json", match_page["data_lineage"], overwrite=True)
@@ -1111,7 +1490,7 @@ def build_match_index_row(page: Dict[str, Any]) -> Dict[str, Any]:
         "time_status": header.get("time_status"),
         "current_market_count": current_markets.get("market_count"),
         "current_market_selection_count": current_markets.get("selection_count"),
-        "latest_gold_path": f"gold/cricket/matches/latest/event_id={event_id}/match_page.json",
+        "latest_gold_path": f"gold/cricket/matches/latest/event_id={event_id}/match_dashboard.json",
     }
 
 
@@ -1156,6 +1535,16 @@ def write_gold_index(gold_container, pages: List[Dict[str, Any]]) -> None:
         if str(row.get("time_status") or "") == "3":
             latest_by_event.pop(event_id, None)
             continue
+        # Also drop stale snapshots from new pages (same cutoff as the existing-index loop)
+        snapshot_time = row.get("snapshot_time_utc")
+        if snapshot_time:
+            try:
+                dt = datetime.fromisoformat(snapshot_time.replace("Z", "+00:00"))
+                if dt < cutoff:
+                    latest_by_event.pop(event_id, None)
+                    continue
+            except Exception:
+                pass
         current = latest_by_event.get(event_id)
         if current is None or (row.get("snapshot_time_utc") or "") >= (current.get("snapshot_time_utc") or ""):
             latest_by_event[event_id] = row
@@ -1249,8 +1638,8 @@ def build_cricket_gold_match_pages(timer: func.TimerRequest) -> None:
     for match_snapshot_path in match_snapshot_paths:
         try:
             base_path = base_path_from_match_snapshot_path(match_snapshot_path)
-            match_snapshot = download_required_json(silver, f"{base_path}/match_snapshot.json")
-            match_snapshot["source_silver_match_snapshot_path"] = f"silver/{base_path}/match_snapshot.json"
+            match_snapshot = download_required_json(silver, f"{base_path}/match_state.json")
+            match_snapshot["source_silver_match_snapshot_path"] = f"silver/{base_path}/match_state.json"
             match_snapshot["source_silver_lineage_path"] = f"silver/{base_path}/lineage.json"
             if not match_snapshot.get("api_lineage"):
                 lineage_from_silver = download_json(silver, f"{base_path}/lineage.json")
@@ -1258,9 +1647,9 @@ def build_cricket_gold_match_pages(timer: func.TimerRequest) -> None:
                     match_snapshot["api_lineage"] = lineage_from_silver
             team_scores = download_required_json(silver, f"{base_path}/team_scores.json")
             player_entries = download_required_json(silver, f"{base_path}/player_entries.json")
-            odds_records = download_required_json(silver, f"{base_path}/odds_records.json")
+            odds_records = download_required_json(silver, f"{base_path}/market_odds.json")
             try:
-                current_markets = download_required_json(silver, f"{base_path}/current_markets.json")
+                current_markets = download_required_json(silver, f"{base_path}/active_markets.json")
             except ResourceNotFoundError:
                 current_markets = {"rows": []}
             # If this snapshot has no markets (Bet365 suspended/ended), use the last
@@ -1273,6 +1662,10 @@ def build_cricket_gold_match_pages(timer: func.TimerRequest) -> None:
                     current_markets = fallback
             match_page = build_match_page(match_snapshot, team_scores, player_entries, odds_records, current_markets)
             write_gold_match_page(gold, match_page)
+            try:
+                write_gold_innings_tracker_from_silver(gold, silver, match_page)
+            except Exception:
+                logging.exception("Failed to write gold innings tracker")
             built_pages.append(match_page)
             processed += 1
         except Exception:
@@ -1289,6 +1682,384 @@ def build_cricket_gold_match_pages(timer: func.TimerRequest) -> None:
         "checked": len(match_snapshot_paths),
     }))
 
+
+
+# -----------------------------
+# Innings tracker
+# -----------------------------
+
+_OVERS_RE = re.compile(r'(?<!\d)(\d+)\.([0-5])(?!\d)')
+
+
+def parse_overs_string(text: Optional[str]) -> Optional[str]:
+    """Return overs like '17.3' from text like '185/5 (17.3 ov)'. Returns None if not found."""
+    if not text:
+        return None
+    m = _OVERS_RE.search(str(text))
+    if m:
+        return f"{m.group(1)}.{m.group(2)}"
+    return None
+
+
+def overs_to_float(overs_str: Optional[str]) -> Optional[float]:
+    """Convert cricket overs notation '17.3' (17 overs 3 balls) to a decimal float (17.5)."""
+    if not overs_str:
+        return None
+    try:
+        parts = str(overs_str).split(".")
+        full_overs = int(parts[0])
+        balls = int(parts[1]) if len(parts) > 1 else 0
+        return round(full_overs + balls / 6.0, 4)
+    except Exception:
+        return None
+
+
+def extract_innings_snapshot(
+    match_snapshot: Dict[str, Any],
+    team_score_rows: List[Dict[str, Any]],
+    current_market_rows: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Build one innings tracker data point from the current match state.
+
+    Returns None if there is not enough data (no over or score).
+    """
+    home_team = str(match_snapshot.get("home_team_name") or "")
+    away_team = str(match_snapshot.get("away_team_name") or "")
+
+    # --- Extract current over, score, wickets ---
+    # The batting team's TE record usually has overs in raw_score_text (SC field).
+    current_over: Optional[str] = None
+    current_score: Optional[int] = None
+    current_wickets: Optional[int] = None
+    batting_team: Optional[str] = None
+
+    for row in team_score_rows:
+        raw_text = str(row.get("raw_score_text") or "")
+        over_str = parse_overs_string(raw_text)
+
+        # Also try s3 field which carries overs as "17.3" or plain integer "17" / "0"
+        s3 = str(row.get("s3") or "").strip()
+        if not over_str and s3:
+            over_str = parse_overs_string(s3)
+            if not over_str and re.match(r'^\d+\.[0-5]$', s3):
+                over_str = s3
+            # Plain integer like "0" or "17" — treat as completed overs (no balls)
+            if not over_str and re.match(r'^\d+$', s3):
+                over_str = f"{s3}.0"
+
+        if over_str:
+            current_over = over_str
+            batting_team = str(row.get("name") or "")
+            current_score = row.get("runs")
+            current_wickets = row.get("wickets")
+            break
+
+    # Fallback: parse score from summary string
+    if current_score is None:
+        ss = str(match_snapshot.get("score_summary_events") or match_snapshot.get("score_summary_bet365") or "")
+        m_ss = re.match(r'^(\d+)[/#](\d+)', ss)
+        if m_ss:
+            current_score = int(m_ss.group(1))
+            current_wickets = int(m_ss.group(2))
+
+    if current_score is None:
+        return None
+
+    # Fallback: try to get overs from Bet365 SS field
+    if not current_over:
+        ss_b365 = str(match_snapshot.get("score_summary_bet365") or "")
+        current_over = parse_overs_string(ss_b365)
+
+    bowling_team = (away_team if batting_team == home_team else home_team) if batting_team else away_team
+
+    # --- Find predicted total from innings total runs market ---
+    # _is_innings_market is defined at module level and shared with the DB writer.
+
+    # Include suspended rows — the batting team's total market is routinely suspended
+    # while in-play, but its line (e.g. 276.5) is still the valid predicted total.
+    innings_rows = [
+        r for r in current_market_rows
+        if r.get("market_group_name") and _is_innings_market(r["market_group_name"])
+    ]
+
+    # Parse line from display_selection_name to avoid the sub-market overwrite problem.
+    # "Over 276.5"  → direction=over,  line=276.5   ✓
+    # "Over 290 276.5" → no match (two numbers)      ✗  (different sub-market)
+    # "Under 270 276.5" → no match                   ✗
+    _SIMPLE_OVER_RE = re.compile(r'^[Oo]ver\s+([\d.]+)$')
+    _SIMPLE_UNDER_RE = re.compile(r'^[Uu]nder\s+([\d.]+)$')
+
+    by_line: Dict[str, Dict[str, Optional[float]]] = {}
+    for r in innings_rows:
+        sel_name = str(r.get("display_selection_name") or r.get("selection_name") or "").strip()
+        m_ov = _SIMPLE_OVER_RE.match(sel_name)
+        m_un = _SIMPLE_UNDER_RE.match(sel_name)
+        if m_ov:
+            line_key = m_ov.group(1)
+            by_line.setdefault(line_key, {})["over"] = r.get("odds_decimal")
+        elif m_un:
+            line_key = m_un.group(1)
+            by_line.setdefault(line_key, {})["under"] = r.get("odds_decimal")
+
+    predicted_total: Optional[float] = None
+    over_odds_at_line: Optional[float] = None
+    under_odds_at_line: Optional[float] = None
+    best_diff = float("inf")
+    best_line_val = -1.0
+    for line_str, ln_odds in by_line.items():
+        ov = ln_odds.get("over")
+        un = ln_odds.get("under")
+        if ov is None or un is None:
+            continue
+        diff = abs(ov - un)
+        try:
+            line_val = float(line_str)
+        except Exception:
+            continue
+        # Prefer the line with smallest odds diff (closest to fair).
+        # On a tie, prefer the HIGHER line — the full innings total is always
+        # higher than any sub-segment market (e.g. "5 Overs Runs" line ~52.5
+        # vs "50 Overs Runs" line ~276.5).
+        if diff < best_diff or (diff == best_diff and line_val > best_line_val):
+            best_diff = diff
+            best_line_val = line_val
+            predicted_total = line_val
+            over_odds_at_line = ov
+            under_odds_at_line = un
+
+    # --- Find "Full Time" / "Match Betting" team odds ---
+    winner_keywords = ["full time", "match betting", "match winner", "to win the match", "win match"]
+    winner_rows = [
+        r for r in current_market_rows
+        if r.get("market_group_name") and any(
+            kw in r["market_group_name"].lower() for kw in winner_keywords
+        ) and r.get("odds_decimal") and not r.get("suspended")
+    ]
+
+    home_odds: Optional[float] = None
+    away_odds: Optional[float] = None
+    for r in winner_rows:
+        sel = str(r.get("selection_name") or "").strip().lower()
+        od = r.get("odds_decimal")
+        if home_team and home_team.lower() in sel:
+            home_odds = od
+        elif away_team and away_team.lower() in sel:
+            away_odds = od
+    if home_odds is None and len(winner_rows) >= 1:
+        home_odds = winner_rows[0].get("odds_decimal")
+    if away_odds is None and len(winner_rows) >= 2:
+        away_odds = winner_rows[1].get("odds_decimal")
+
+    batting_odds = (home_odds if batting_team == home_team else away_odds) if batting_team else home_odds
+    bowling_odds = (away_odds if batting_team == home_team else home_odds) if batting_team else away_odds
+
+    innings_market_name = innings_rows[0].get("market_group_name") if innings_rows else None
+    return {
+        "over": current_over,
+        "over_float": overs_to_float(current_over),
+        "score": current_score,
+        "wickets": current_wickets,
+        "batting_team": batting_team or home_team,
+        "bowling_team": bowling_team or away_team,
+        "batting_team_odds": batting_odds,
+        "bowling_team_odds": bowling_odds,
+        "home_team_odds": home_odds,
+        "away_team_odds": away_odds,
+        "predicted_total": predicted_total,
+        "over_odds_at_line": over_odds_at_line,
+        "under_odds_at_line": under_odds_at_line,
+        "innings_market_name": innings_market_name,
+        "snapshot_id": match_snapshot.get("snapshot_id"),
+        "snapshot_time_utc": match_snapshot.get("snapshot_time_utc"),
+    }
+
+
+def write_gold_innings_tracker_from_silver(
+    gold_container,
+    silver_container,
+    match_page: Dict[str, Any],
+) -> None:
+    """Build the gold innings tracker by reading from the silver accumulator.
+
+    All extraction logic lives in write_silver_outputs (bronze→silver step).
+    This function only reads the silver accumulator and promotes it to gold,
+    adding outcome detection if the match has ended.
+    """
+    snapshot = match_page.get("snapshot") or {}
+    header = match_page.get("match_header") or {}
+    event_id = str(snapshot.get("event_id") or "")
+    if not event_id:
+        return
+
+    acc_path = f"cricket/inplay/control/event_id={event_id}/innings_accumulator.json"
+    acc = download_json(silver_container, acc_path) or {}
+    rows: List[Dict[str, Any]] = acc.get("rows", [])
+
+    # Detect outcome if the match has ended (time_status == "3")
+    time_status = str(header.get("time_status") or "")
+    score = match_page.get("score") or {}
+    score_summary = score.get("summary_from_events") or score.get("summary_from_bet365") or ""
+    outcome: Optional[str] = acc.get("outcome")
+    actual_total: Optional[int] = acc.get("actual_total")
+    if time_status == "3" and outcome is None and rows:
+        m_ss = re.match(r'^(\d+)', str(score_summary))
+        if m_ss:
+            actual_total = int(m_ss.group(1))
+            last_predicted = rows[-1].get("predicted_total")
+            if last_predicted is not None:
+                if actual_total > last_predicted:
+                    outcome = "over"
+                elif actual_total < last_predicted:
+                    outcome = "under"
+                else:
+                    outcome = "push"
+
+    match_name = acc.get("match_name") or header.get("match_name")
+    venue = acc.get("venue") or header.get("venue")
+    tracker = {
+        "event_id": event_id,
+        "match_name": match_name,
+        "venue": venue,
+        "match_date_utc": acc.get("match_date_utc") or header.get("event_time_utc"),
+        "league_id": acc.get("league_id") or header.get("league_id"),
+        "league_name": acc.get("league_name") or header.get("league_name"),
+        "home_team_name": acc.get("home_team_name") or (header.get("home_team") or {}).get("name"),
+        "away_team_name": acc.get("away_team_name") or (header.get("away_team") or {}).get("name"),
+        "rows": rows,
+        "outcome": outcome,
+        "actual_total": actual_total,
+        "last_updated_utc": utc_now().isoformat(),
+    }
+
+    tracker_path = f"cricket/innings_tracker/event_id={event_id}/innings_1.json"
+    upload_json(gold_container, tracker_path, tracker, overwrite=True)
+
+    index_path = "cricket/innings_tracker/index.json"
+    idx = download_json(gold_container, index_path) or {}
+    matches_idx: Dict[str, Dict] = {str(m.get("event_id") or ""): m for m in idx.get("matches", [])}
+    matches_idx[event_id] = {
+        "event_id": event_id,
+        "match_name": match_name,
+        "venue": venue,
+        "match_date_utc": tracker["match_date_utc"],
+        "league_id": tracker["league_id"],
+        "league_name": tracker["league_name"],
+        "home_team_name": tracker["home_team_name"],
+        "away_team_name": tracker["away_team_name"],
+        "row_count": len(rows),
+        "has_outcome": outcome is not None,
+        "outcome": outcome,
+        "actual_total": actual_total,
+        "tracker_path": f"gold/{tracker_path}",
+    }
+    upload_json(
+        gold_container,
+        index_path,
+        {"generated_at_utc": utc_now().isoformat(), "match_count": len(matches_idx), "matches": list(matches_idx.values())},
+        overwrite=True,
+    )
+
+
+def update_innings_tracker(
+    gold_container,
+    match_page: Dict[str, Any],
+    team_score_rows: List[Dict[str, Any]],
+    current_market_rows: List[Dict[str, Any]],
+) -> None:
+    """Append a tracker row when the over or score changed. Also resolve outcome when match ends."""
+    snapshot = match_page.get("snapshot") or {}
+    header = match_page.get("match_header") or {}
+    event_id = str(snapshot.get("event_id") or "")
+    if not event_id:
+        return
+
+    tracker_path = f"cricket/innings_tracker/event_id={event_id}/innings_1.json"
+    existing = download_json(gold_container, tracker_path) or {}
+    rows: List[Dict[str, Any]] = existing.get("rows", [])
+
+    time_status = str(header.get("time_status") or "")
+    score = match_page.get("score") or {}
+    score_summary = score.get("summary_from_events") or score.get("summary_from_bet365") or ""
+
+    # Try to resolve outcome when match ends (time_status == "3").
+    outcome = existing.get("outcome")
+    actual_total = existing.get("actual_total")
+    if time_status == "3" and outcome is None and rows:
+        m_ss = re.match(r'^(\d+)', str(score_summary))
+        if m_ss:
+            actual_total = int(m_ss.group(1))
+            last_predicted = rows[-1].get("predicted_total")
+            if last_predicted is not None and actual_total is not None:
+                if actual_total > last_predicted:
+                    outcome = "over"
+                elif actual_total < last_predicted:
+                    outcome = "under"
+                else:
+                    outcome = "push"
+
+    # Only append new data rows during live play (not yet ended).
+    if time_status != "3":
+        ms_for_tracker = {
+            "snapshot_id": snapshot.get("snapshot_id"),
+            "snapshot_time_utc": snapshot.get("snapshot_time_utc"),
+            "event_id": event_id,
+            "home_team_name": (header.get("home_team") or {}).get("name"),
+            "away_team_name": (header.get("away_team") or {}).get("name"),
+            "score_summary_events": score.get("summary_from_events"),
+            "score_summary_bet365": score.get("summary_from_bet365"),
+            "venue": header.get("venue"),
+        }
+        data_point = extract_innings_snapshot(ms_for_tracker, team_score_rows, current_market_rows)
+        if data_point is not None:
+            last = rows[-1] if rows else None
+            if last is None or last.get("over") != data_point.get("over") or last.get("score") != data_point.get("score"):
+                rows.append(data_point)
+
+    tracker = {
+        "event_id": event_id,
+        "match_name": header.get("match_name"),
+        "venue": header.get("venue"),
+        "match_date_utc": header.get("event_time_utc"),
+        "league_id": header.get("league_id"),
+        "league_name": header.get("league_name"),
+        "home_team_name": (header.get("home_team") or {}).get("name"),
+        "away_team_name": (header.get("away_team") or {}).get("name"),
+        "rows": rows,
+        "outcome": outcome,
+        "actual_total": actual_total,
+        "last_updated_utc": utc_now().isoformat(),
+    }
+    upload_json(gold_container, tracker_path, tracker, overwrite=True)
+
+    # Update the cross-match index.
+    index_path = "cricket/innings_tracker/index.json"
+    idx = download_json(gold_container, index_path) or {}
+    matches_idx: Dict[str, Dict] = {str(m.get("event_id") or ""): m for m in idx.get("matches", [])}
+    matches_idx[event_id] = {
+        "event_id": event_id,
+        "match_name": tracker["match_name"],
+        "venue": tracker["venue"],
+        "match_date_utc": tracker["match_date_utc"],
+        "league_id": tracker["league_id"],
+        "league_name": tracker["league_name"],
+        "home_team_name": tracker["home_team_name"],
+        "away_team_name": tracker["away_team_name"],
+        "row_count": len(rows),
+        "has_outcome": outcome is not None,
+        "outcome": outcome,
+        "actual_total": actual_total,
+        "tracker_path": f"gold/{tracker_path}",
+    }
+    upload_json(
+        gold_container,
+        index_path,
+        {
+            "generated_at_utc": utc_now().isoformat(),
+            "match_count": len(matches_idx),
+            "matches": list(matches_idx.values()),
+        },
+        overwrite=True,
+    )
 
 
 # -----------------------------
@@ -1396,7 +2167,11 @@ def capture_cricket_prematch_odds(timer: func.TimerRequest) -> None:
         logging.info(json.dumps({"event": "capture_cricket_prematch_odds_skipped", "reason": "no_upcoming_matches"}))
         return
 
-    upcoming_matches = [m for m in control.get("upcoming_matches", []) if m.get("fi")]
+    excluded_leagues = load_excluded_league_ids()
+    upcoming_matches = [
+        m for m in control.get("upcoming_matches", [])
+        if m.get("fi") and str(m.get("league_id") or "") not in excluded_leagues
+    ]
     if max_per_run > 0:
         upcoming_matches = upcoming_matches[:max_per_run]
 
@@ -1422,7 +2197,7 @@ def capture_cricket_prematch_odds(timer: func.TimerRequest) -> None:
                 "fi": fi,
                 "match_from_upcoming": match,
                 "files": {
-                    "prematch": f"bronze/{base_path}/prematch.json",
+                    "api_prematch_odds": f"bronze/{base_path}/api_prematch_odds.json",
                 },
                 "status": {
                     "prematch_success": prematch_payload["response"]["success"],
@@ -1431,7 +2206,7 @@ def capture_cricket_prematch_odds(timer: func.TimerRequest) -> None:
                 },
             }
 
-            upload_json(container, f"{base_path}/prematch.json", prematch_payload)
+            upload_json(container, f"{base_path}/api_prematch_odds.json", prematch_payload)
             upload_json(container, f"{base_path}/manifest.json", manifest)
             processed += 1
 
@@ -1670,7 +2445,7 @@ def write_prematch_gold_indexes(gold_container, pages: List[Dict[str, Any]]) -> 
             "event_time_utc": header.get("event_time_utc"),
             "prematch_market_count": markets.get("market_count"),
             "prematch_selection_count": markets.get("selection_count"),
-            "latest_gold_path": f"gold/cricket/prematch/latest/event_id={event_id}/prematch_page.json",
+            "latest_gold_path": f"gold/cricket/prematch/latest/event_id={event_id}/prematch_dashboard.json",
         }
 
         current = latest_by_event.get(event_id)
@@ -1743,13 +2518,16 @@ def build_cricket_prematch_pages(timer: func.TimerRequest) -> None:
         try:
             manifest = download_required_json(bronze, manifest_path)
             base_path = manifest_path.removesuffix("/manifest.json")
-            prematch_payload = download_required_json(bronze, f"{base_path}/prematch.json")
+            prematch_payload = (
+                download_json(bronze, f"{base_path}/api_prematch_odds.json")
+                or download_required_json(bronze, f"{base_path}/prematch.json")
+            )
             page = build_prematch_snapshot(manifest, prematch_payload)
 
             event_id = page["snapshot"]["event_id"]
             snapshot_id = page["snapshot"]["snapshot_id"]
-            upload_json(gold, f"cricket/prematch/history/event_id={event_id}/snapshot_id={snapshot_id}/prematch_page.json", page, overwrite=True)
-            upload_json(gold, f"cricket/prematch/latest/event_id={event_id}/prematch_page.json", page, overwrite=True)
+            upload_json(gold, f"cricket/prematch/history/event_id={event_id}/snapshot_id={snapshot_id}/prematch_dashboard.json", page, overwrite=True)
+            upload_json(gold, f"cricket/prematch/latest/event_id={event_id}/prematch_dashboard.json", page, overwrite=True)
             built_pages.append(page)
             processed += 1
         except Exception:
@@ -1895,7 +2673,10 @@ def get_prematch_match_json(req: func.HttpRequest) -> func.HttpResponse:
     try:
         event_id = req.route_params.get("event_id")
         gold = get_named_container_client("gold")
-        page = download_required_json(gold, f"cricket/prematch/latest/event_id={event_id}/prematch_page.json")
+        page = (
+            download_json(gold, f"cricket/prematch/latest/event_id={event_id}/prematch_dashboard.json")
+            or download_required_json(gold, f"cricket/prematch/latest/event_id={event_id}/prematch_page.json")
+        )
         return func.HttpResponse(json.dumps(page, indent=2, ensure_ascii=False), status_code=200, mimetype="application/json")
     except Exception as ex:
         logging.exception("Failed to return prematch match page JSON")
@@ -1924,7 +2705,10 @@ def get_prematch_match_html(req: func.HttpRequest) -> func.HttpResponse:
         event_id = req.route_params.get("event_id")
         market_filter = req.params.get("market")
         gold = get_named_container_client("gold")
-        page = download_required_json(gold, f"cricket/prematch/latest/event_id={event_id}/prematch_page.json")
+        page = (
+            download_json(gold, f"cricket/prematch/latest/event_id={event_id}/prematch_dashboard.json")
+            or download_required_json(gold, f"cricket/prematch/latest/event_id={event_id}/prematch_page.json")
+        )
         saved_results = download_json(gold, f"cricket/prematch/results/event_id={event_id}/results.json") or {}
         header = page.get("match_header", {}) or {}
         markets = (page.get("prematch_markets", {}) or {}).get("records", [])
@@ -2288,7 +3072,7 @@ def get_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
             league_esc = escape(league_name)
             if league_name != current_league:
                 current_league = league_name
-                rows += f'<tr class="league-header" data-league="{league_esc}"><td colspan="7">{league_esc}</td></tr>'
+                rows += f'<tr class="league-header" data-league="{league_esc}"><td colspan="9">{league_esc}</td></tr>'
             rows += f"""
             <tr data-league="{league_esc}">
                 <td>{event_id}</td>
@@ -2297,7 +3081,9 @@ def get_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
                 <td>{league_esc}</td>
                 <td>{escape(str(m.get("score") or "-"))}</td>
                 <td>{escape(str(m.get("event_time_utc") or "-"))}</td>
+                <td><a href="/api/matches/{event_id}/view">Open</a></td>
                 <td><a href="/api/prematch/{event_id}/view">Open</a></td>
+                <td><a href="/api/matches/{event_id}/innings-tracker/view">Tracker</a></td>
             </tr>
             """
         html = f"""
@@ -2325,7 +3111,7 @@ def get_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
                 <select id="leagueFilter" onchange="filterLeague()">{league_options}</select>
             </div>
             <table>
-                <thead><tr><th>Event ID</th><th>Bet365 FI</th><th>Match</th><th>League</th><th>Final Score</th><th>Start Time</th><th>Prematch Odds</th></tr></thead>
+                <thead><tr><th>Event ID</th><th>Bet365 FI</th><th>Match</th><th>League</th><th>Final Score</th><th>Start Time</th><th>Live Odds</th><th>Prematch Odds</th><th>Innings Tracker</th></tr></thead>
                 <tbody>{rows}</tbody>
             </table>
             <script>
@@ -2361,7 +3147,10 @@ def get_match_page(req: func.HttpRequest) -> func.HttpResponse:
     try:
         event_id = req.route_params.get("event_id")
         gold = get_named_container_client("gold")
-        data = download_required_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
+        data = (
+            download_json(gold, f"cricket/matches/latest/event_id={event_id}/match_dashboard.json")
+            or download_required_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
+        )
         return func.HttpResponse(json.dumps(data), status_code=200, mimetype="application/json")
     except Exception as ex:
         logging.exception("Failed to get match page")
@@ -2393,7 +3182,7 @@ def get_matches_list_html(req: func.HttpRequest) -> func.HttpResponse:
             snapshot_time = escape(str(m.get("snapshot_time_utc") or "-"))
             if league_name != current_league:
                 current_league = league_name
-                rows += f'<tr class="league-header" data-league="{league_esc}"><td colspan="9">{league_esc}</td></tr>'
+                rows += f'<tr class="league-header" data-league="{league_esc}"><td colspan="10">{league_esc}</td></tr>'
             rows += f"""
             <tr data-league="{league_esc}">
                 <td>{event_id}</td>
@@ -2405,6 +3194,7 @@ def get_matches_list_html(req: func.HttpRequest) -> func.HttpResponse:
                 <td>{selections}</td>
                 <td>{snapshot_time}</td>
                 <td><a href="/api/matches/{event_id}/view">Open</a></td>
+                <td><a href="/api/matches/{event_id}/innings-tracker/view">Tracker</a></td>
             </tr>
             """
 
@@ -2437,7 +3227,7 @@ def get_matches_list_html(req: func.HttpRequest) -> func.HttpResponse:
                 <thead>
                     <tr>
                         <th>Event ID</th><th>Bet365 FI</th><th>Match</th><th>League</th><th>Score</th>
-                        <th>Markets</th><th>Selections</th><th>Last Snapshot</th><th>Page</th>
+                        <th>Markets</th><th>Selections</th><th>Last Snapshot</th><th>Page</th><th>Innings Tracker</th>
                     </tr>
                 </thead>
                 <tbody>{rows}</tbody>
@@ -2556,7 +3346,29 @@ def get_match_page_html(req: func.HttpRequest) -> func.HttpResponse:
     try:
         event_id = req.route_params.get("event_id")
         gold = get_named_container_client("gold")
-        data = download_required_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
+        data = (
+            download_json(gold, f"cricket/matches/latest/event_id={event_id}/match_dashboard.json")
+            or download_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
+        )
+        if data is None:
+            eid_esc = escape(str(event_id))
+            return func.HttpResponse(
+                f"""<!DOCTYPE html><html><head><title>Match Not Found</title>
+<style>body{{font-family:Arial,sans-serif;margin:40px;background:#f7f7f7}}
+.box{{background:white;padding:30px;border-radius:10px;box-shadow:0 2px 8px #ddd;max-width:600px}}
+a{{color:#0066cc}}</style></head>
+<body><div class="box">
+<h2>Live match data not available for event {eid_esc}</h2>
+<p>This match may have ended before the pipeline captured a full live snapshot,
+or the data was not processed in time.</p>
+<ul>
+  <li><a href="/api/prematch/{eid_esc}/view">View prematch odds for this match</a></li>
+  <li><a href="/api/ended/view">Ended matches</a></li>
+  <li><a href="/api/matches/view">Current live matches</a></li>
+</ul>
+</div></body></html>""",
+                status_code=404, mimetype="text/html",
+            )
 
         header = data.get("match_header", {})
         score = data.get("score", {})
@@ -2594,6 +3406,8 @@ def get_match_page_html(req: func.HttpRequest) -> func.HttpResponse:
             if header.get("home_team", {}).get("name") and header.get("away_team", {}).get("name") else "Match"
         )
         score_text = score.get("summary_from_events") or score.get("summary_from_bet365") or "-"
+        venue_text = escape(str(header.get("venue") or ""))
+        match_date_text = escape(str(header.get("event_time_utc") or "")[:10])
 
         current_market_names = sorted({m.get("market_group_name") or "Unknown Market" for m in current_market_rows})
         market_options = '<option value="ALL">All current markets</option>'
@@ -2621,19 +3435,26 @@ def get_match_page_html(req: func.HttpRequest) -> func.HttpResponse:
             </tr>
             """
 
+        # Match Winner 2-Way timeline: rows that have home + away odds (not over/under)
+        mw_rows = [
+            o for o in odds
+            if o.get("home_odds") is not None and o.get("away_odds") is not None
+            and o.get("over_odds") is None
+        ]
+        home_name = escape(str((header.get("home_team") or {}).get("name") or "Home"))
+        away_name = escape(str((header.get("away_team") or {}).get("name") or "Away"))
         odds_rows = ""
-        for o in odds[:1000]:
+        for o in mw_rows[:500]:
             odds_rows += f"""
             <tr>
-                <td>{o.get('score_from_odds') or o.get('score_from_match_snapshot') or '-'}</td>
-                <td>{o.get('market_key') or '-'}</td>
-                <td>{o.get('home_odds') or '-'}</td>
-                <td>{o.get('away_odds') or '-'}</td>
-                <td>{o.get('draw_odds') or '-'}</td>
-                <td>{o.get('handicap') or '-'}</td>
-                <td>{format_unix_ts(o.get('add_time'))}</td>
+                <td>{escape(str(o.get('score_from_odds') or o.get('score_from_match_snapshot') or '-'))}</td>
+                <td>{escape(str(o.get('home_odds') or '-'))}</td>
+                <td>{escape(str(o.get('away_odds') or '-'))}</td>
+                <td>{escape(str(format_unix_ts(o.get('add_time')) or '-'))}</td>
             </tr>
             """
+        if not odds_rows:
+            odds_rows = '<tr><td colspan="4" style="color:#999;">No Match Winner timeline data captured yet.</td></tr>'
 
         html = f"""
         <!DOCTYPE html>
@@ -2643,7 +3464,8 @@ def get_match_page_html(req: func.HttpRequest) -> func.HttpResponse:
             <style>
                 body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
                 h1 {{ margin-bottom: 5px; }}
-                .score {{ font-size: 22px; margin-bottom: 25px; }}
+                .score {{ font-size: 22px; margin-bottom: 8px; }}
+                .meta {{ color: #555; font-size: 14px; margin-bottom: 4px; }}
                 .cards {{ display: flex; gap: 15px; margin-bottom: 25px; flex-wrap: wrap; }}
                 .card {{ background: white; padding: 18px; border-radius: 10px; box-shadow: 0 2px 8px #ddd; min-width: 160px; }}
                 .label {{ color: #666; font-size: 13px; }}
@@ -2658,7 +3480,12 @@ def get_match_page_html(req: func.HttpRequest) -> func.HttpResponse:
         <body>
             <h1>{match_name}</h1>
             <div class="score">Score: {score_text}</div>
-            <p><a href="/api/matches/{event_id}/lineage/view">View data lineage</a></p>
+            {f'<div class="meta">📍 {venue_text}</div>' if venue_text else ""}
+            {f'<div class="meta">📅 {match_date_text}</div>' if match_date_text else ""}
+            <p>
+                <a href="/api/matches/{event_id}/lineage/view">View data lineage</a> |
+                <a href="/api/matches/{event_id}/innings-tracker/view">Innings Tracker</a>
+            </p>
 
             <div class="cards">
                 <div class="card"><div class="label">Current Markets</div><div class="value">{len({m.get('market_group_id') or m.get('market_group_name') for m in current_market_rows})}</div></div>
@@ -2678,9 +3505,9 @@ def get_match_page_html(req: func.HttpRequest) -> func.HttpResponse:
             </div>
 
             <div class="section">
-                <h2>Odds Timeline</h2>
+                <h2>Match Winner 2-Way Timeline <span style="font-size:13px;font-weight:normal;color:#888;">({len(mw_rows)} data points from /v2/event/odds)</span></h2>
                 <table>
-                    <thead><tr><th>Score</th><th>Market Key</th><th>Home</th><th>Away</th><th>Draw</th><th>Handicap</th><th>Time</th></tr></thead>
+                    <thead><tr><th>Score</th><th>{home_name}</th><th>{away_name}</th><th>Time</th></tr></thead>
                     <tbody>{odds_rows}</tbody>
                 </table>
             </div>
@@ -2710,7 +3537,10 @@ def get_match_lineage_json(req: func.HttpRequest) -> func.HttpResponse:
         gold = get_named_container_client("gold")
         lineage = download_json(gold, f"cricket/matches/latest/event_id={event_id}/lineage.json")
         if not lineage:
-            page = download_required_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
+            page = (
+                download_json(gold, f"cricket/matches/latest/event_id={event_id}/match_dashboard.json")
+                or download_required_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
+            )
             lineage = page.get("data_lineage") or {}
         return func.HttpResponse(json.dumps(lineage, indent=2, ensure_ascii=False), status_code=200, mimetype="application/json")
     except Exception as ex:
@@ -2725,7 +3555,10 @@ def get_match_lineage_html(req: func.HttpRequest) -> func.HttpResponse:
         gold = get_named_container_client("gold")
         lineage = download_json(gold, f"cricket/matches/latest/event_id={event_id}/lineage.json")
         if not lineage:
-            page = download_required_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
+            page = (
+                download_json(gold, f"cricket/matches/latest/event_id={event_id}/match_dashboard.json")
+                or download_required_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
+            )
             lineage = page.get("data_lineage") or {}
 
         id_mapping = lineage.get("id_mapping", {}) if isinstance(lineage, dict) else {}
@@ -2787,13 +3620,373 @@ def get_match_lineage_html(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
 
 
+@app.route(route="matches/{event_id}/innings-tracker/view", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
+    """Show the 1st innings progression tracker for one match."""
+    try:
+        event_id = req.route_params.get("event_id")
+        gold = get_named_container_client("gold")
+        tracker = download_json(gold, f"cricket/innings_tracker/event_id={event_id}/innings_1.json") or {}
+
+        match_name = escape(str(tracker.get("match_name") or f"Match {event_id}"))
+        venue = escape(str(tracker.get("venue") or ""))
+        match_date = escape(str(tracker.get("match_date_utc") or "")[:10])
+        league = escape(str(tracker.get("league_name") or ""))
+        home_team = str(tracker.get("home_team_name") or "Home")
+        away_team = str(tracker.get("away_team_name") or "Away")
+        rows_data: List[Dict[str, Any]] = tracker.get("rows", [])
+        outcome = tracker.get("outcome")
+        actual_total = tracker.get("actual_total")
+
+        # Only rows where innings market had data, sorted oldest→newest
+        timeline_rows = sorted(
+            [r for r in rows_data if r.get("predicted_total") is not None],
+            key=lambda r: str(r.get("snapshot_time_utc") or ""),
+        )
+        innings_market = (
+            next((r.get("innings_market_name") for r in reversed(rows_data) if r.get("innings_market_name")), None)
+        )
+        is_live = (actual_total is None and outcome is None)
+
+        # Summary cards
+        over_count = sum(1 for r in timeline_rows if actual_total is not None and actual_total > r["predicted_total"])
+        under_count = sum(1 for r in timeline_rows if actual_total is not None and actual_total < r["predicted_total"])
+        total_decided = over_count + under_count
+        over_pct = round(100 * over_count / total_decided, 1) if total_decided else None
+        under_pct = round(100 * under_count / total_decided, 1) if total_decided else None
+
+        summary_html = ""
+        if is_live and timeline_rows:
+            latest = timeline_rows[-1]
+            summary_html = f"""
+            <div class="live-banner">
+                <span class="live-dot">●</span> LIVE &nbsp;|&nbsp;
+                Over {escape(str(latest['over']) if latest.get('over') is not None else '?')}, Score {escape(str(latest['score']) if latest.get('score') is not None else '?')} &nbsp;|&nbsp;
+                <b>Current prediction: {latest['predicted_total']} runs</b>
+            </div>"""
+        elif total_decided:
+            bias = ""
+            if over_pct and over_pct >= 70:
+                bias = f' <span class="bias-tag">⚠ OVER biased</span>'
+            elif under_pct and under_pct >= 70:
+                bias = f' <span class="bias-tag under-bias">⚠ UNDER biased</span>'
+            summary_html = f"""
+            <div class="summary-cards">
+                <div class="scard over">Over: {over_count} ({over_pct}%){bias}</div>
+                <div class="scard under">Under: {under_count} ({under_pct}%)</div>
+                <div class="scard">Actual total: <b>{actual_total}</b></div>
+                <div class="scard outcome-{outcome or 'pending'}">Outcome: {(outcome or 'Pending').upper()}</div>
+            </div>"""
+
+        # Simple timeline: one row per (over, score) where market had data
+        table_rows = ""
+        for r in timeline_rows:
+            pred = r["predicted_total"]
+            row_class = ""
+            outcome_cell = "-"
+            if actual_total is not None:
+                if actual_total > pred:
+                    row_class = ' class="over-row"'
+                    outcome_cell = "▲ Over"
+                elif actual_total < pred:
+                    row_class = ' class="under-row"'
+                    outcome_cell = "▼ Under"
+                else:
+                    outcome_cell = "= Push"
+            snap_time = escape(str(r.get("snapshot_time_utc") or "")[:16].replace("T", " "))
+            table_rows += f"""
+            <tr{row_class}>
+                <td>{snap_time}</td>
+                <td>{escape(str(r['over']) if r.get('over') is not None else '-')}</td>
+                <td>{escape(str(r['score']) if r.get('score') is not None else '-')}/{escape(str(r['wickets']) if r.get('wickets') is not None else '0')}</td>
+                <td><b>{pred}</b></td>
+                <td style="color:#666;">{escape(str(r.get('over_odds_at_line') or '-'))} / {escape(str(r.get('under_odds_at_line') or '-'))}</td>
+                <td>{outcome_cell}</td>
+            </tr>"""
+
+        if outcome and actual_total is not None:
+            colour = "#d4edda" if outcome == "over" else "#f8d7da" if outcome == "under" else "#fff3cd"
+            table_rows += f'<tr style="background:{colour};font-weight:bold;"><td colspan="6">FINAL: {actual_total} runs → {outcome.upper()}</td></tr>'
+
+        no_data_msg = ""
+        if not timeline_rows:
+            if rows_data:
+                no_data_msg = '<p style="color:#999;">Innings market data not available in captured snapshots — market may have been suspended or not yet offered.</p>'
+            else:
+                no_data_msg = '<p style="color:#999;">No tracker data yet — builds during live play.</p>'
+
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Innings Tracker — {match_name}</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
+        h1 {{ margin-bottom: 4px; }}
+        .meta {{ color: #555; font-size: 14px; margin-bottom: 3px; }}
+        .summary-cards {{ display: flex; gap: 12px; flex-wrap: wrap; margin: 18px 0; }}
+        .scard {{ padding: 12px 20px; border-radius: 8px; background: white; box-shadow: 0 2px 6px #ddd; font-weight: bold; }}
+        .scard.over {{ background: #d4edda; color: #155724; }}
+        .scard.under {{ background: #f8d7da; color: #721c24; }}
+        .scard.outcome-over {{ background: #d4edda; color: #155724; }}
+        .scard.outcome-under {{ background: #f8d7da; color: #721c24; }}
+        .scard.outcome-push {{ background: #fff3cd; color: #856404; }}
+        .scard.outcome-pending {{ background: #eee; color: #555; }}
+        .live-banner {{ background: #1a1a2e; color: #00e5ff; padding: 14px 20px; border-radius: 8px; font-size: 15px; font-weight: bold; margin: 14px 0; }}
+        .live-dot {{ color: #f00; animation: blink 1s step-start infinite; }}
+        @keyframes blink {{ 50% {{ opacity: 0; }} }}
+        .bias-tag {{ background: #ff9800; color: white; padding: 2px 8px; border-radius: 4px; font-size: 12px; }}
+        .bias-tag.under-bias {{ background: #9c27b0; }}
+        table {{ width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 8px #ddd; margin-top: 10px; }}
+        th, td {{ padding: 9px 12px; border-bottom: 1px solid #ddd; text-align: left; font-size: 13px; }}
+        th {{ background: #222; color: white; position: sticky; top: 0; }}
+        tr.over-row {{ background: #eafbea; }}
+        tr.under-row {{ background: #fdf0f0; }}
+        a {{ color: #0066cc; text-decoration: none; }}
+    </style>
+</head>
+<body>
+    <p><a href="/api/matches/{escape(str(event_id))}/view">← Back to match</a> | <a href="/api/innings-tracker">All matches analytics</a></p>
+    <h1>Innings Tracker — {match_name}</h1>
+    {f'<div class="meta">📍 {venue}</div>' if venue else ""}
+    {f'<div class="meta">📅 {match_date} &nbsp;|&nbsp; {league}</div>' if match_date else ""}
+    <div class="meta">{escape(home_team)} vs {escape(away_team)}</div>
+    {f'<div class="meta" style="color:#888;font-size:12px;">📊 Market: {escape(innings_market)}</div>' if innings_market else ""}
+    {summary_html}
+    {no_data_msg}
+    <table>
+        <thead>
+            <tr><th>Time (UTC)</th><th>Over</th><th>Score/Wkts</th><th>Predicted Total</th><th>Over / Under Odds</th><th>Outcome</th></tr>
+        </thead>
+        <tbody>{table_rows}</tbody>
+    </table>
+</body>
+</html>"""
+        return func.HttpResponse(html, status_code=200, mimetype="text/html")
+    except Exception as ex:
+        logging.exception("Failed to render innings tracker")
+        return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
+
+
+@app.route(route="innings-tracker", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_innings_tracker_analytics(req: func.HttpRequest) -> func.HttpResponse:
+    """Cross-match innings tracker analytics with filters.
+
+    Query params (all optional):
+      league=IPL          exact league name
+      team=GT             batting OR bowling team name (partial, case-insensitive)
+      venue=Wankhede      venue name (partial, case-insensitive)
+      min_over=0          filter rows where over_float >= min_over
+      max_over=20         filter rows where over_float <= max_over
+      min_wickets=0       filter rows where wickets >= min_wickets
+      max_wickets=10      filter rows where wickets <= max_wickets
+      min_bat_odds=1.0    filter rows where batting_team_odds >= value
+      max_bat_odds=9.9    filter rows where batting_team_odds <= value
+      min_over_pct=0      only show combinations with over% >= value (for bias report)
+    """
+    try:
+        gold = get_named_container_client("gold")
+        params = req.params
+
+        f_league = (params.get("league") or "").strip()
+        f_team = (params.get("team") or "").strip().lower()
+        f_venue = (params.get("venue") or "").strip().lower()
+        f_min_over = safe_float(params.get("min_over") or "")
+        f_max_over = safe_float(params.get("max_over") or "")
+        f_min_wkts = params.get("min_wickets")
+        f_max_wkts = params.get("max_wickets")
+        f_min_bat_odds = safe_float(params.get("min_bat_odds") or "")
+        f_max_bat_odds = safe_float(params.get("max_bat_odds") or "")
+        f_min_over_pct = safe_float(params.get("min_over_pct") or "")
+        try:
+            f_min_wkts_int = int(f_min_wkts) if f_min_wkts is not None else None
+        except Exception:
+            f_min_wkts_int = None
+        try:
+            f_max_wkts_int = int(f_max_wkts) if f_max_wkts is not None else None
+        except Exception:
+            f_max_wkts_int = None
+
+        idx = download_json(gold, "cricket/innings_tracker/index.json") or {}
+        all_matches = idx.get("matches", [])
+
+        # Collect all qualifying rows across all matches
+        result_rows: List[Dict[str, Any]] = []
+        over_total = under_total = no_outcome = 0
+
+        for meta in all_matches:
+            if f_league and meta.get("league_name") != f_league:
+                continue
+            if f_venue and f_venue not in str(meta.get("venue") or "").lower():
+                continue
+
+            event_id_m = str(meta.get("event_id") or "")
+            actual_total = meta.get("actual_total")
+            tracker = download_json(gold, f"cricket/innings_tracker/event_id={event_id_m}/innings_1.json") or {}
+
+            for r in tracker.get("rows", []):
+                # Team filter
+                if f_team:
+                    batting = str(r.get("batting_team") or "").lower()
+                    bowling = str(r.get("bowling_team") or "").lower()
+                    if f_team not in batting and f_team not in bowling:
+                        continue
+
+                # Over range filter
+                over_fl = r.get("over_float")
+                if f_min_over is not None and (over_fl is None or over_fl < f_min_over):
+                    continue
+                if f_max_over is not None and (over_fl is None or over_fl > f_max_over):
+                    continue
+
+                # Wickets filter
+                wkts = r.get("wickets")
+                if f_min_wkts_int is not None and (wkts is None or wkts < f_min_wkts_int):
+                    continue
+                if f_max_wkts_int is not None and (wkts is None or wkts > f_max_wkts_int):
+                    continue
+
+                # Batting odds filter
+                bat_od = r.get("batting_team_odds")
+                if f_min_bat_odds is not None and (bat_od is None or bat_od < f_min_bat_odds):
+                    continue
+                if f_max_bat_odds is not None and (bat_od is None or bat_od > f_max_bat_odds):
+                    continue
+
+                pred = r.get("predicted_total")
+                row_outcome = None
+                if pred is not None and actual_total is not None:
+                    if actual_total > pred:
+                        row_outcome = "over"
+                        over_total += 1
+                    elif actual_total < pred:
+                        row_outcome = "under"
+                        under_total += 1
+                    else:
+                        row_outcome = "push"
+                else:
+                    no_outcome += 1
+
+                result_rows.append({
+                    **r,
+                    "event_id": event_id_m,
+                    "match_name": meta.get("match_name"),
+                    "league_name": meta.get("league_name"),
+                    "venue": meta.get("venue"),
+                    "actual_total": actual_total,
+                    "row_outcome": row_outcome,
+                })
+
+        total_decided = over_total + under_total
+        over_pct = round(100 * over_total / total_decided, 1) if total_decided else None
+        under_pct = round(100 * under_total / total_decided, 1) if total_decided else None
+
+        # Build filter form
+        league_options = '<option value="">All Leagues</option>'
+        for m in all_matches:
+            ln = escape(str(m.get("league_name") or ""))
+            sel = ' selected' if ln == escape(f_league) else ''
+            league_options += f'<option value="{ln}"{sel}>{ln}</option>'
+
+        def fv(name: str) -> str:
+            v = params.get(name) or ""
+            return f'value="{escape(v)}"' if v else ""
+
+        table_rows_html = ""
+        for r in result_rows:
+            oc = r.get("row_outcome") or "pending"
+            bg = {"over": "#eafbea", "under": "#fdf0f0", "push": "#fff9e6"}.get(oc, "")
+            style = f' style="background:{bg}"' if bg else ""
+            table_rows_html += f"""
+            <tr{style}>
+                <td><a href="/api/matches/{r['event_id']}/innings-tracker/view">{escape(str(r.get('match_name') or r['event_id']))}</a></td>
+                <td>{escape(str(r.get('league_name') or '-'))}</td>
+                <td>{escape(str(r.get('venue') or '-'))}</td>
+                <td>{escape(str(r['over']) if r.get('over') is not None else '-')}</td>
+                <td>{escape(str(r['score']) if r.get('score') is not None else '-')}/{escape(str(r['wickets']) if r.get('wickets') is not None else '0')}</td>
+                <td>{escape(str(r.get('batting_team') or '-'))}</td>
+                <td>{escape(str(r.get('bowling_team') or '-'))}</td>
+                <td>{escape(str(r.get('batting_team_odds') or '-'))}</td>
+                <td>{escape(str(r.get('bowling_team_odds') or '-'))}</td>
+                <td><b>{escape(str(r.get('predicted_total') or '-'))}</b></td>
+                <td>{escape(str(r.get('actual_total') or 'TBD'))}</td>
+                <td><b>{oc.upper()}</b></td>
+            </tr>"""
+
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Innings Tracker Analytics</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
+        h1 {{ margin-bottom: 16px; }}
+        .filter-form {{ background: white; padding: 18px; border-radius: 10px; box-shadow: 0 2px 8px #ddd; margin-bottom: 20px; display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }}
+        .filter-form label {{ font-size: 13px; color: #555; display: block; margin-bottom: 4px; }}
+        .filter-form input, .filter-form select {{ padding: 7px 10px; font-size: 13px; border: 1px solid #ccc; border-radius: 5px; width: 130px; }}
+        .filter-form button {{ padding: 8px 20px; background: #222; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; }}
+        .summary-cards {{ display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 20px; }}
+        .scard {{ padding: 14px 22px; border-radius: 8px; background: white; box-shadow: 0 2px 6px #ddd; font-weight: bold; font-size: 15px; }}
+        .scard.over {{ background: #d4edda; color: #155724; }}
+        .scard.under {{ background: #f8d7da; color: #721c24; }}
+        table {{ width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 8px #ddd; }}
+        th, td {{ padding: 9px 11px; border-bottom: 1px solid #ddd; text-align: left; font-size: 13px; }}
+        th {{ background: #222; color: white; position: sticky; top: 0; }}
+        a {{ color: #0066cc; text-decoration: none; }}
+    </style>
+</head>
+<body>
+    <h1>Innings Tracker Analytics ({len(all_matches)} matches)</h1>
+    <form class="filter-form" method="get">
+        <div><label>League</label><select name="league">{league_options}</select></div>
+        <div><label>Team (batting or bowling)</label><input name="team" {fv('team')} placeholder="e.g. GT"></div>
+        <div><label>Venue (partial)</label><input name="venue" {fv('venue')} placeholder="e.g. Wankhede"></div>
+        <div><label>Min Over</label><input name="min_over" {fv('min_over')} placeholder="e.g. 3"></div>
+        <div><label>Max Over</label><input name="max_over" {fv('max_over')} placeholder="e.g. 5"></div>
+        <div><label>Min Wickets</label><input name="min_wickets" {fv('min_wickets')} placeholder="e.g. 0"></div>
+        <div><label>Max Wickets</label><input name="max_wickets" {fv('max_wickets')} placeholder="e.g. 3"></div>
+        <div><label>Batting odds ≥</label><input name="min_bat_odds" {fv('min_bat_odds')} placeholder="e.g. 1.5"></div>
+        <div><label>Batting odds ≤</label><input name="max_bat_odds" {fv('max_bat_odds')} placeholder="e.g. 2.5"></div>
+        <button type="submit">Apply Filters</button>
+        <a href="/api/innings-tracker" style="padding:8px 14px;background:#eee;border-radius:5px;color:#333;font-size:13px;">Reset</a>
+    </form>
+
+    <div class="summary-cards">
+        <div class="scard">Filtered rows: {len(result_rows)}</div>
+        {'<div class="scard over">Over: ' + str(over_total) + ' (' + str(over_pct) + '%)</div>' if over_pct is not None else ""}
+        {'<div class="scard under">Under: ' + str(under_total) + ' (' + str(under_pct) + '%)</div>' if under_pct is not None else ""}
+        <div class="scard">No outcome yet: {no_outcome}</div>
+    </div>
+
+    {'<p style="color:#999">No rows match the current filters.</p>' if not result_rows else ""}
+    <table>
+        <thead>
+            <tr>
+                <th>Match</th><th>League</th><th>Venue</th>
+                <th>Over</th><th>Score/Wkts</th>
+                <th>Batting</th><th>Bowling</th>
+                <th>Bat Odds</th><th>Bowl Odds</th>
+                <th>Predicted</th><th>Actual</th><th>Outcome</th>
+            </tr>
+        </thead>
+        <tbody>{table_rows_html}</tbody>
+    </table>
+</body>
+</html>"""
+        return func.HttpResponse(html, status_code=200, mimetype="text/html")
+    except Exception as ex:
+        logging.exception("Failed to render innings tracker analytics")
+        return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
+
+
 @app.route(route="matches/{event_id}/markets/live", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_match_live_markets(req: func.HttpRequest) -> func.HttpResponse:
     """Fetch current Bet365 markets directly from the API (bypasses pipeline cache)."""
     try:
         event_id = req.route_params.get("event_id")
         gold = get_named_container_client("gold")
-        page = download_required_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
+        page = (
+            download_json(gold, f"cricket/matches/latest/event_id={event_id}/match_dashboard.json")
+            or download_required_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
+        )
         fi = (page.get("snapshot") or {}).get("fi")
         if not fi:
             return func.HttpResponse("FI not found for this event in gold data.", status_code=404)
@@ -2913,7 +4106,10 @@ def get_match_markets_raw(req: func.HttpRequest) -> func.HttpResponse:
     try:
         event_id = req.route_params.get("event_id")
         gold = get_named_container_client("gold")
-        page = download_required_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
+        page = (
+            download_json(gold, f"cricket/matches/latest/event_id={event_id}/match_dashboard.json")
+            or download_required_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
+        )
         fi = (page.get("snapshot") or {}).get("fi")
         if not fi:
             return func.HttpResponse(
@@ -2964,6 +4160,243 @@ def run_prematch_now(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as ex:
         logging.exception("Failed to run prematch pipeline manually")
         return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
+
+@app.route(route="admin/innings/{event_id}/rebuild", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def admin_rebuild_innings_accumulator(req: func.HttpRequest) -> func.HttpResponse:
+    """Rebuild the innings accumulator for one event by replaying all silver snapshots.
+
+    This is useful when the accumulator has stale/wrong rows written by an older
+    version of extract_innings_snapshot. It scans every silver snapshot folder for
+    the event, re-runs the current extraction logic on each one, deduplicates by
+    (over, score), and writes a fresh silver accumulator + gold tracker file.
+    """
+    event_id = req.route_params.get("event_id", "").strip()
+    if not event_id:
+        return func.HttpResponse("event_id required", status_code=400)
+
+    try:
+        silver = get_named_container_client("silver")
+        gold = get_named_container_client("gold")
+
+        # Find all silver match_state.json blobs for this event.
+        needle = f"/event_id={event_id}/"
+        snapshot_paths: List[str] = []
+        for blob in silver.list_blobs(name_starts_with="cricket/inplay/"):
+            if needle in blob.name and blob.name.endswith("/match_state.json"):
+                snapshot_paths.append(blob.name)
+
+        if not snapshot_paths:
+            return func.HttpResponse(
+                json.dumps({"event_id": event_id, "message": "no silver snapshots found", "rows_written": 0}),
+                mimetype="application/json",
+                status_code=200,
+            )
+
+        snapshot_paths.sort()
+
+        raw_points: List[Dict[str, Any]] = []
+        errors = 0
+        for ms_path in snapshot_paths:
+            base = ms_path.removesuffix("/match_state.json")
+            try:
+                match_state = download_json(silver, ms_path)
+                team_scores_doc = download_json(silver, f"{base}/team_scores.json") or {}
+                active_markets_doc = download_json(silver, f"{base}/active_markets.json") or {}
+                if not match_state:
+                    continue
+                team_score_rows = team_scores_doc.get("rows", [])
+                active_market_rows = active_markets_doc.get("rows", [])
+                point = extract_innings_snapshot(match_state, team_score_rows, active_market_rows)
+                if point is not None:
+                    raw_points.append(point)
+            except Exception:
+                errors += 1
+                continue
+
+        # Sort by snapshot_time_utc and dedup: keep one row per (over, score),
+        # using the LAST occurrence so we get the most recent prediction.
+        raw_points.sort(key=lambda p: str(p.get("snapshot_time_utc") or ""))
+        seen: Dict[tuple, Dict[str, Any]] = {}
+        for p in raw_points:
+            key = (p.get("over"), p.get("score"))
+            seen[key] = p  # overwrite → keep last value per (over, score)
+        deduped = sorted(seen.values(), key=lambda p: str(p.get("snapshot_time_utc") or ""))
+
+        # Rebuild silver accumulator.
+        acc_path = f"cricket/inplay/control/event_id={event_id}/innings_accumulator.json"
+        old_acc = download_json(silver, acc_path) or {}
+        new_acc = {
+            "event_id": event_id,
+            "match_name": old_acc.get("match_name"),
+            "league_id": old_acc.get("league_id"),
+            "league_name": old_acc.get("league_name"),
+            "home_team_name": old_acc.get("home_team_name"),
+            "away_team_name": old_acc.get("away_team_name"),
+            "venue": old_acc.get("venue"),
+            "match_date_utc": old_acc.get("match_date_utc"),
+            "outcome": old_acc.get("outcome"),
+            "actual_total": old_acc.get("actual_total"),
+            "rows": deduped,
+            "last_updated_utc": utc_now().isoformat(),
+            "rebuilt_from_snapshot_count": len(snapshot_paths),
+        }
+        # Fill metadata from the first data point if accumulator was empty.
+        if deduped and not new_acc.get("match_name"):
+            p0 = deduped[0]
+            new_acc["home_team_name"] = new_acc["home_team_name"] or p0.get("batting_team")
+            new_acc["away_team_name"] = new_acc["away_team_name"] or p0.get("bowling_team")
+
+        upload_json(silver, acc_path, new_acc, overwrite=True)
+
+        # Also refresh the gold tracker so the page reflects the rebuilt data immediately.
+        gold_tracker_path = f"cricket/innings_tracker/event_id={event_id}/innings_1.json"
+        existing_gold = download_json(gold, gold_tracker_path) or {}
+        tracker = {**existing_gold, "rows": deduped, "last_updated_utc": utc_now().isoformat()}
+        upload_json(gold, gold_tracker_path, tracker, overwrite=True)
+
+        return func.HttpResponse(
+            json.dumps({
+                "event_id": event_id,
+                "silver_snapshots_scanned": len(snapshot_paths),
+                "raw_points_extracted": len(raw_points),
+                "rows_written": len(deduped),
+                "errors": errors,
+                "message": "accumulator rebuilt — reload the innings tracker page",
+            }, indent=2),
+            mimetype="application/json",
+            status_code=200,
+        )
+    except Exception as ex:
+        logging.exception("admin_rebuild_innings_accumulator failed")
+        return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
+
+
+@app.route(route="admin/leagues/view", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_admin_leagues_view(req: func.HttpRequest) -> func.HttpResponse:
+    """Admin page to tick/untick leagues for pipeline inclusion."""
+    try:
+        leagues = collect_known_leagues()
+        excluded = load_excluded_league_ids()
+
+        rows_html = ""
+        for lg in leagues:
+            lid = escape(str(lg.get("league_id") or ""))
+            lname = escape(str(lg.get("league_name") or lid))
+            sources = ", ".join(lg.get("sources", []))
+            is_excluded = str(lg.get("league_id") or "") in excluded
+            checked = "" if is_excluded else "checked"
+            bg = "" if is_excluded else ' style="background:#f0fff0"'
+            rows_html += f"""
+            <tr{bg}>
+                <td>{lid}</td>
+                <td><b>{lname}</b></td>
+                <td style="color:#666;font-size:12px;">{escape(sources)}</td>
+                <td>
+                    <label class="toggle">
+                        <input type="checkbox" {checked}
+                               onchange="toggle(this, '{lid}')"
+                               data-league-id="{lid}" data-league-name="{lname}">
+                        <span class="slider"></span>
+                    </label>
+                </td>
+                <td id="status-{lid}" style="font-size:12px;color:#888;">
+                    {'Excluded — not captured' if is_excluded else 'Included'}
+                </td>
+            </tr>"""
+
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>League Filter</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
+        h1 {{ margin-bottom: 6px; }}
+        .hint {{ color: #666; margin-bottom: 20px; font-size: 14px; }}
+        table {{ width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 8px #ddd; }}
+        th, td {{ padding: 10px 13px; border-bottom: 1px solid #ddd; text-align: left; font-size: 14px; }}
+        th {{ background: #222; color: white; }}
+        a {{ color: #0066cc; text-decoration: none; }}
+        /* Toggle switch */
+        .toggle {{ position: relative; display: inline-block; width: 48px; height: 26px; }}
+        .toggle input {{ opacity: 0; width: 0; height: 0; }}
+        .slider {{ position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+                   background: #ccc; border-radius: 26px; transition: .3s; }}
+        .slider:before {{ position: absolute; content: ""; height: 20px; width: 20px; left: 3px;
+                          bottom: 3px; background: white; border-radius: 50%; transition: .3s; }}
+        input:checked + .slider {{ background: #28a745; }}
+        input:checked + .slider:before {{ transform: translateX(22px); }}
+    </style>
+</head>
+<body>
+    <p><a href="/api/home">← Home</a></p>
+    <h1>League Filter</h1>
+    <p class="hint">Toggle ON = captured in bronze/silver/gold. Toggle OFF = skipped entirely (saves API quota).<br>
+    Changes apply from the next capture cycle (within 5 seconds for live, 1 minute for prematch).</p>
+    <p id="save-status" style="color:#28a745;font-weight:bold;display:none;">Saved.</p>
+    <table>
+        <thead><tr><th>League ID</th><th>League Name</th><th>Seen In</th><th>Capture</th><th>Status</th></tr></thead>
+        <tbody>{rows_html}</tbody>
+    </table>
+    <script>
+        async function toggle(checkbox, leagueId) {{
+            const include = checkbox.checked;
+            const statusEl = document.getElementById('status-' + leagueId);
+            statusEl.textContent = 'Saving...';
+            statusEl.style.color = '#888';
+            try {{
+                const resp = await fetch('/api/admin/leagues/toggle', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify({{league_id: leagueId, include: include}})
+                }});
+                const data = await resp.json();
+                if (data.ok) {{
+                    statusEl.textContent = include ? 'Included' : 'Excluded — not captured';
+                    statusEl.style.color = include ? '#28a745' : '#dc3545';
+                    document.getElementById('save-status').style.display = 'block';
+                    const row = checkbox.closest('tr');
+                    row.style.background = include ? '#f0fff0' : '';
+                }} else {{
+                    statusEl.textContent = 'Error: ' + (data.error || 'unknown');
+                    statusEl.style.color = '#dc3545';
+                    checkbox.checked = !include;
+                }}
+            }} catch(e) {{
+                statusEl.textContent = 'Network error';
+                statusEl.style.color = '#dc3545';
+                checkbox.checked = !include;
+            }}
+        }}
+    </script>
+</body>
+</html>"""
+        return func.HttpResponse(html, status_code=200, mimetype="text/html")
+    except Exception as ex:
+        logging.exception("Failed to render admin leagues page")
+        return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
+
+
+@app.route(route="admin/leagues/toggle", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+def post_admin_league_toggle(req: func.HttpRequest) -> func.HttpResponse:
+    """Toggle a league's inclusion in the capture pipeline."""
+    try:
+        body = req.get_json()
+        league_id = str(body.get("league_id") or "").strip()
+        include = bool(body.get("include", True))
+        if not league_id:
+            return func.HttpResponse(json.dumps({"ok": False, "error": "league_id required"}), status_code=400, mimetype="application/json")
+
+        excluded = load_excluded_league_ids()
+        if include:
+            excluded.discard(league_id)
+        else:
+            excluded.add(league_id)
+        save_league_preferences(excluded)
+        return func.HttpResponse(json.dumps({"ok": True, "league_id": league_id, "included": include, "total_excluded": len(excluded)}), status_code=200, mimetype="application/json")
+    except Exception as ex:
+        logging.exception("Failed to toggle league")
+        return func.HttpResponse(json.dumps({"ok": False, "error": str(ex)}), status_code=500, mimetype="application/json")
+
 
 @app.route(route="home", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_home(req: func.HttpRequest) -> func.HttpResponse:
@@ -3019,6 +4452,16 @@ def get_home(req: func.HttpRequest) -> func.HttpResponse:
         <div class="card">
             <a href="/api/ended/view">Ended Matches</a>
             <p>Recently finished matches with final results</p>
+        </div>
+
+        <div class="card">
+            <a href="/api/innings-tracker">Innings Tracker Analytics</a>
+            <p>Over/Under prediction accuracy by over stage, team, venue and odds</p>
+        </div>
+
+        <div class="card">
+            <a href="/api/admin/leagues/view">League Filter</a>
+            <p>Select which leagues to capture — excluded leagues skip bronze, silver and gold entirely</p>
         </div>
 
     </body>

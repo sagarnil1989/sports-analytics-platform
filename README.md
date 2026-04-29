@@ -208,12 +208,13 @@ Bronze contains the exact API responses from BetsAPI.
 Examples:
 
 ```text
-bronze/betsapi/inplay_filter/...
-bronze/betsapi/inplay_snapshot/sport_id=3/event_id=<event_id>/fi=<fi>/snapshot_id=<snapshot_id>/events_inplay.json
-bronze/betsapi/inplay_snapshot/sport_id=3/event_id=<event_id>/fi=<fi>/snapshot_id=<snapshot_id>/bet365_event.json
-bronze/betsapi/inplay_snapshot/sport_id=3/event_id=<event_id>/fi=<fi>/snapshot_id=<snapshot_id>/event_odds.json
+bronze/betsapi/inplay_snapshot/sport_id=3/event_id=<event_id>/fi=<fi>/snapshot_id=<snapshot_id>/api_inplay_event_list.json
+bronze/betsapi/inplay_snapshot/sport_id=3/event_id=<event_id>/fi=<fi>/snapshot_id=<snapshot_id>/api_live_market_odds.json
+bronze/betsapi/inplay_snapshot/sport_id=3/event_id=<event_id>/fi=<fi>/snapshot_id=<snapshot_id>/api_event_odds.json
 bronze/betsapi/inplay_snapshot/sport_id=3/event_id=<event_id>/fi=<fi>/snapshot_id=<snapshot_id>/manifest.json
 ```
+
+See `docs/STORAGE_LAYOUT.md` for the full list of all bronze, silver, and gold files and what each one contains.
 
 ### Silver = cleaned data
 
@@ -222,11 +223,11 @@ Silver contains parsed files that are easier to read.
 Examples:
 
 ```text
-silver/cricket/inplay/.../match_snapshot.json
+silver/cricket/inplay/.../match_state.json
 silver/cricket/inplay/.../team_scores.json
 silver/cricket/inplay/.../player_entries.json
-silver/cricket/inplay/.../odds_records.json
-silver/cricket/inplay/.../current_markets.json
+silver/cricket/inplay/.../market_odds.json
+silver/cricket/inplay/.../active_markets.json
 ```
 
 ### Gold = website-ready data
@@ -237,7 +238,7 @@ Examples:
 
 ```text
 gold/cricket/matches/latest/index.json
-gold/cricket/matches/latest/event_id=<event_id>/match_page.json
+gold/cricket/matches/latest/event_id=<event_id>/match_dashboard.json
 gold/cricket/leagues/index.json
 gold/cricket/leagues/<league_id>/matches.json
 ```
@@ -367,7 +368,7 @@ If `selection_count` and `market_count` are greater than zero, Bet365 markets ar
 To verify, open the bronze file:
 
 ```text
-bronze/betsapi/inplay_snapshot/sport_id=3/event_id=<event_id>/fi=<fi>/snapshot_id=<snapshot_id>/bet365_event.json
+bronze/betsapi/inplay_snapshot/sport_id=3/event_id=<event_id>/fi=<fi>/snapshot_id=<snapshot_id>/api_live_market_odds.json
 ```
 
 Search for:
@@ -489,7 +490,7 @@ It stores one prematch snapshot per match.
 Example path:
 
 ```text
-bronze/betsapi/prematch_snapshot/sport_id=3/event_id=<event_id>/fi=<bet365_id>/snapshot_id=<timestamp>/prematch.json
+bronze/betsapi/prematch_snapshot/sport_id=3/event_id=<event_id>/fi=<bet365_id>/snapshot_id=<timestamp>/api_prematch_odds.json
 ```
 
 ### build_cricket_prematch_pages
@@ -502,7 +503,7 @@ Important output:
 
 ```text
 gold/cricket/prematch/latest/index.json
-gold/cricket/prematch/latest/event_id=<event_id>/prematch_page.json
+gold/cricket/prematch/latest/event_id=<event_id>/prematch_dashboard.json
 gold/cricket/prematch/leagues/index.json
 gold/cricket/prematch/leagues/<league_id>/matches.json
 ```
@@ -666,7 +667,7 @@ Prematch Selections > 0
 If you see zero markets, check the raw bronze file:
 
 ```text
-bronze/betsapi/prematch_snapshot/sport_id=3/event_id=<event_id>/fi=<fi>/snapshot_id=<snapshot_id>/prematch.json
+bronze/betsapi/prematch_snapshot/sport_id=3/event_id=<event_id>/fi=<fi>/snapshot_id=<snapshot_id>/api_prematch_odds.json
 ```
 
 If this file has odds but the page shows zero, the parser needs adjustment.  

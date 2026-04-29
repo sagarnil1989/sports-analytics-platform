@@ -22,6 +22,8 @@
   "sport_id": "3",
   "max_silver_snapshots_per_run": "50",
   "max_gold_events_per_run": "20",
+  "cricwebsite_db_host": "psql-cricwebsite.postgres.database.azure.com",
+  "cricwebsite_db_user": "cricdbadmin",
   "tags": {
     "project": "ramanuj",
     "environment": "local",

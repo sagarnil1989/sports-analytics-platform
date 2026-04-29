@@ -51,6 +51,8 @@ resource "azurerm_linux_function_app" "main" {
 
 app_settings = {
   FUNCTIONS_WORKER_RUNTIME              = "python"
+  SCM_DO_BUILD_DURING_DEPLOYMENT        = "true"
+  ENABLE_ORYX_BUILD                     = "true"
   APPINSIGHTS_INSTRUMENTATIONKEY        = data.azurerm_application_insights.main.instrumentation_key
   APPLICATIONINSIGHTS_CONNECTION_STRING = data.azurerm_application_insights.main.connection_string
 
@@ -70,6 +72,13 @@ app_settings = {
   MAX_LIVE_MATCHES = local.config.max_live_matches
   MAX_SILVER_SNAPSHOTS_PER_RUN = local.config.max_silver_snapshots_per_run
   MAX_GOLD_EVENTS_PER_RUN = local.config.max_gold_events_per_run
+
+  # CricWebsite PostgreSQL (oddsdb on psql-cricwebsite)
+  CRICWEBSITE_DB_HOST     = local.config.cricwebsite_db_host
+  CRICWEBSITE_DB_PORT     = "5432"
+  CRICWEBSITE_DB_NAME     = "oddsdb"
+  CRICWEBSITE_DB_USER     = local.config.cricwebsite_db_user
+  CRICWEBSITE_DB_PASSWORD = data.azurerm_key_vault_secret.cricwebsite_db_password.value
 }
 
   tags = local.config.tags
