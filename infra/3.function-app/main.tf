@@ -2,6 +2,10 @@ data "azurerm_resource_group" "main" {
   name = local.config.resource_group_name
 }
 
+data "azurerm_resource_group" "cricwebsite" {
+  name = local.config.resource_group_cricwebsite
+}
+
 data "azurerm_storage_account" "function_storage" {
   name                = local.config.function_storage_account_name
   resource_group_name = data.azurerm_resource_group.main.name
@@ -15,6 +19,11 @@ data "azurerm_storage_account" "data_lake" {
 data "azurerm_key_vault" "main" {
   name                = local.config.key_vault_name
   resource_group_name = data.azurerm_resource_group.main.name
+}
+
+data "azurerm_key_vault" "cricwebsite" {
+  name                = local.config.key_vault_cricwebsite
+  resource_group_name = data.azurerm_resource_group.cricwebsite.name
 }
 
 data "azurerm_application_insights" "main" {
@@ -72,7 +81,8 @@ app_settings = {
   MAX_LIVE_MATCHES = local.config.max_live_matches
   MAX_SILVER_SNAPSHOTS_PER_RUN = local.config.max_silver_snapshots_per_run
   MAX_GOLD_EVENTS_PER_RUN = local.config.max_gold_events_per_run
-
+  AZURE_FUNCTIONS_WORKER_PROCESS_TERMINATE_TIMEOUT = local.config.azure_functions_worker_process_terminate_timeout
+  AzureFunctionsJobHost__functionTimeout = local.config.azure_functions_job_host__function_timeout
   # CricWebsite PostgreSQL (oddsdb on psql-cricwebsite)
   CRICWEBSITE_DB_HOST     = local.config.cricwebsite_db_host
   CRICWEBSITE_DB_PORT     = "5432"
