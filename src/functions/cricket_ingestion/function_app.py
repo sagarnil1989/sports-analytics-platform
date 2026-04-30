@@ -219,9 +219,12 @@ def write_to_cricwebsite_db(
                 break  # only the batting team row matters
 
             # 3 — insert market odds for the two key markets
+            # market_id=16 = Full time (match winner), market_id=2 = Innings total runs
+            # Hardcoded because the innings market name is now team-specific
+            # e.g. "Mumbai Indians 20 Overs Runs" — stored in option column, not market name.
             if stats_id:
                 full_time_id = _get_market_id(conn, "Full time")
-                innings_id   = _get_market_id(conn, "Current innings runs")
+                innings_id   = 2  # always market_id=2 regardless of team-specific market name
 
                 # Full time: match winner odds
                 if full_time_id:
@@ -3144,20 +3147,16 @@ def get_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
         gold = get_named_container_client("gold")
         index = download_required_json(gold, "cricket/ended/latest/index.json")
         matches = index.get("matches", []) if isinstance(index, dict) else []
-        matches_sorted = sorted(matches, key=lambda m: (m.get("league_name") or "", m.get("match_name") or ""))
+        matches_sorted = sorted(matches, key=lambda m: m.get("event_time_utc") or m.get("event_time_unix") or "", reverse=True)
         league_names = sorted({str(m.get("league_name") or "Unknown") for m in matches})
         league_options = '<option value="ALL">All Leagues</option>'
         for ln in league_names:
             league_options += f'<option value="{escape(ln)}">{escape(ln)}</option>'
         rows = ""
-        current_league = None
         for m in matches_sorted:
             league_name = str(m.get("league_name") or "Unknown")
             event_id = escape(str(m.get("event_id") or "-"))
             league_esc = escape(league_name)
-            if league_name != current_league:
-                current_league = league_name
-                rows += f'<tr class="league-header" data-league="{league_esc}"><td colspan="9">{league_esc}</td></tr>'
             rows += f"""
             <tr data-league="{league_esc}">
                 <td>{event_id}</td>
@@ -3247,13 +3246,12 @@ def get_matches_list_html(req: func.HttpRequest) -> func.HttpResponse:
         index = download_required_json(gold, "cricket/matches/latest/index.json")
         matches = index.get("matches", []) if isinstance(index, dict) else []
 
-        matches_sorted = sorted(matches, key=lambda m: (m.get("league_name") or "", m.get("match_name") or ""))
+        matches_sorted = sorted(matches, key=lambda m: m.get("snapshot_time_utc") or "", reverse=True)
         league_names = sorted({str(m.get("league_name") or "Unknown") for m in matches})
         league_options = '<option value="ALL">All Leagues</option>'
         for ln in league_names:
             league_options += f'<option value="{escape(ln)}">{escape(ln)}</option>'
         rows = ""
-        current_league = None
         for m in matches_sorted:
             league_name = str(m.get("league_name") or "Unknown")
             event_id = escape(str(m.get("event_id") or "-"))
@@ -3265,9 +3263,6 @@ def get_matches_list_html(req: func.HttpRequest) -> func.HttpResponse:
             markets = escape(str(m.get("current_market_count") or 0))
             selections = escape(str(m.get("current_market_selection_count") or 0))
             snapshot_time = escape(str(m.get("snapshot_time_utc") or "-"))
-            if league_name != current_league:
-                current_league = league_name
-                rows += f'<tr class="league-header" data-league="{league_esc}"><td colspan="10">{league_esc}</td></tr>'
             rows += f"""
             <tr data-league="{league_esc}">
                 <td>{event_id}</td>
@@ -3521,11 +3516,11 @@ or the data was not processed in time.</p>
             """
 
         # Match Winner 2-Way timeline: rows that have home + away odds (not over/under)
-        mw_rows = [
-            o for o in odds
-            if o.get("home_odds") is not None and o.get("away_odds") is not None
-            and o.get("over_odds") is None
-        ]
+        mw_rows = sorted(
+            [o for o in odds if o.get("home_odds") is not None and o.get("away_odds") is not None and o.get("over_odds") is None],
+            key=lambda o: o.get("add_time") or 0,
+            reverse=True,
+        )
         home_name = escape(str((header.get("home_team") or {}).get("name") or "Home"))
         away_name = escape(str((header.get("away_team") or {}).get("name") or "Away"))
         odds_rows = ""
