@@ -3775,6 +3775,10 @@ def get_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
                 else:
                     outcome_cell = "= Push"
             snap_time = escape(str(r.get("snapshot_time_utc") or "")[:16].replace("T", " "))
+            home_odd = r.get("home_team_odds")
+            away_odd = r.get("away_team_odds")
+            home_odd_cell = escape(str(home_odd)) if home_odd is not None else "-"
+            away_odd_cell = escape(str(away_odd)) if away_odd is not None else "-"
             table_rows += f"""
             <tr{row_class}>
                 <td>{snap_time}</td>
@@ -3782,12 +3786,14 @@ def get_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
                 <td>{escape(str(r['score']) if r.get('score') is not None else '-')}/{escape(str(r['wickets']) if r.get('wickets') is not None else '0')}</td>
                 <td><b>{pred}</b></td>
                 <td style="color:#666;">{escape(str(r.get('over_odds_at_line') or '-'))} / {escape(str(r.get('under_odds_at_line') or '-'))}</td>
+                <td>{home_odd_cell}</td>
+                <td>{away_odd_cell}</td>
                 <td>{outcome_cell}</td>
             </tr>"""
 
         if outcome and actual_total is not None:
             colour = "#d4edda" if outcome == "over" else "#f8d7da" if outcome == "under" else "#fff3cd"
-            table_rows += f'<tr style="background:{colour};font-weight:bold;"><td colspan="6">FINAL: {actual_total} runs → {outcome.upper()}</td></tr>'
+            table_rows += f'<tr style="background:{colour};font-weight:bold;"><td colspan="8">FINAL: {actual_total} runs → {outcome.upper()}</td></tr>'
 
         no_data_msg = ""
         if not timeline_rows:
@@ -3836,7 +3842,7 @@ def get_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
     {no_data_msg}
     <table>
         <thead>
-            <tr><th>Time (UTC)</th><th>Over</th><th>Score/Wkts</th><th>Predicted Total</th><th>Over / Under Odds</th><th>Outcome</th></tr>
+            <tr><th>Time (UTC)</th><th>Over</th><th>Score/Wkts</th><th>Predicted Total</th><th>Over / Under Odds</th><th>{escape(home_team)} (Win)</th><th>{escape(away_team)} (Win)</th><th>Outcome</th></tr>
         </thead>
         <tbody>{table_rows}</tbody>
     </table>

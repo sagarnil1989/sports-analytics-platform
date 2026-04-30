@@ -1,0 +1,63 @@
+when I am hitting the https://api.b365api.com/v1/bet365/event everytime I am getting multiple markets.
+But 2 markets are very important for me. 
+Current innings runs and
+
+
+just like the way we have https://func-ramanuj.azurewebsites.net/api/matches/11803836/view for the live matched.
+When the match is over this link need to exist.
+When I go over here the last column is Prematch Odds and the second last column is Live Odds. 
+
+
+
+When a live match is going on we get the score from https://api.b365api.com/v1/event/view and we get the odds from https://api.b365api.com/v1/bet365/event
+Also add the venue name and the date of the match in the above link.
+Now we have a market by the name of Current innings runs which is very important for us. 
+and also Full time which is the actual odds of the match.
+I want to see somthing like 
+Over - score - Batting team odds - Bowling team odds - Predicted total score( predicted score is that value in choice_group where the odd_value is same for both above and under)
+
+So for expample if the over is 3.2 and the score is 50 so you need to add a new row only where there is a change in either over or score.
+So if the score changes to 55 and the over is still 3.2 then we do not add a row.
+Once the match is over we can get the actual total score of 1st ininiges and when the match  move to ended match page we add one more row saying over or under.
+so if the predicted score is 100 and the actual score is 110 then we add a row saying over and if the actual score is 90 then we add a row saying under.
+and on top of the page you have % of over and under.
+
+Where you keep this data store in file format or used the postgres databse for each nmatch is on you.
+But I have a requirement that when I have 10-20 matches I need to find out what percentage of prediction where over and over at 4over or 3.1 over or 2 over or 16 over stage.
+I also want to have filter by only soecific venue or specific batting tean or bowling team or specific league or number of wickets lost at precudtcion time is 3 or 5 or 
+less than 3 or the main market odds for batting team is less than 1.5 or more than 2.5.
+
+I also make give you multiple combinations to try out and find where the under / over prediction is baised with more than 70% or 80% on one side
+
+
+over here : https://func-ramanuj.azurewebsites.net/api/matches/view
+I can still see a live match but this over can you check what is the issue and fix it. 
+
+do you know why I cannot access this - https://func-ramanuj.azurewebsites.net/api/matches/11658860/view
+
+By default you take all the matches from all leage in bronze but can youi create a page with the leages detail and I can ticket or unticket a league 
+which I am not interested and may be skipped for silver and bronz.
+
+
+If a match has happened in which page can I see the % of over and under prediction of the Current innings runs market.
+If a match is live in which page can I see the % of over and under prediction of the Current innings runs market.
+
+__________________________
+
+for this event https://func-ramanuj.azurewebsites.net/api/matches/11714244/innings-tracker/view
+you have to understand that the match is not 20 over but 50 over match so market which has the total runs is first innings is Oman 50 Overs Runs
+
+and for event where the event is 20 over match the market name would be Runs in 20 Over or Innings runs
+So the innings tracker need to be on this markets.
+
+https://func-ramanuj.azurewebsites.net/api/admin/leagues/view
+this is not working can you check and fix it.
+
+
+
+
+
+for the matches still wrong data I donot get one thing if the data in bronze is there why not recreate silver and gold with corrrect logic 
+
+
+
