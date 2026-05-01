@@ -197,10 +197,16 @@ def write_to_cricwebsite_db(
                               r.get("market_group_name"), choice,
                               r.get("odds_decimal"), bool(r.get("suspended"))))
 
+                batting_team = next(
+                    (str(ts.get("name") or "") for ts in team_scores if ts.get("pg_over")),
+                    None,
+                )
+                total_overs = int(str(match.get("total_overs") or 20))
                 innings_rows = [
                     r for r in current_market_rows
-                    if r.get("market_group_name") and _is_innings_market(r["market_group_name"])
-                    and r.get("odds_decimal")
+                    if r.get("market_group_name") and _is_innings_market(
+                        r["market_group_name"], batting_team=batting_team, total_overs=total_overs
+                    ) and r.get("odds_decimal")
                 ]
                 for r in innings_rows:
                     sel = str(r.get("display_selection_name") or r.get("selection_name") or "").strip()

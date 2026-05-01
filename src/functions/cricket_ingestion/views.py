@@ -1205,6 +1205,220 @@ def view_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
 
 
+def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
+    """Innings tracker built from per-delivery silver state files.
+
+    Reads gold/cricket/innings_tracker/event_id={event_id}/innings_1_from_silver.json
+    which is pre-built by the batch silver reprocessing script.
+    Shows one row per unique match state with ball window, score, predicted total,
+    and Match Winner 2-Way odds per delivery.
+    """
+    try:
+        event_id = req.route_params.get("event_id")
+        gold = get_named_container_client("gold")
+        tracker = download_json(gold, f"cricket/innings_tracker/event_id={event_id}/innings_1_from_silver.json") or {}
+
+        if not tracker:
+            return func.HttpResponse(
+                f"<h2>No silver tracker data for event {event_id}.</h2>"
+                "<p>Run the batch silver reprocess job first to build this file.</p>",
+                status_code=404, mimetype="text/html",
+            )
+
+        home_team  = str(tracker.get("home_team_name") or "Home")
+        away_team  = str(tracker.get("away_team_name") or "Away")
+        match_name = escape(str(tracker.get("match_name") or f"Match {event_id}"))
+        venue      = escape(str(tracker.get("venue") or ""))
+        league     = escape(str(tracker.get("league_name") or ""))
+        match_date = escape(str(tracker.get("match_date_utc") or "")[:10])
+        rows_data: List[Dict[str, Any]] = tracker.get("rows", [])
+        actual_total = tracker.get("actual_total")
+        outcome      = tracker.get("outcome")
+
+        def ball_pill(b: str) -> str:
+            b = str(b).strip()
+            if b == "W":
+                return '<span class="ball w">W</span>'
+            if b in ("0",):
+                return '<span class="ball dot">•</span>'
+            if b == "6":
+                return '<span class="ball six">6</span>'
+            if b == "4":
+                return '<span class="ball four">4</span>'
+            if "wd" in b or "nb" in b or "lb" in b:
+                return f'<span class="ball extra">{escape(b)}</span>'
+            return f'<span class="ball run">{escape(b)}</span>'
+
+        # Summary cards
+        rows_with_pred = [r for r in rows_data if r.get("predicted_total") is not None]
+        over_count  = sum(1 for r in rows_with_pred if actual_total is not None and actual_total > r["predicted_total"])
+        under_count = sum(1 for r in rows_with_pred if actual_total is not None and actual_total < r["predicted_total"])
+        total_dec   = over_count + under_count
+        over_pct    = round(100 * over_count / total_dec, 1) if total_dec else None
+        under_pct   = round(100 * under_count / total_dec, 1) if total_dec else None
+
+        if actual_total and outcome:
+            summary_html = f"""
+            <div class="summary-cards">
+                <div class="scard over">Over: {over_count} ({over_pct}%)</div>
+                <div class="scard under">Under: {under_count} ({under_pct}%)</div>
+                <div class="scard">1st innings: <b>{actual_total} runs</b></div>
+                <div class="scard outcome-{outcome}">Outcome: {outcome.upper()}</div>
+            </div>"""
+        else:
+            summary_html = ""
+
+        # Pre-compute true batting team per innings (first row with actual runs, not sentinel)
+        innings_batting: Dict[int, str] = {}
+        innings_bowling: Dict[int, str] = {}
+        for r in rows_data:
+            inn = r.get("innings", 1)
+            if inn not in innings_batting:
+                if r.get("runs") is not None and r.get("runs", 0) > 0:
+                    innings_batting[inn] = str(r.get("batting_team") or home_team)
+                    innings_bowling[inn] = str(r.get("bowling_team") or away_team)
+        # Fallback: if no row has runs>0 (e.g. all ducks), use first row's batting team
+        for r in rows_data:
+            inn = r.get("innings", 1)
+            if inn not in innings_batting:
+                innings_batting[inn] = str(r.get("batting_team") or home_team)
+                innings_bowling[inn] = str(r.get("bowling_team") or away_team)
+
+        # Table rows — one per state
+        prev_innings = None
+        table_rows = ""
+        for r in rows_data:
+            innings  = r.get("innings", 1)
+            pred     = r.get("predicted_total")
+            runs     = r.get("runs")
+            wickets  = r.get("wickets", 0)
+            target   = r.get("target")
+            bat_team = str(r.get("batting_team") or home_team)
+            bowl_team= str(r.get("bowling_team") or away_team)
+            balls    = r.get("ball_window", [])
+            home_odd = r.get("home_team_odds")
+            away_odd = r.get("away_team_odds")
+            ov_odds  = r.get("over_odds_at_line")
+            un_odds  = r.get("under_odds_at_line")
+
+            # Innings divider
+            if innings != prev_innings:
+                prev_innings = innings
+                inn_label = "1st Innings" if innings == 1 else f"2nd Innings (chasing {target})"
+                bat_label = escape(innings_batting.get(innings, bat_team))
+                bowl_label= escape(innings_bowling.get(innings, bowl_team))
+                table_rows += f'<tr class="inn-divider"><td colspan="9">📌 {inn_label} — {bat_label} batting vs {bowl_label}</td></tr>'
+
+            row_class = ""
+            outcome_cell = "-"
+            if actual_total is not None and pred is not None and innings == 1:
+                if actual_total > pred:
+                    row_class = ' class="over-row"'
+                    outcome_cell = "▲ Over"
+                elif actual_total < pred:
+                    row_class = ' class="under-row"'
+                    outcome_cell = "▼ Under"
+                else:
+                    outcome_cell = "= Push"
+
+            balls_html = "".join(ball_pill(b) for b in reversed(balls)) if balls else "-"
+            pred_cell  = f"<b>{pred}</b>" if pred is not None else '<span style="color:#aaa">—</span>'
+            odds_cell  = f"{ov_odds} / {un_odds}" if ov_odds and un_odds else '<span style="color:#aaa">—</span>'
+            home_cell  = escape(str(home_odd)) if home_odd is not None else "-"
+            away_cell  = escape(str(away_odd)) if away_odd is not None else "-"
+
+            # Colour the win cell if very low (favourite)
+            if home_odd is not None and home_odd < 1.2:
+                home_cell = f'<b style="color:#155724">{home_cell}</b>'
+            if away_odd is not None and away_odd < 1.2:
+                away_cell = f'<b style="color:#155724">{away_cell}</b>'
+
+            snap_time = escape(str(r.get("snapshot_time_utc") or "")[:16].replace("T", " "))
+            score_cell = f"{runs}/{wickets}" if runs is not None else "-"
+
+            table_rows += f"""
+            <tr{row_class}>
+                <td style="font-size:11px;color:#888;">{snap_time}</td>
+                <td>{escape(str(r.get('over') or '-'))}</td>
+                <td><b>{escape(score_cell)}</b></td>
+                <td class="balls">{balls_html}</td>
+                <td>{pred_cell}</td>
+                <td style="color:#666;font-size:12px;">{odds_cell}</td>
+                <td>{home_cell}</td>
+                <td>{away_cell}</td>
+                <td>{outcome_cell}</td>
+            </tr>"""
+
+        if outcome and actual_total is not None:
+            colour = "#d4edda" if outcome == "over" else "#f8d7da" if outcome == "under" else "#fff3cd"
+            table_rows += f'<tr style="background:{colour};font-weight:bold;"><td colspan="9">FINAL 1st innings: {actual_total} runs → 2nd innings outcome: {outcome.upper()}</td></tr>'
+
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Silver Innings Tracker — {match_name}</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
+        h1 {{ margin-bottom: 4px; }}
+        .meta {{ color: #555; font-size: 14px; margin-bottom: 3px; }}
+        .summary-cards {{ display: flex; gap: 12px; flex-wrap: wrap; margin: 18px 0; }}
+        .scard {{ padding: 12px 20px; border-radius: 8px; background: white; box-shadow: 0 2px 6px #ddd; font-weight: bold; }}
+        .scard.over {{ background: #d4edda; color: #155724; }}
+        .scard.under {{ background: #f8d7da; color: #721c24; }}
+        .scard.outcome-over {{ background: #d4edda; color: #155724; }}
+        .scard.outcome-under {{ background: #f8d7da; color: #721c24; }}
+        .scard.outcome-push {{ background: #fff3cd; color: #856404; }}
+        table {{ width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 8px #ddd; margin-top: 16px; }}
+        th, td {{ padding: 8px 10px; border-bottom: 1px solid #eee; text-align: left; font-size: 13px; }}
+        th {{ background: #1a1a2e; color: white; position: sticky; top: 0; font-size: 12px; }}
+        tr.over-row {{ background: #eafbea; }}
+        tr.under-row {{ background: #fdf0f0; }}
+        tr.inn-divider td {{ background: #2c3e50; color: #ecf0f1; font-weight: bold; font-size: 13px; padding: 10px; }}
+        .balls {{ white-space: nowrap; }}
+        .ball {{ display: inline-block; width: 22px; height: 22px; line-height: 22px; text-align: center;
+                  border-radius: 50%; font-size: 11px; font-weight: bold; margin: 1px; }}
+        .ball.w    {{ background: #e74c3c; color: white; }}
+        .ball.dot  {{ background: #bdc3c7; color: #555; font-size: 16px; }}
+        .ball.six  {{ background: #2980b9; color: white; }}
+        .ball.four {{ background: #27ae60; color: white; }}
+        .ball.extra{{ background: #f39c12; color: white; font-size: 9px; width: 28px; border-radius: 4px; }}
+        .ball.run  {{ background: #ecf0f1; color: #333; border: 1px solid #ccc; }}
+        a {{ color: #0066cc; text-decoration: none; }}
+        .source-tag {{ display: inline-block; background: #6c757d; color: white; font-size: 11px;
+                        padding: 2px 8px; border-radius: 4px; margin-left: 8px; vertical-align: middle; }}
+    </style>
+</head>
+<body>
+    <p><a href="/api/matches/{escape(str(event_id))}/innings-tracker/view">← Standard tracker</a> | <a href="/api/innings-tracker">All matches analytics</a></p>
+    <h1>Silver Innings Tracker — {match_name} <span class="source-tag">per-delivery · silver states</span></h1>
+    {f'<div class="meta">📍 {venue}</div>' if venue else ""}
+    <div class="meta">📅 {match_date} &nbsp;|&nbsp; {league}</div>
+    <div class="meta">{escape(home_team)} vs {escape(away_team)} &nbsp;|&nbsp; <b>{len(rows_data)} states</b></div>
+    {summary_html}
+    <table>
+        <thead>
+            <tr>
+                <th>Time (UTC)</th>
+                <th>Over</th>
+                <th>Score</th>
+                <th>Last 6 Balls (oldest→newest)</th>
+                <th>Predicted Total</th>
+                <th>O/U Odds</th>
+                <th>{escape(home_team)} Win</th>
+                <th>{escape(away_team)} Win</th>
+                <th>Outcome</th>
+            </tr>
+        </thead>
+        <tbody>{table_rows}</tbody>
+    </table>
+</body>
+</html>"""
+        return func.HttpResponse(html, status_code=200, mimetype="text/html")
+    except Exception as ex:
+        logging.exception("Failed to render silver innings tracker")
+        return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
+
+
 def view_innings_tracker_analytics(req: func.HttpRequest) -> func.HttpResponse:
     try:
         gold = get_named_container_client("gold")

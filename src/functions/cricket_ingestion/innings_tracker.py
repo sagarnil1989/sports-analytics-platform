@@ -82,23 +82,35 @@ def extract_innings_snapshot(
     batting_team: Optional[str] = None
 
     for row in team_score_rows:
-        over_str = str(row.get("pg_over") or "").strip() or None
-        if not over_str:
-            continue
-        current_over = over_str
-        batting_team = str(row.get("name") or "")
-        current_score = row.get("runs")
-        current_wickets = row.get("wickets")
-        break
+        if row.get("runs") is not None:
+            batting_team = str(row.get("name") or "")
+            current_score = row.get("runs")
+            current_wickets = row.get("wickets")
+            over_str = str(row.get("pg_over") or "").strip() or None
+            current_over = over_str
+            break
+    if batting_team is None:
+        for row in team_score_rows:
+            over_str = str(row.get("pg_over") or "").strip() or None
+            if not over_str:
+                continue
+            current_over = over_str
+            batting_team = str(row.get("name") or "")
+            current_score = row.get("runs")
+            current_wickets = row.get("wickets")
+            break
 
     if current_score is None:
         return None
 
     bowling_team = (away_team if batting_team == home_team else home_team) if batting_team else away_team
 
+    total_overs = int(str(match_snapshot.get("total_overs") or 20))
     innings_rows = [
         r for r in current_market_rows
-        if r.get("market_group_name") and _is_innings_market(r["market_group_name"])
+        if r.get("market_group_name") and _is_innings_market(
+            r["market_group_name"], batting_team=batting_team, total_overs=total_overs
+        )
     ]
 
     _SIMPLE_OVER_RE = re.compile(r'^[Oo]ver\s+([\d.]+)$')

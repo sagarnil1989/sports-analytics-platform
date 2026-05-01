@@ -10,24 +10,21 @@ from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.core.exceptions import ResourceNotFoundError, ResourceExistsError
 
 
-# Innings market detection shared across modules
-_INNINGS_MARKET_RE = re.compile(
-    r'\b\d{2,}\s+overs?\s+runs?\b'                                       # "20 Overs Runs", "50 Overs Runs" — 2+ digits excludes "2nd Over", "Next 3 Overs"
-    r'|'
-    r'\bruns?\s+in\s+\d{2,}\s+overs?\b'                                  # "Runs in 20 Overs"
-    r'|'
-    r'\b(?:1st|2nd|3rd|4th|first|second|current)\s+inn(?:ing|ings)?\s+runs?\b',  # "1st Innings Runs", "Current Innings Runs"
-    re.IGNORECASE,
-)
-# "innings run" removed — it is a substring of player markets like "Sharmin Akhter Innings Runs"
-_INNINGS_KEYWORDS = ["current inn", "1st inn", "inning run"]
+def _is_innings_market(name: str, batting_team: Optional[str] = None, total_overs: int = 20) -> bool:
+    """Return True only for the full-innings runs market of the batting team.
 
+    When batting_team is provided (always preferred), checks for the exact
+    market name pattern:  "{batting_team} {total_overs} Overs Runs"
+    e.g. "Gujarat Titans 20 Overs Runs"
 
-def _is_innings_market(name: str) -> bool:
-    n = name.lower()
-    if any(kw in n for kw in _INNINGS_KEYWORDS):
-        return True
-    return bool(_INNINGS_MARKET_RE.search(name))
+    total_overs comes from S5 in the EV record (always "20" for T20, "50" for ODI).
+    Falls back to a simple suffix check when batting_team is unknown.
+    """
+    if batting_team:
+        expected = f"{batting_team.strip().lower()} {total_overs} overs runs"
+        return name.strip().lower() == expected
+    # Fallback: accept any "{N} Overs Runs" where N >= 10 (full innings, not a micro-market)
+    return bool(re.search(r'\b(?:[1-9]\d)\s+overs?\s+runs?\b', name, re.IGNORECASE))
 
 
 # ------------------------------------------------------------------

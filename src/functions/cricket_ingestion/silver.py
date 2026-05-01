@@ -329,6 +329,7 @@ def silver_parse_snapshot(
                 ev_stats_pg_raw = r.get("PG")
                 ev_stats_s3_raw = r.get("S3")
                 ev_stats_ss_raw = r.get("SS")
+                ev_stats_s5_raw = r.get("S5")  # total overs in match e.g. "20" for T20
                 pg_over = parse_over_from_pg(r["PG"])
                 if pg_over is not None:
                     fallback_pg_over = pg_over
@@ -371,6 +372,7 @@ def silver_parse_snapshot(
         "ev_stats_pg_raw": ev_stats_pg_raw,
         "ev_stats_s3_raw": ev_stats_s3_raw,
         "ev_stats_ss_raw": ev_stats_ss_raw,
+        "total_overs": int(ev_stats_s5_raw) if ev_stats_s5_raw and str(ev_stats_s5_raw).isdigit() else 20,
         "bet365_event_success": manifest.get("status", {}).get("bet365_event_success"),
         "events_inplay_success": manifest.get("status", {}).get("events_inplay_success"),
         "event_odds_success": manifest.get("status", {}).get("event_odds_success"),
@@ -520,9 +522,14 @@ def silver_write_state_file(silver_container, parsed: Dict[str, Any]) -> None:
 
     batting_team: Optional[str] = None
     for ts in parsed["team_scores"]:
-        if ts.get("pg_over"):
+        if ts.get("runs") is not None:
             batting_team = ts.get("name")
             break
+    if batting_team is None:
+        for ts in parsed["team_scores"]:
+            if ts.get("pg_over"):
+                batting_team = ts.get("name")
+                break
     home = match.get("home_team_name") or ""
     away = match.get("away_team_name") or ""
     bowling_team = (away if batting_team == home else home) if batting_team else away
