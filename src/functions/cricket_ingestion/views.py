@@ -1193,7 +1193,7 @@ def view_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
     {no_data_msg}
     <table>
         <thead>
-            <tr><th>Time (UTC)</th><th>Over</th><th>Score/Wkts</th><th>Predicted Total</th><th>Over / Under Odds</th><th>{escape(home_team)} (Win)</th><th>{escape(away_team)} (Win)</th><th>Outcome</th></tr>
+            <tr><th>Time (UTC)</th><th>Over</th><th>Score/Wkts</th><th>Last 6 Balls (oldest→newest)</th><th>Predicted Total</th><th>O/U Odds</th><th>{escape(home_team)} Win</th><th>{escape(away_team)} Win</th><th>Outcome</th><th style="font-size:11px;color:#aaa;">Silver File</th></tr>
         </thead>
         <tbody>{table_rows}</tbody>
     </table>
@@ -1289,6 +1289,8 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
         table_rows = ""
         for r in rows_data:
             innings  = r.get("innings", 1)
+            if innings != 1:
+                continue
             pred     = r.get("predicted_total")
             runs     = r.get("runs")
             wickets  = r.get("wickets", 0)
@@ -1307,7 +1309,7 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
                 inn_label = "1st Innings" if innings == 1 else f"2nd Innings (chasing {target})"
                 bat_label = escape(innings_batting.get(innings, bat_team))
                 bowl_label= escape(innings_bowling.get(innings, bowl_team))
-                table_rows += f'<tr class="inn-divider"><td colspan="9">📌 {inn_label} — {bat_label} batting vs {bowl_label}</td></tr>'
+                table_rows += f'<tr class="inn-divider"><td colspan="10">📌 {inn_label} — {bat_label} batting vs {bowl_label}</td></tr>'
 
             row_class = ""
             outcome_cell = "-"
@@ -1336,6 +1338,7 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
             snap_time = escape(str(r.get("snapshot_time_utc") or "")[:16].replace("T", " "))
             score_cell = f"{runs}/{wickets}" if runs is not None else "-"
 
+            state_file = escape(str(r.get("state_file") or ""))
             table_rows += f"""
             <tr{row_class}>
                 <td style="font-size:11px;color:#888;">{snap_time}</td>
@@ -1347,11 +1350,12 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
                 <td>{home_cell}</td>
                 <td>{away_cell}</td>
                 <td>{outcome_cell}</td>
+                <td style="font-size:11px;color:#999;font-family:monospace;">{state_file}</td>
             </tr>"""
 
         if outcome and actual_total is not None:
             colour = "#d4edda" if outcome == "over" else "#f8d7da" if outcome == "under" else "#fff3cd"
-            table_rows += f'<tr style="background:{colour};font-weight:bold;"><td colspan="9">FINAL 1st innings: {actual_total} runs → 2nd innings outcome: {outcome.upper()}</td></tr>'
+            table_rows += f'<tr style="background:{colour};font-weight:bold;"><td colspan="10">FINAL 1st innings: {actual_total} runs → 2nd innings outcome: {outcome.upper()}</td></tr>'
 
         html = f"""<!DOCTYPE html>
 <html>
