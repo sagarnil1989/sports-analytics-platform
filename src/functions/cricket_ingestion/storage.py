@@ -12,9 +12,9 @@ from azure.core.exceptions import ResourceNotFoundError, ResourceExistsError
 
 # Innings market detection shared across modules
 _INNINGS_MARKET_RE = re.compile(
-    r'\b\d+\s+overs?\s+runs?\b'                                          # "50 Overs Runs"
+    r'\b\d{2,}\s+overs?\s+runs?\b'                                       # "20 Overs Runs", "50 Overs Runs" — 2+ digits excludes "2nd Over", "Next 3 Overs"
     r'|'
-    r'\bruns?\s+in\s+\d+\s+overs?\b'                                     # "Runs in 20 Overs"
+    r'\bruns?\s+in\s+\d{2,}\s+overs?\b'                                  # "Runs in 20 Overs"
     r'|'
     r'\b(?:1st|2nd|3rd|4th|first|second|current)\s+inn(?:ing|ings)?\s+runs?\b',  # "1st Innings Runs", "Current Innings Runs"
     re.IGNORECASE,
