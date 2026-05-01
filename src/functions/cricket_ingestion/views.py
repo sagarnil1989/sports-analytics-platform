@@ -1228,9 +1228,14 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
         home_team  = str(tracker.get("home_team_name") or "Home")
         away_team  = str(tracker.get("away_team_name") or "Away")
         match_name = escape(str(tracker.get("match_name") or f"Match {event_id}"))
-        venue      = escape(str(tracker.get("venue") or ""))
         league     = escape(str(tracker.get("league_name") or ""))
         match_date = escape(str(tracker.get("match_date_utc") or "")[:10])
+        stadium    = tracker.get("stadium_data") or {}
+        venue_str  = stadium.get("name") or tracker.get("venue") or ""
+        city_str   = stadium.get("city") or ""
+        country_str= stadium.get("country") or ""
+        venue_parts= [p for p in [venue_str, city_str, country_str] if p]
+        venue      = escape(", ".join(venue_parts))
         rows_data: List[Dict[str, Any]] = tracker.get("rows", [])
         actual_total = tracker.get("actual_total")
         outcome      = tracker.get("outcome")
