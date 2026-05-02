@@ -1236,6 +1236,24 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
         country_str= stadium.get("country") or ""
         venue_parts= [p for p in [venue_str, city_str, country_str] if p]
         venue      = escape(", ".join(venue_parts))
+
+        # Parse final score: ss format "158/6(15.5)-155/10(19.2)" → home - away
+        final_ss   = tracker.get("final_score_ss") or ""
+        final_score_html = ""
+        if final_ss:
+            import re as _re
+            parts = final_ss.split("-")
+            if len(parts) == 2:
+                def fmt_score(s, team):
+                    m = _re.match(r'(\d+/\d+)\(?([\d.]+)?\)?', s.strip())
+                    if m:
+                        sc = m.group(1)
+                        ov = f" ({m.group(2)} ov)" if m.group(2) else ""
+                        return f"<b>{escape(team)}</b>: {sc}{ov}"
+                    return f"<b>{escape(team)}</b>: {escape(s.strip())}"
+                home_sc = fmt_score(parts[0], home_team)
+                away_sc = fmt_score(parts[1], away_team)
+                final_score_html = f'<div class="meta" style="font-size:15px;margin-top:6px;">🏏 Final Score &nbsp;|&nbsp; {home_sc} &nbsp;vs&nbsp; {away_sc}</div>'
         rows_data: List[Dict[str, Any]] = tracker.get("rows", [])
         actual_total = tracker.get("actual_total")
         outcome      = tracker.get("outcome")
@@ -1403,6 +1421,7 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
     {f'<div class="meta">📍 {venue}</div>' if venue else ""}
     <div class="meta">📅 {match_date} &nbsp;|&nbsp; {league}</div>
     <div class="meta">{escape(home_team)} vs {escape(away_team)} &nbsp;|&nbsp; <b>{len(rows_data)} states</b></div>
+    {final_score_html}
     {summary_html}
     <table>
         <thead>
