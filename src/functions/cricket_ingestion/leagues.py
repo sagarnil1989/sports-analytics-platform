@@ -4,6 +4,7 @@ from storage import download_json, get_named_container_client, upload_json, utc_
 
 
 _LEAGUE_PREFS_PATH = "cricket/config/league_preferences.json"
+_BLOCKED_EVENTS_PATH = "cricket/config/blocked_event_ids.json"
 
 
 def load_excluded_league_ids() -> set:
@@ -11,6 +12,26 @@ def load_excluded_league_ids() -> set:
     gold = get_named_container_client("gold")
     prefs = download_json(gold, _LEAGUE_PREFS_PATH) or {}
     return set(str(lid) for lid in prefs.get("excluded_league_ids", []))
+
+
+def load_blocked_event_ids() -> set:
+    """Return a set of event_id strings permanently blocked from the ended index."""
+    gold = get_named_container_client("gold")
+    data = download_json(gold, _BLOCKED_EVENTS_PATH) or {}
+    return set(str(eid) for eid in data.get("blocked_event_ids", []))
+
+
+def block_event_ids(event_ids: set) -> None:
+    """Add event_ids to the permanent block list."""
+    gold = get_named_container_client("gold")
+    existing = load_blocked_event_ids()
+    merged = existing | {str(e) for e in event_ids}
+    upload_json(
+        gold,
+        _BLOCKED_EVENTS_PATH,
+        {"blocked_event_ids": sorted(merged), "updated_at_utc": utc_now().isoformat()},
+        overwrite=True,
+    )
 
 
 def save_league_preferences(excluded_ids: set) -> None:

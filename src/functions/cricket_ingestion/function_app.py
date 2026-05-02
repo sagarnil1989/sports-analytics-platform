@@ -196,11 +196,6 @@ def get_match_lineage_html(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="matches/{event_id}/innings-tracker/view", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
-    return view_innings_tracker_html(req)
-
-
-@app.route(route="matches/{event_id}/silver-tracker/view", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
-def get_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
     return view_silver_innings_tracker_html(req)
 
 

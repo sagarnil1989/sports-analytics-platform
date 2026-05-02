@@ -1383,7 +1383,7 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
         html = f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>Silver Innings Tracker — {match_name}</title>
+    <title>Innings Tracker — {match_name}</title>
     <style>
         body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
         h1 {{ margin-bottom: 4px; }}
@@ -1416,8 +1416,8 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
     </style>
 </head>
 <body>
-    <p><a href="/api/matches/{escape(str(event_id))}/innings-tracker/view">← Standard tracker</a> | <a href="/api/innings-tracker">All matches analytics</a></p>
-    <h1>Silver Innings Tracker — {match_name} <span class="source-tag">per-delivery · silver states</span></h1>
+    <p><a href="/api/matches/{escape(str(event_id))}/view">← Back to match</a> | <a href="/api/innings-tracker">All matches analytics</a></p>
+    <h1>Innings Tracker — {match_name}</h1>
     {f'<div class="meta">📍 {venue}</div>' if venue else ""}
     <div class="meta">📅 {match_date} &nbsp;|&nbsp; {league}</div>
     <div class="meta">{escape(home_team)} vs {escape(away_team)} &nbsp;|&nbsp; <b>{len(rows_data)} states</b></div>
