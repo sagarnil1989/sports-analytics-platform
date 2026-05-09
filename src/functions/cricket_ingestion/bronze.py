@@ -14,7 +14,7 @@ from storage import (
     utc_now,
     build_live_snapshot_lineage,
 )
-from leagues import load_excluded_league_ids
+from leagues import load_allowed_league_ids
 
 
 def bronze_discover_cricket_inplay() -> None:
@@ -81,12 +81,12 @@ def bronze_capture_cricket_inplay_snapshot() -> None:
         return
 
     active_matches = control["active_matches"]
-    excluded_leagues = load_excluded_league_ids()
+    allowed_leagues = load_allowed_league_ids()
 
     events_inplay_payload = call_betsapi(path="/v3/events/inplay", params={"sport_id": sport_id})
 
     for match in active_matches:
-        if excluded_leagues and str(match.get("league_id") or "") in excluded_leagues:
+        if str(match.get("league_id") or "") not in allowed_leagues:
             logging.info(json.dumps({"event": "bronze_inplay_snapshot_skipped_league", "league_id": match.get("league_id"), "league_name": match.get("league_name")}))
             continue
         snapshot_time = utc_now()

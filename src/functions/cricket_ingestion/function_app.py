@@ -38,6 +38,7 @@ from views import (
     view_match_live_markets,
     view_match_markets_raw,
     view_admin_rebuild_innings,
+    view_admin_reprocess_silver,
     view_admin_leagues,
     view_admin_league_toggle,
     view_home,
@@ -261,6 +262,11 @@ def run_prematch_now(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="mgmt/innings/{event_id}/rebuild", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def admin_rebuild_innings_accumulator(req: func.HttpRequest) -> func.HttpResponse:
     return view_admin_rebuild_innings(req)
+
+
+@app.route(route="mgmt/reprocess-silver", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+def admin_reprocess_silver(req: func.HttpRequest) -> func.HttpResponse:
+    return view_admin_reprocess_silver(req)
 
 
 @app.route(route="mgmt/leagues/view", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)

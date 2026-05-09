@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sports Analytics Platform — Architecture Flow</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: #0f1117;
+    color: #e2e8f0;
+    padding: 32px 24px;
+    min-height: 100vh;
+  }
+  h1 {
+    font-size: 1.6rem;
+    font-weight: 700;
+    color: #f8fafc;
+    margin-bottom: 8px;
+  }
+  .subtitle {
+    color: #94a3b8;
+    font-size: 0.9rem;
+    margin-bottom: 40px;
+  }
+
+  /* ── Section headings ───────────────────── */
+  h2 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin: 40px 0 16px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #94a3b8;
+  }
+
+  /* ── Layer cards ────────────────────────── */
+  .layers {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+  }
+
+  .layer {
+    border-radius: 12px;
+    padding: 24px;
+    position: relative;
+  }
+  .layer-bronze { background: #1c1208; border: 1.5px solid #92400e; }
+  .layer-silver { background: #0f1821; border: 1.5px solid #475569; }
+  .layer-gold   { background: #161208; border: 1.5px solid #a16207; }
+
+  .layer-title {
+    font-size: 1rem;
+    font-weight: 700;
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .layer-bronze .layer-title { color: #fb923c; }
+  .layer-silver .layer-title { color: #94a3b8; }
+  .layer-gold   .layer-title { color: #fbbf24; }
+
+  .layer-container {
+    font-size: 0.72rem;
+    font-family: monospace;
+    margin-bottom: 16px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    display: inline-block;
+  }
+  .layer-bronze .layer-container { background: #451a03; color: #fdba74; }
+  .layer-silver .layer-container { background: #1e293b; color: #cbd5e1; }
+  .layer-gold   .layer-container { background: #422006; color: #fde68a; }
+
+  .trigger-badge {
+    font-size: 0.68rem;
+    font-family: monospace;
+    padding: 2px 7px;
+    border-radius: 99px;
+    margin-bottom: 14px;
+    display: inline-block;
+  }
+  .layer-bronze .trigger-badge { background: #7c2d12; color: #fed7aa; }
+  .layer-silver .trigger-badge { background: #1e293b; color: #93c5fd; }
+  .layer-gold   .trigger-badge { background: #3f3008; color: #fef08a; }
+
+  .file-group { margin-bottom: 14px; }
+  .file-group-label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #64748b;
+    margin-bottom: 6px;
+  }
+
+  .file-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 5px;
+    font-size: 0.78rem;
+  }
+  .file-name {
+    font-family: monospace;
+    font-size: 0.72rem;
+    flex-shrink: 0;
+  }
+  .layer-bronze .file-name { color: #fdba74; }
+  .layer-silver .file-name { color: #93c5fd; }
+  .layer-gold   .file-name { color: #fde68a; }
+
+  .file-desc { color: #94a3b8; font-size: 0.72rem; line-height: 1.4; }
+
+  /* ── Arrow ──────────────────────────────── */
+  .arrow-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+    margin: 8px 0;
+  }
+  .arrow-cell {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+  .arrow-line {
+    width: 2px;
+    height: 28px;
+    background: linear-gradient(to bottom, #334155, #475569);
+  }
+  .arrow-head {
+    width: 0; height: 0;
+    border-left: 7px solid transparent;
+    border-right: 7px solid transparent;
+    border-top: 10px solid #475569;
+  }
+  .arrow-label {
+    font-size: 0.68rem;
+    color: #60a5fa;
+    font-family: monospace;
+    text-align: center;
+    background: #1e3a5f;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-top: 2px;
+  }
+
+  /* ── ADF Section ────────────────────────── */
+  .adf-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+
+  .adf-card {
+    background: #0d1f35;
+    border: 1.5px solid #1d4ed8;
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .adf-card-title {
+    color: #60a5fa;
+    font-weight: 700;
+    font-size: 0.9rem;
+    margin-bottom: 4px;
+    font-family: monospace;
+  }
+  .adf-card-sub {
+    color: #475569;
+    font-size: 0.7rem;
+    margin-bottom: 14px;
+  }
+
+  .adf-step {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+    align-items: flex-start;
+  }
+  .adf-step-num {
+    background: #1d4ed8;
+    color: #bfdbfe;
+    font-size: 0.65rem;
+    font-weight: 700;
+    border-radius: 50%;
+    width: 18px; height: 18px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+  .adf-step-content { font-size: 0.75rem; line-height: 1.5; color: #cbd5e1; }
+  .adf-step-content code {
+    font-family: monospace;
+    font-size: 0.7rem;
+    background: #1e3a5f;
+    color: #93c5fd;
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+  .adf-arrow {
+    text-align: center;
+    color: #3b82f6;
+    font-size: 1.1rem;
+    margin: 4px 0 4px 28px;
+  }
+
+  /* ── Timer triggers ─────────────────────── */
+  .timer-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+  }
+  .timer-card {
+    background: #0d1f0d;
+    border: 1.5px solid #166534;
+    border-radius: 10px;
+    padding: 14px;
+  }
+  .timer-schedule {
+    font-family: monospace;
+    font-size: 0.68rem;
+    color: #86efac;
+    background: #14532d;
+    padding: 2px 7px;
+    border-radius: 4px;
+    display: inline-block;
+    margin-bottom: 8px;
+  }
+  .timer-name {
+    color: #4ade80;
+    font-weight: 600;
+    font-size: 0.8rem;
+    margin-bottom: 4px;
+  }
+  .timer-desc { font-size: 0.72rem; color: #94a3b8; line-height: 1.4; }
+  .timer-writes { font-size: 0.68rem; color: #86efac; margin-top: 6px; font-family: monospace; }
+
+  /* ── Lineage section ────────────────────── */
+  .lineage-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+  }
+  .lineage-card {
+    border-radius: 10px;
+    padding: 18px;
+  }
+  .lineage-recommended { background: #0d1f0d; border: 1.5px solid #166534; }
+  .lineage-option      { background: #1a1625; border: 1.5px solid #4c1d95; }
+
+  .lineage-badge {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 2px 8px;
+    border-radius: 99px;
+    margin-bottom: 8px;
+    display: inline-block;
+  }
+  .lineage-recommended .lineage-badge { background: #14532d; color: #86efac; }
+  .lineage-option      .lineage-badge { background: #3b0764; color: #d8b4fe; }
+
+  .lineage-name {
+    font-weight: 700;
+    font-size: 0.95rem;
+    margin-bottom: 4px;
+  }
+  .lineage-recommended .lineage-name { color: #4ade80; }
+  .lineage-option      .lineage-name { color: #c084fc; }
+
+  .lineage-cost {
+    font-size: 0.72rem;
+    font-family: monospace;
+    margin-bottom: 8px;
+  }
+  .lineage-recommended .lineage-cost { color: #86efac; }
+  .lineage-option      .lineage-cost { color: #d8b4fe; }
+
+  .lineage-desc { font-size: 0.75rem; color: #94a3b8; line-height: 1.5; }
+  .lineage-pro  { color: #4ade80; }
+  .lineage-con  { color: #f87171; }
+
+  /* ── Column lineage table ───────────────── */
+  .lineage-table { width: 100%; border-collapse: collapse; font-size: 0.75rem; margin-top: 8px; }
+  .lineage-table th {
+    text-align: left;
+    padding: 8px 12px;
+    background: #1e293b;
+    color: #94a3b8;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    border-bottom: 1px solid #334155;
+  }
+  .lineage-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid #1e293b;
+    vertical-align: top;
+    line-height: 1.4;
+  }
+  .lineage-table tr:last-child td { border-bottom: none; }
+  .lineage-table tr:hover td { background: #1a2332; }
+
+  .col-field   { font-family: monospace; font-size: 0.7rem; color: #fde68a; }
+  .col-source  { font-family: monospace; font-size: 0.69rem; color: #93c5fd; }
+  .col-api     { font-family: monospace; font-size: 0.69rem; color: #fdba74; }
+  .col-desc    { color: #94a3b8; }
+
+  .tag {
+    display: inline-block;
+    font-size: 0.62rem;
+    padding: 1px 6px;
+    border-radius: 3px;
+    margin-right: 3px;
+    font-family: monospace;
+  }
+  .tag-bronze { background: #7c2d12; color: #fed7aa; }
+  .tag-silver { background: #1e293b; color: #93c5fd; }
+  .tag-gold   { background: #3f3008; color: #fef08a; }
+
+  .divider {
+    border: none;
+    border-top: 1px solid #1e293b;
+    margin: 40px 0;
+  }
+</style>
+</head>
+<body>
+
+<h1>Sports Analytics Platform — Architecture Flow</h1>
+<p class="subtitle">Bronze → Silver → Gold medallion architecture · Azure Functions + ADF + ADLS Gen2</p>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2>Timer Triggers (Azure Function App)</h2>
+<div class="timer-grid">
+
+  <div class="timer-card">
+    <div class="timer-schedule">*/5 * * * * *</div>
+    <div class="timer-name">discover_cricket_inplay</div>
+    <div class="timer-desc">Polls BetsAPI for live matches, updates FI list</div>
+    <div class="timer-writes">→ bronze: active_inplay_fi/latest.json</div>
+  </div>
+
+  <div class="timer-card">
+    <div class="timer-schedule">*/5 * * * * *</div>
+    <div class="timer-name">capture_cricket_inplay_snapshot</div>
+    <div class="timer-desc">Captures full snapshot for each live match — all odds, stats, lineups</div>
+    <div class="timer-writes">→ bronze: inplay_snapshot/{eid}/fi={fi}/snapshot_{ts}.json + manifest.json</div>
+  </div>
+
+  <div class="timer-card">
+    <div class="timer-schedule">0 */1 * * * *</div>
+    <div class="timer-name">discover_cricket_upcoming</div>
+    <div class="timer-desc">Fetches upcoming matches from BetsAPI, writes prematch index</div>
+    <div class="timer-writes">→ gold: prematch/latest/index.json</div>
+  </div>
+
+  <div class="timer-card">
+    <div class="timer-schedule">10 */1 * * * *</div>
+    <div class="timer-name">capture_cricket_prematch_odds</div>
+    <div class="timer-desc">Captures Bet365 prematch odds for each upcoming match</div>
+    <div class="timer-writes">→ bronze: prematch_snapshot/{eid}/api_event_odds_summary.json</div>
+  </div>
+
+  <div class="timer-card">
+    <div class="timer-schedule">30 */5 * * * *</div>
+    <div class="timer-name">discover_cricket_ended</div>
+    <div class="timer-desc">Checks innings_1.json staleness (&gt;1 hr, not live) → auto-promotes to ended. No API call.</div>
+    <div class="timer-writes">→ gold: innings_1_from_silver.json · ended/latest/index.json</div>
+  </div>
+
+  <div class="timer-card">
+    <div class="timer-schedule">*/10 * * * * *</div>
+    <div class="timer-name">parse_cricket_bronze_to_silver</div>
+    <div class="timer-desc">Reads bronze manifests, parses raw JSON into structured silver files</div>
+    <div class="timer-writes">→ silver: match_state · team_scores · market_odds · active_markets · innings_snapshot</div>
+  </div>
+
+  <div class="timer-card">
+    <div class="timer-schedule">*/10 * * * * *</div>
+    <div class="timer-name">build_cricket_gold_match_pages</div>
+    <div class="timer-desc">Reads silver, builds match dashboard and innings tracker accumulator</div>
+    <div class="timer-writes">→ gold: innings_1.json · match_dashboard.json · matches/latest/index.json</div>
+  </div>
+
+  <div class="timer-card">
+    <div class="timer-schedule">30 */1 * * * *</div>
+    <div class="timer-name">build_cricket_prematch_pages</div>
+    <div class="timer-desc">Builds prematch gold pages from prematch bronze snapshots</div>
+    <div class="timer-writes">→ gold: prematch/{eid}/match_dashboard.json · leagues/index.json</div>
+  </div>
+
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2>Storage Layers</h2>
+
+<div class="layers">
+
+  <!-- BRONZE -->
+  <div class="layer layer-bronze">
+    <div class="layer-title">🥉 Bronze</div>
+    <div class="layer-container">container: bronze</div><br>
+    <div class="trigger-badge">Raw · Immutable · Append-only</div>
+
+    <div class="file-group">
+      <div class="file-group-label">Live Snapshot (per match)</div>
+      <div class="file-item">
+        <div>
+          <div class="file-name">inplay_snapshot/sport_id=3/<br>event_id={eid}/fi={fi}/</div>
+          <div class="file-desc" style="margin-top:4px;">
+            <div>📄 snapshot_{ts}.json — raw API response</div>
+            <div>📄 api_inplay_event_list.json</div>
+            <div>📄 api_event_view.json — full match detail</div>
+            <div>📄 api_event_odds.json — all odds</div>
+            <div>📄 api_live_market_odds.json — Bet365 markets</div>
+            <div>📄 api_live_market_stats.json</div>
+            <div>📄 api_live_market_lineup.json</div>
+            <div>📄 lineage.json — API call log + latency</div>
+            <div>📄 manifest.json — snapshot index</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="file-group">
+      <div class="file-group-label">Prematch Snapshot</div>
+      <div class="file-item">
+        <div class="file-name">prematch_snapshot/sport_id=3/event_id={eid}/</div>
+      </div>
+      <div class="file-desc">api_event_odds_summary.json<br>api_event_history.json</div>
+    </div>
+
+    <div class="file-group">
+      <div class="file-group-label">Control Files</div>
+      <div class="file-item">
+        <div class="file-name">control/active_inplay_fi/latest.json</div>
+      </div>
+      <div class="file-desc">List of currently live FI IDs</div>
+    </div>
+  </div>
+
+  <!-- SILVER -->
+  <div class="layer layer-silver">
+    <div class="layer-title">🥈 Silver</div>
+    <div class="layer-container">container: silver</div><br>
+    <div class="trigger-badge">Parsed · Typed · Per-match</div>
+
+    <div class="file-group">
+      <div class="file-group-label">Per Match  cricket/event_id={eid}/</div>
+
+      <div class="file-item">
+        <div>
+          <div class="file-name">match_state.json</div>
+          <div class="file-desc">time_status, score, teams, date, innings, score_summary_events</div>
+        </div>
+      </div>
+      <div class="file-item">
+        <div>
+          <div class="file-name">team_scores.json</div>
+          <div class="file-desc">rows: over, ball, runs, wickets, extras per delivery</div>
+        </div>
+      </div>
+      <div class="file-item">
+        <div>
+          <div class="file-name">player_entries.json</div>
+          <div class="file-desc">rows: batsman/bowler stats per snapshot</div>
+        </div>
+      </div>
+      <div class="file-item">
+        <div>
+          <div class="file-name">market_odds.json</div>
+          <div class="file-desc">rows: ALL odds snapshots, market_key (3_1 = Match Winner), home/away odds decimal</div>
+        </div>
+      </div>
+      <div class="file-item">
+        <div>
+          <div class="file-name">active_markets.json</div>
+          <div class="file-desc">rows: current live market prices, market_group_name, odds_decimal</div>
+        </div>
+      </div>
+      <div class="file-item">
+        <div>
+          <div class="file-name">innings_snapshot.json</div>
+          <div class="file-desc">Single tracker data point from latest silver parse</div>
+        </div>
+      </div>
+      <div class="file-item">
+        <div>
+          <div class="file-name">innings_accumulator/</div>
+          <div class="file-desc">Folder of all accumulated innings tracker rows over time</div>
+        </div>
+      </div>
+      <div class="file-item">
+        <div>
+          <div class="file-name">lineage.json</div>
+          <div class="file-desc">Source bronze paths + timestamps for this silver write</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- GOLD -->
+  <div class="layer layer-gold">
+    <div class="layer-title">🥇 Gold</div>
+    <div class="layer-container">container: gold</div><br>
+    <div class="trigger-badge">Aggregated · Served · API-ready</div>
+
+    <div class="file-group">
+      <div class="file-group-label">Match Indexes</div>
+      <div class="file-desc">
+        📄 cricket/matches/latest/index.json — live<br>
+        📄 cricket/ended/latest/index.json — ended<br>
+        📄 cricket/prematch/latest/index.json — upcoming<br>
+        📄 cricket/leagues/index.json
+      </div>
+    </div>
+
+    <div class="file-group">
+      <div class="file-group-label">Innings Tracker  cricket/innings_tracker/</div>
+      <div class="file-desc">
+        📄 index.json — ADF Lookup source<br>
+        📁 event_id={eid}/<br>
+        &nbsp;&nbsp;📄 innings_1.json — live accumulator (10s updates)<br>
+        &nbsp;&nbsp;📄 innings_1_from_silver.json — gate file: match ended
+      </div>
+    </div>
+
+    <div class="file-group">
+      <div class="file-group-label">Match Dashboard  cricket/latest/{eid}/</div>
+      <div class="file-desc">
+        📄 match_dashboard.json — full match page data<br>
+        📄 lineage.json — data lineage for this match
+      </div>
+    </div>
+
+    <div class="file-group">
+      <div class="file-group-label">Config</div>
+      <div class="file-desc">
+        📄 cricket/config/blocked_event_ids.json<br>
+        📄 cricket/config/league_preferences.json
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Arrows between layers -->
+<div class="arrow-row" style="margin-top:12px;">
+  <div class="arrow-cell">
+    <div class="arrow-line"></div>
+    <div class="arrow-head"></div>
+    <div class="arrow-label">parse_cricket_bronze_to_silver · every 10s</div>
+  </div>
+  <div class="arrow-cell">
+    <div class="arrow-line"></div>
+    <div class="arrow-head"></div>
+    <div class="arrow-label">build_cricket_gold_match_pages · every 10s</div>
+  </div>
+  <div class="arrow-cell" style="opacity:0;"></div>
+</div>
+
+<hr class="divider">
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2>ADF Pipelines</h2>
+<div class="adf-grid">
+
+  <div class="adf-card">
+    <div class="adf-card-title">nightly_batch_silver</div>
+    <div class="adf-card-sub">Triggered by: trigger_nightly_batch_silver · 03:00 UTC daily · Orchestrator</div>
+
+    <div class="adf-step">
+      <div class="adf-step-num">1</div>
+      <div class="adf-step-content">
+        <strong>Lookup Activity</strong><br>
+        Reads <code>gold/cricket/innings_tracker/index.json</code><br>
+        Gets all event_ids where <code>has_outcome = false</code>
+      </div>
+    </div>
+    <div class="adf-arrow">↓</div>
+    <div class="adf-step">
+      <div class="adf-step-num">2</div>
+      <div class="adf-step-content">
+        <strong>ForEach Activity</strong> (5 parallel)<br>
+        Iterates over each <code>event_id</code> from Lookup result
+      </div>
+    </div>
+    <div class="adf-arrow">↓</div>
+    <div class="adf-step">
+      <div class="adf-step-num">3</div>
+      <div class="adf-step-content">
+        <strong>ExecutePipeline</strong> for each match<br>
+        Calls <code>batch_silver_reprocess</code> with <code>event_id</code> param
+      </div>
+    </div>
+  </div>
+
+  <div class="adf-card">
+    <div class="adf-card-title">batch_silver_reprocess</div>
+    <div class="adf-card-sub">Called by nightly pipeline OR triggered manually for one event · Worker unit</div>
+
+    <div class="adf-step">
+      <div class="adf-step-num">1</div>
+      <div class="adf-step-content">
+        <strong>AzureFunctionActivity</strong><br>
+        <code>POST /api/mgmt/reprocess-silver</code><br>
+        Body: <code>{"event_id": "{event_id}"}</code>
+      </div>
+    </div>
+    <div class="adf-arrow">↓</div>
+    <div class="adf-step">
+      <div class="adf-step-num">2</div>
+      <div class="adf-step-content">
+        <strong>view_admin_rebuild_innings()</strong><br>
+        Reads <code>silver/cricket/event_id={eid}/innings_accumulator/*</code><br>
+        Enriches odds from <code>market_odds.json</code> if active_markets has none<br>
+        Writes <code>gold/.../innings_1_from_silver.json</code>
+      </div>
+    </div>
+    <div class="adf-arrow">↓</div>
+    <div class="adf-step">
+      <div class="adf-step-num">3</div>
+      <div class="adf-step-content">
+        <strong>Output</strong><br>
+        Updated innings tracker in gold — visible at<br>
+        <code>/api/matches/{event_id}/innings-tracker/view</code>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<hr class="divider">
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2>Column-Level Data Lineage</h2>
+
+<table class="lineage-table">
+  <thead>
+    <tr>
+      <th>Gold / Silver Field</th>
+      <th>Source File</th>
+      <th>Origin API Field</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="col-field">match_state.time_status</span></td>
+      <td><span class="tag tag-bronze">bronze</span><span class="col-source">api_event_view.json</span></td>
+      <td><span class="col-api">results[0].time_status</span></td>
+      <td class="col-desc">"1"=live, "3"=ended. Gate for innings_1_from_silver.json write.</td>
+    </tr>
+    <tr>
+      <td><span class="col-field">match_state.score_summary_events</span></td>
+      <td><span class="tag tag-bronze">bronze</span><span class="col-source">api_event_view.json</span></td>
+      <td><span class="col-api">results[0].ss</span></td>
+      <td class="col-desc">Final score string e.g. "165/10-169/3". Shown in ended view.</td>
+    </tr>
+    <tr>
+      <td><span class="col-field">team_scores.runs / wickets</span></td>
+      <td><span class="tag tag-bronze">bronze</span><span class="col-source">api_event_stats_trend.json</span></td>
+      <td><span class="col-api">stats[].score (format: "runs#wickets")</span></td>
+      <td class="col-desc">Parsed by parse_runs_wickets(). Used in innings tracker chart.</td>
+    </tr>
+    <tr>
+      <td><span class="col-field">market_odds.home_odds_decimal</span></td>
+      <td><span class="tag tag-bronze">bronze</span><span class="col-source">api_event_odds.json</span></td>
+      <td><span class="col-api">odds[].home_od  (market_key: "3_1")</span></td>
+      <td class="col-desc">Match Winner 2-Way odds. Fallback source when active_markets has no odds.</td>
+    </tr>
+    <tr>
+      <td><span class="col-field">active_markets.odds_decimal</span></td>
+      <td><span class="tag tag-bronze">bronze</span><span class="col-source">api_live_market_odds.json</span></td>
+      <td><span class="col-api">results[].odds[].od  (market_group_name contains "winner")</span></td>
+      <td class="col-desc">Primary source for winner odds in innings tracker.</td>
+    </tr>
+    <tr>
+      <td><span class="col-field">innings_tracker.home_team_odds</span></td>
+      <td><span class="tag tag-silver">silver</span><span class="col-source">active_markets.json → market_odds.json (fallback)</span></td>
+      <td><span class="col-api">market_group_name contains "winner" OR market_key="3_1"</span></td>
+      <td class="col-desc">Two-source resolution: tries active_markets first, falls back to market_odds.</td>
+    </tr>
+    <tr>
+      <td><span class="col-field">innings_tracker.ball_window</span></td>
+      <td><span class="tag tag-silver">silver</span><span class="col-source">innings_snapshot.json</span></td>
+      <td><span class="col-api">api_event_stats_trend.json last 6 deliveries</span></td>
+      <td class="col-desc">Last 6 balls. Can be None — treated as empty list in view.</td>
+    </tr>
+    <tr>
+      <td><span class="col-field">innings_tracker.over_from_score</span></td>
+      <td><span class="tag tag-bronze">bronze</span><span class="col-source">api_event_odds.json</span></td>
+      <td><span class="col-api">odds[].ss  (format: "143/2" → over derived from pg logic)</span></td>
+      <td class="col-desc">Over number derived from odds score string via parse_over_from_pg().</td>
+    </tr>
+    <tr>
+      <td><span class="col-field">ended_index.fi</span></td>
+      <td><span class="tag tag-bronze">bronze</span><span class="col-source">inplay_snapshot path: fi={fi}</span></td>
+      <td><span class="col-api">Directory name in blob path (no download needed)</span></td>
+      <td class="col-desc">Bet365 FI ID. Extracted from bronze blob path via prefix scan.</td>
+    </tr>
+    <tr>
+      <td><span class="col-field">ended_index.match_name</span></td>
+      <td><span class="tag tag-gold">gold</span><span class="col-source">innings_1_from_silver.json</span></td>
+      <td><span class="col-api">tracker.match_name (set during silver parse)</span></td>
+      <td class="col-desc">Required field — match skipped from ended index if missing.</td>
+    </tr>
+    <tr>
+      <td><span class="col-field">match_dashboard.data_lineage</span></td>
+      <td><span class="tag tag-bronze">bronze</span><span class="col-source">lineage.json (bronze) → lineage.json (silver) → gold</span></td>
+      <td><span class="col-api">API call timestamps, response sizes, bronze paths</span></td>
+      <td class="col-desc">Full chain available at /api/matches/{event_id}/lineage</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr class="divider">
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2>Data Lineage Tools — Cheaper Alternatives to Databricks</h2>
+
+<div class="lineage-grid">
+
+  <div class="lineage-card lineage-recommended">
+    <div class="lineage-badge">⭐ Recommended for your stack</div>
+    <div class="lineage-name">Microsoft Purview</div>
+    <div class="lineage-cost">~$50–100/month for your data volume</div>
+    <div class="lineage-desc">
+      Native Azure integration — auto-discovers ADF pipelines and ADLS Gen2 blobs with zero code changes.<br><br>
+      <span class="lineage-pro">✓</span> ADF pipeline lineage out-of-the-box (dataset → dataset)<br>
+      <span class="lineage-pro">✓</span> ADLS Gen2 schema scanning<br>
+      <span class="lineage-pro">✓</span> Visual lineage graph in Azure Portal<br>
+      <span class="lineage-con">✗</span> No column lineage inside Python functions
+    </div>
+  </div>
+
+  <div class="lineage-card lineage-option">
+    <div class="lineage-badge">Open Source · Self-hosted</div>
+    <div class="lineage-name">DataHub (LinkedIn)</div>
+    <div class="lineage-cost">Free · ~$30–50/month infra on AKS</div>
+    <div class="lineage-desc">
+      Column-level lineage if you instrument your Function App code with OpenLineage SDK.<br><br>
+      <span class="lineage-pro">✓</span> Column-level lineage possible<br>
+      <span class="lineage-pro">✓</span> Rich UI, metadata catalog<br>
+      <span class="lineage-con">✗</span> Requires code instrumentation<br>
+      <span class="lineage-con">✗</span> Self-hosted ops overhead
+    </div>
+  </div>
+
+  <div class="lineage-card lineage-option">
+    <div class="lineage-badge">Open Source · Lightweight</div>
+    <div class="lineage-name">OpenLineage + Marquez</div>
+    <div class="lineage-cost">Free · minimal infra</div>
+    <div class="lineage-desc">
+      Emit lineage events from your Function App. Marquez provides the UI.<br><br>
+      <span class="lineage-pro">✓</span> Free, open standard<br>
+      <span class="lineage-pro">✓</span> Exact column-level lineage<br>
+      <span class="lineage-con">✗</span> Basic UI vs Databricks<br>
+      <span class="lineage-con">✗</span> Manual instrumentation needed
+    </div>
+  </div>
+
+  <div class="lineage-card lineage-option">
+    <div class="lineage-badge">Homegrown · Already exists</div>
+    <div class="lineage-name">Your lineage.json files</div>
+    <div class="lineage-cost">Free · already deployed</div>
+    <div class="lineage-desc">
+      You already write lineage.json at bronze, silver, and gold layers. A lightweight UI on top would give you lineage without any new tool.<br><br>
+      <span class="lineage-pro">✓</span> Zero extra cost<br>
+      <span class="lineage-pro">✓</span> Already captures API call chain<br>
+      <span class="lineage-pro">✓</span> Accessible at /api/matches/{eid}/lineage<br>
+      <span class="lineage-con">✗</span> No cross-match aggregated view yet
+    </div>
+  </div>
+
+</div>
+
+<br><br>
+</body>
+</html>

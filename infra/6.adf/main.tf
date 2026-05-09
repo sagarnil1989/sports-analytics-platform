@@ -87,19 +87,50 @@ resource "azurerm_data_factory_pipeline" "batch_silver_reprocess" {
   }
 
   activities_json = jsonencode([
+    # ── Lineage: START ──────────────────────────────────────────────────────
     {
-      name = "ReprocessSilver"
-      type = "AzureFunctionActivity"
+      name = "LineageStart"
+      type = "WebActivity"
       typeProperties = {
-        functionLinkedService = {
-          referenceName = "ls_function_app"
-          type          = "LinkedServiceReference"
+        url    = local.marquez_lineage_url != "" ? local.marquez_lineage_url : "http://localhost"
+        method = "POST"
+        headers = { "Content-Type" = "application/json" }
+        body = {
+          value = local.ol_start_reprocess
+          type  = "Expression"
         }
+      }
+    },
+    # ── Main work ───────────────────────────────────────────────────────────
+    {
+      name      = "ReprocessSilver"
+      type      = "AzureFunctionActivity"
+      dependsOn = [{ activity = "LineageStart", dependencyConditions = ["Succeeded"] }]
+      linkedServiceName = {
+        referenceName = "ls_function_app"
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
         functionName = "mgmt/reprocess-silver"
         method       = "POST"
         body = {
-          value      = "@json(concat('{\"event_id\":\"', pipeline().parameters.event_id, '\"}'))"
-          type       = "Expression"
+          value = "@json(concat('{\"event_id\":\"', pipeline().parameters.event_id, '\"}'))"
+          type  = "Expression"
+        }
+      }
+    },
+    # ── Lineage: COMPLETE ───────────────────────────────────────────────────
+    {
+      name      = "LineageComplete"
+      type      = "WebActivity"
+      dependsOn = [{ activity = "ReprocessSilver", dependencyConditions = ["Succeeded"] }]
+      typeProperties = {
+        url    = local.marquez_lineage_url != "" ? local.marquez_lineage_url : "http://localhost"
+        method = "POST"
+        headers = { "Content-Type" = "application/json" }
+        body = {
+          value = local.ol_complete_reprocess
+          type  = "Expression"
         }
       }
     }
@@ -127,15 +158,31 @@ resource "azurerm_data_factory_pipeline" "nightly_batch_silver" {
   ]
 
   activities_json = jsonencode([
+    # ── Lineage: START ──────────────────────────────────────────────────────
     {
-      name = "LookupFinishedMatches"
-      type = "Lookup"
+      name = "LineageStart"
+      type = "WebActivity"
+      typeProperties = {
+        url    = local.marquez_lineage_url != "" ? local.marquez_lineage_url : "http://localhost"
+        method = "POST"
+        headers = { "Content-Type" = "application/json" }
+        body = {
+          value = local.ol_start_nightly
+          type  = "Expression"
+        }
+      }
+    },
+    # ── Step 1: Lookup finished matches ─────────────────────────────────────
+    {
+      name      = "LookupFinishedMatches"
+      type      = "Lookup"
+      dependsOn = [{ activity = "LineageStart", dependencyConditions = ["Succeeded"] }]
       typeProperties = {
         source = {
           type       = "JsonSource"
           storeSettings = {
-            type               = "AzureBlobFSReadSettings"
-            recursive          = false
+            type                     = "AzureBlobFSReadSettings"
+            recursive                = false
             enablePartitionDiscovery = false
           }
           formatSettings = {
@@ -149,6 +196,7 @@ resource "azurerm_data_factory_pipeline" "nightly_batch_silver" {
         firstRowOnly = false
       }
     },
+    # ── Step 2: ForEach → reprocess each match ───────────────────────────────
     {
       name      = "ForEachMatch"
       type      = "ForEach"
@@ -179,6 +227,21 @@ resource "azurerm_data_factory_pipeline" "nightly_batch_silver" {
             }
           }
         ]
+      }
+    },
+    # ── Lineage: COMPLETE ───────────────────────────────────────────────────
+    {
+      name      = "LineageComplete"
+      type      = "WebActivity"
+      dependsOn = [{ activity = "ForEachMatch", dependencyConditions = ["Succeeded"] }]
+      typeProperties = {
+        url    = local.marquez_lineage_url != "" ? local.marquez_lineage_url : "http://localhost"
+        method = "POST"
+        headers = { "Content-Type" = "application/json" }
+        body = {
+          value = local.ol_complete_nightly
+          type  = "Expression"
+        }
       }
     }
   ])

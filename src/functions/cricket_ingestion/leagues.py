@@ -7,11 +7,32 @@ _LEAGUE_PREFS_PATH = "cricket/config/league_preferences.json"
 _BLOCKED_EVENTS_PATH = "cricket/config/blocked_event_ids.json"
 
 
-def load_excluded_league_ids() -> set:
-    """Return a set of league_id strings that are excluded from capture."""
+def load_allowed_league_ids() -> set:
+    """Return set of league_id strings explicitly allowed for capture.
+
+    Opt-in model: any league NOT in this set is skipped at bronze capture time.
+    An empty set means no leagues are allowed yet.
+    """
     gold = get_named_container_client("gold")
     prefs = download_json(gold, _LEAGUE_PREFS_PATH) or {}
-    return set(str(lid) for lid in prefs.get("excluded_league_ids", []))
+    return set(str(lid) for lid in prefs.get("allowed_league_ids", []))
+
+
+def load_excluded_league_ids() -> set:
+    """Legacy — kept so ended/prematch index builders can still use it.
+    Returns an empty set (nothing explicitly excluded; opt-in now controls capture).
+    """
+    return set()
+
+
+def save_league_preferences(allowed_ids: set) -> None:
+    gold = get_named_container_client("gold")
+    upload_json(
+        gold,
+        _LEAGUE_PREFS_PATH,
+        {"allowed_league_ids": sorted(allowed_ids), "updated_at_utc": utc_now().isoformat()},
+        overwrite=True,
+    )
 
 
 def load_blocked_event_ids() -> set:
@@ -30,16 +51,6 @@ def block_event_ids(event_ids: set) -> None:
         gold,
         _BLOCKED_EVENTS_PATH,
         {"blocked_event_ids": sorted(merged), "updated_at_utc": utc_now().isoformat()},
-        overwrite=True,
-    )
-
-
-def save_league_preferences(excluded_ids: set) -> None:
-    gold = get_named_container_client("gold")
-    upload_json(
-        gold,
-        _LEAGUE_PREFS_PATH,
-        {"excluded_league_ids": sorted(excluded_ids), "updated_at_utc": utc_now().isoformat()},
         overwrite=True,
     )
 

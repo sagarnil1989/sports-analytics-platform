@@ -28,6 +28,7 @@
   "max_gold_events_per_run": "20",
   "cricwebsite_db_host": "psql-cricwebsite.postgres.database.azure.com",
   "cricwebsite_db_user": "cricdbadmin",
+  "marquez_api_url": "http://marquez-ramanuj.westeurope.azurecontainer.io:5000",
   "tags": {
     "project": "ramanuj",
     "environment": "local",

@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from storage import (
@@ -20,7 +20,7 @@ from storage import (
     upload_json,
     utc_now,
 )
-from leagues import load_excluded_league_ids, load_blocked_event_ids
+from leagues import load_allowed_league_ids, load_blocked_event_ids
 
 
 # ------------------------------------------------------------------
@@ -125,10 +125,10 @@ def bronze_capture_cricket_prematch_odds() -> None:
         logging.info(json.dumps({"event": "bronze_capture_cricket_prematch_odds_skipped", "reason": "no_upcoming_matches"}))
         return
 
-    excluded_leagues = load_excluded_league_ids()
+    allowed_leagues = load_allowed_league_ids()
     upcoming_matches = [
         m for m in control.get("upcoming_matches", [])
-        if m.get("fi") and str(m.get("league_id") or "") not in excluded_leagues
+        if m.get("fi") and str(m.get("league_id") or "") in allowed_leagues
     ]
     if max_per_run > 0:
         upcoming_matches = upcoming_matches[:max_per_run]
@@ -182,126 +182,181 @@ def bronze_capture_cricket_prematch_odds() -> None:
 
 
 def bronze_discover_cricket_ended() -> None:
-    """Capture recently ended cricket matches and maintain a persistent ended index.
+    """Build the ended match index from gold innings_1_from_silver.json files.
 
-    The betsapi ended API only returns the last ~7 days, so we merge its results
-    into the existing index rather than overwriting it.  Matches that have gold
-    innings-tracker data are included regardless of age.
+    A match is considered ended when its innings_1.json tracker has not been
+    updated for more than 1 hour AND it is not present in the live index.
+    When that condition is first met, innings_1_from_silver.json is written
+    automatically (if it doesn't already exist) to mark the match as ended.
+
+    No BetsAPI call is made — all data comes from gold/silver/bronze blobs.
     """
     now = utc_now()
     sport_id = get_env("SPORT_ID", "3")
-    max_ended = get_int_env("MAX_ENDED_MATCHES", 100)
     bronze = get_bronze_container_client()
     gold = get_named_container_client("gold")
 
-    excluded_leagues = load_excluded_league_ids()
+    allowed_leagues = load_allowed_league_ids()
     blocked_events = load_blocked_event_ids()
 
-    # ── 1. Call API and store raw response ────────────────────────────────────
-    api_payload = call_betsapi(path="/v3/events/ended", params={"sport_id": sport_id})
-    raw_path = (
-        f"betsapi/ended/sport_id={sport_id}/"
-        f"year={now.year}/month={now.month:02d}/day={now.day:02d}/hour={now.hour:02d}/"
-        f"events_ended_{ts_compact(now)}.json"
-    )
-    upload_json(bronze, raw_path, api_payload)
+    # ── 1. Get currently-live event IDs ──────────────────────────────────────
+    live_eids: set = set()
+    try:
+        live_idx = download_json(gold, "cricket/matches/latest/index.json") or {}
+        for m in (live_idx.get("matches") or []):
+            eid = str(m.get("event_id") or "")
+            if eid:
+                live_eids.add(eid)
+    except Exception:
+        pass
 
-    # ── 2. Load existing ended index (persistent baseline) ───────────────────
-    existing_idx = download_json(gold, "cricket/ended/latest/index.json") or {}
-    existing: Dict[str, Dict] = {
-        str(m.get("event_id") or ""): m
-        for m in existing_idx.get("matches", [])
-        if m.get("event_id")
-    }
-
-    # ── 3. Build fi lookup from live + existing ended index ──────────────────
-    fi_lookup: Dict[str, str] = {}
-    for index_path in ("cricket/matches/latest/index.json",):
-        idx = download_json(gold, index_path) or {}
-        for row in idx.get("matches", []):
-            eid = str(row.get("event_id") or "")
-            fi_val = row.get("fi")
-            if eid and fi_val:
-                fi_lookup[eid] = str(fi_val)
-    for eid, row in existing.items():
-        if row.get("fi"):
-            fi_lookup[eid] = str(row["fi"])
-
-    # ── 4. Merge new API matches into existing index ──────────────────────────
-    api_matches = summarize_event_items(extract_results(api_payload), max_ended, require_bet365_id=False)
-    new_count = 0
-    for m in api_matches:
-        eid = str(m.get("event_id") or "")
-        if not eid:
-            continue
-        if str(m.get("league_id") or "") in excluded_leagues:
-            continue
-        if eid in blocked_events:
-            continue
-        if not m.get("fi") and eid in fi_lookup:
-            m["fi"] = fi_lookup[eid]
-        if eid not in existing:
-            existing[eid] = m
-            new_count += 1
-        else:
-            # Update ss and time_status from fresh API data
-            if m.get("ss"):
-                existing[eid]["ss"] = m["ss"]
-            existing[eid]["time_status"] = m.get("time_status", existing[eid].get("time_status"))
-            if m.get("fi") and not existing[eid].get("fi"):
-                existing[eid]["fi"] = m["fi"]
-
-    # ── 5. Back-fill from gold innings tracker files ──────────────────────────
+    # ── 2. Find matches that have gone quiet for >1 hour ─────────────────────
+    # Scan innings_1.json blobs; use blob.last_modified without downloading.
+    one_hour_ago = now - timedelta(hours=1)
     tracker_prefix = "cricket/innings_tracker/event_id="
+
+    # Collect existing innings_1_from_silver.json paths to avoid re-writing.
+    existing_silver_eids: set = set()
     for blob in gold.list_blobs(name_starts_with=tracker_prefix):
+        if blob.name.endswith("innings_1_from_silver.json"):
+            parts = blob.name.split("/")
+            eid_part = next((p for p in parts if p.startswith("event_id=")), None)
+            if eid_part:
+                existing_silver_eids.add(eid_part.replace("event_id=", ""))
+
+    newly_written = 0
+    for blob in gold.list_blobs(name_starts_with=tracker_prefix):
+        if not blob.name.endswith("innings_1.json"):
+            continue
         parts = blob.name.split("/")
         eid_part = next((p for p in parts if p.startswith("event_id=")), None)
         if not eid_part:
             continue
         eid = eid_part.replace("event_id=", "")
-        if eid in existing or eid in blocked_events:
+
+        # Skip if still live or already promoted to silver
+        if eid in live_eids:
             continue
+        if eid in existing_silver_eids:
+            continue
+        if eid in blocked_events:
+            continue
+
+        # Only promote if innings_1.json hasn't been touched for >1 hour
+        last_mod = blob.last_modified
+        if last_mod and last_mod > one_hour_ago:
+            continue
+
+        # Download tracker to check league and build the silver file
         tracker = download_json(gold, blob.name)
         if not tracker:
             continue
+
         league_id = str(tracker.get("league_id") or "")
-        if league_id in excluded_leagues:
+        if league_id not in allowed_leagues:
             continue
-        existing[eid] = {
+
+        silver_blob = f"cricket/innings_tracker/event_id={eid}/innings_1_from_silver.json"
+        upload_json(gold, silver_blob, tracker, overwrite=True)
+        existing_silver_eids.add(eid)
+        newly_written += 1
+        logging.info(json.dumps({
+            "event": "ended_auto_promote",
             "event_id": eid,
-            "fi": fi_lookup.get(eid),
+            "innings_1_last_modified": last_mod.isoformat() if last_mod else None,
+        }))
+
+    # ── 3. Collect all event_ids with innings_1_from_silver.json ─────────────
+    silver_eids: Dict[str, str] = {}  # eid -> blob_name
+    for blob in gold.list_blobs(name_starts_with=tracker_prefix):
+        if not blob.name.endswith("innings_1_from_silver.json"):
+            continue
+        parts = blob.name.split("/")
+        eid_part = next((p for p in parts if p.startswith("event_id=")), None)
+        if not eid_part:
+            continue
+        eid = eid_part.replace("event_id=", "")
+        silver_eids[eid] = blob.name
+
+    # ── 4. FI lookup from bronze path scan ───────────────────────────────────
+    fi_lookup: Dict[str, str] = {}
+    for eid in silver_eids:
+        for prefix in (
+            f"betsapi/inplay_snapshot/sport_id={sport_id}/event_id={eid}/",
+            f"betsapi/prematch_snapshot/sport_id={sport_id}/event_id={eid}/",
+        ):
+            for blob in bronze.list_blobs(name_starts_with=prefix):
+                fi_part = next(
+                    (p for p in blob.name.split("/") if p.startswith("fi=")), None
+                )
+                if fi_part:
+                    fi_lookup[eid] = fi_part.replace("fi=", "")
+                    break
+            if eid in fi_lookup:
+                break
+
+    # ── 5. Build ended index ──────────────────────────────────────────────────
+    matches: List[Dict[str, Any]] = []
+    for eid, tracker_blob_name in silver_eids.items():
+        if eid in blocked_events:
+            continue
+        if eid in live_eids:
+            logging.info(json.dumps({"event": "ended_skip_live", "event_id": eid}))
+            continue
+
+        tracker = download_json(gold, tracker_blob_name)
+        if not tracker:
+            continue
+
+        league_id = str(tracker.get("league_id") or "")
+        if league_id not in allowed_leagues:
+            continue
+
+        match_name = tracker.get("match_name") or ""
+        fi = fi_lookup.get(eid)
+        if not match_name:
+            logging.info(json.dumps({"event": "ended_skip_no_match_name", "event_id": eid}))
+            continue
+        if not fi:
+            logging.info(json.dumps({"event": "ended_skip_no_fi", "event_id": eid}))
+            continue
+
+        score = (
+            tracker.get("score_summary_events")
+            or tracker.get("score_summary_bet365")
+            or tracker.get("score_summary")
+            or ""
+        )
+        record: Dict[str, Any] = {
+            "event_id": eid,
+            "fi": fi,
             "league_id": league_id,
             "league_name": tracker.get("league_name"),
             "home_team_name": tracker.get("home_team_name"),
             "away_team_name": tracker.get("away_team_name"),
-            "match_name": tracker.get("match_name"),
+            "match_name": match_name,
+            "score": score,
             "event_time_utc": tracker.get("match_date_utc"),
             "time_status": "3",
         }
+        matches.append(record)
 
-    # ── 6. Remove any blocked/excluded entries that slipped in ────────────────
-    final = [
-        m for m in existing.values()
-        if str(m.get("event_id") or "") not in blocked_events
-        and str(m.get("league_id") or "") not in excluded_leagues
-    ]
-    final.sort(key=lambda m: str(m.get("event_time_utc") or ""), reverse=True)
+    matches.sort(key=lambda m: str(m.get("event_time_utc") or ""), reverse=True)
 
     ended_index = {
         "generated_at_utc": now.isoformat(),
         "sport_id": sport_id,
-        "ended_match_count": len(final),
-        "matches": final,
-        "source_raw_path": f"bronze/{raw_path}",
+        "ended_match_count": len(matches),
+        "matches": matches,
     }
     upload_json(gold, "cricket/ended/latest/index.json", ended_index, overwrite=True)
 
     logging.info(json.dumps({
         "event": "bronze_discover_cricket_ended_completed",
-        "success": api_payload["response"]["success"],
-        "ended_match_count": len(final),
-        "new_from_api": new_count,
-        "raw_path": f"bronze/{raw_path}",
+        "ended_match_count": len(matches),
+        "silver_eid_count": len(silver_eids),
+        "newly_promoted": newly_written,
+        "live_excluded": len(live_eids & set(silver_eids.keys())),
     }))
 
 

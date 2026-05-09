@@ -155,7 +155,7 @@ def extract_innings_snapshot(
         r for r in current_market_rows
         if r.get("market_group_name") and any(
             kw in r["market_group_name"].lower() for kw in winner_keywords
-        ) and r.get("odds_decimal") and not r.get("suspended")
+        ) and r.get("odds_decimal")
     ]
 
     home_odds: Optional[float] = None
@@ -176,6 +176,22 @@ def extract_innings_snapshot(
     bowling_odds = (away_odds if batting_team == home_team else home_odds) if batting_team else away_odds
 
     innings_market_name = innings_rows[0].get("market_group_name") if innings_rows else None
+
+    # Parse ball_window and innings number from PG field in match_snapshot
+    pg_raw = str(match_snapshot.get("ev_stats_pg_raw") or "").strip()
+    s3_raw = str(match_snapshot.get("ev_stats_s3_raw") or "").strip()
+    ball_window: List[str] = []
+    innings_no = 1
+    if "#" in pg_raw:
+        try:
+            ball_part, suffix = pg_raw.rsplit("#", 1)
+            parts = suffix.split(":")
+            if len(parts) >= 3:
+                ball_window = [s.strip() for s in ball_part.split(":") if s.strip()] if ball_part else []
+                innings_no = 2 if s3_raw and s3_raw not in ("", "0") else 1
+        except Exception:
+            pass
+
     return {
         "over": current_over,
         "over_float": current_over,
@@ -191,6 +207,8 @@ def extract_innings_snapshot(
         "over_odds_at_line": over_odds_at_line,
         "under_odds_at_line": under_odds_at_line,
         "innings_market_name": innings_market_name,
+        "ball_window": ball_window,
+        "innings": innings_no,
         "snapshot_id": match_snapshot.get("snapshot_id"),
         "snapshot_time_utc": match_snapshot.get("snapshot_time_utc"),
     }
@@ -233,6 +251,8 @@ def gold_write_innings_tracker_from_silver(
 
     match_name = acc.get("match_name") or header.get("match_name")
     venue = acc.get("venue") or header.get("venue")
+    score_obj = match_page.get("score") or {}
+    score_summary = score_obj.get("summary_from_events") or score_obj.get("summary_from_bet365") or ""
     tracker = {
         "event_id": event_id,
         "match_name": match_name,
@@ -242,6 +262,7 @@ def gold_write_innings_tracker_from_silver(
         "league_name": acc.get("league_name") or header.get("league_name"),
         "home_team_name": acc.get("home_team_name") or (header.get("home_team") or {}).get("name"),
         "away_team_name": acc.get("away_team_name") or (header.get("away_team") or {}).get("name"),
+        "score_summary_events": score_summary,
         "rows": rows,
         "outcome": outcome,
         "actual_total": actual_total,
@@ -250,6 +271,13 @@ def gold_write_innings_tracker_from_silver(
 
     tracker_path = f"cricket/innings_tracker/event_id={event_id}/innings_1.json"
     upload_json(gold_container, tracker_path, tracker, overwrite=True)
+
+    # When the match is confirmed ended, also write the _from_silver snapshot.
+    # This is the gate file used by bronze_discover_cricket_ended() to determine
+    # which matches appear in the ended view.
+    if time_status == "3" and rows:
+        silver_path = f"cricket/innings_tracker/event_id={event_id}/innings_1_from_silver.json"
+        upload_json(gold_container, silver_path, tracker, overwrite=True)
 
     index_path = "cricket/innings_tracker/index.json"
     idx = download_json(gold_container, index_path) or {}
