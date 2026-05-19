@@ -10,13 +10,11 @@ from storage import (
     download_required_json,
     extract_results,
     get_env,
-    get_int_env,
     get_named_container_client,
     safe_float,
     upload_json,
     utc_now,
 )
-from cricwebsite_db import write_to_cricwebsite_db
 from innings_tracker import (
     extract_innings_snapshot,
     parse_over_from_pg,
@@ -28,7 +26,7 @@ from innings_tracker import (
 # Manifest listing
 # ------------------------------------------------------------------
 
-def silver_list_manifest_paths(bronze_container, sport_id: str, limit: int) -> List[str]:
+def silver_list_manifest_paths(bronze_container, sport_id: str) -> List[str]:
     prefix = f"betsapi/inplay_snapshot/sport_id={sport_id}/"
     manifests = []
     for blob in bronze_container.list_blobs(name_starts_with=prefix):
@@ -36,7 +34,7 @@ def silver_list_manifest_paths(bronze_container, sport_id: str, limit: int) -> L
         if name.endswith("/manifest.json"):
             manifests.append((getattr(blob, "last_modified", None), name))
     manifests.sort(key=lambda x: x[0] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
-    return [name for _, name in manifests[:limit]]
+    return [name for _, name in manifests]
 
 
 # ------------------------------------------------------------------
@@ -599,7 +597,6 @@ def silver_write_outputs(silver_container, parsed: Dict[str, Any]) -> None:
         }, overwrite=True)
 
     silver_write_state_file(silver_container, parsed)
-    write_to_cricwebsite_db(match, parsed["team_scores"], current_market_rows)
 
     innings_point = extract_innings_snapshot(match, parsed["team_scores"], current_market_rows)
     if innings_point is not None:
@@ -652,69 +649,136 @@ def silver_write_outputs(silver_container, parsed: Dict[str, Any]) -> None:
 
 def silver_parse_bronze_to_silver() -> None:
     """Timer trigger body: parse unprocessed bronze snapshots into silver."""
+    import time
+    run_start = time.monotonic()
+    budget_seconds = 540  # stop at 9 min, well inside the 10-min function timeout
+
     sport_id = get_env("SPORT_ID", "3")
-    max_per_run = get_int_env("MAX_SILVER_SNAPSHOTS_PER_RUN", 200)
     bronze = get_named_container_client("bronze")
     silver = get_named_container_client("silver")
-    manifest_paths = silver_list_manifest_paths(bronze, sport_id, max_per_run)
-    processed = skipped = failed = 0
 
-    for manifest_path in manifest_paths:
+    # Build a set of already-processed keys from silver markers in one bulk listing.
+    # Key format matches the marker filename: "{snapshot_id}_{event_id}_{fi}"
+    # This replaces per-manifest blob_exists() calls (N network round-trips → 1 listing).
+    processed_keys: set = set()
+    for b in silver.list_blobs(name_starts_with="cricket/control/processed_snapshots/"):
+        fname = b.name.rsplit("/", 1)[-1]
+        if fname.endswith(".json"):
+            processed_keys.add(fname[:-5])  # strip .json
+
+    manifest_paths = silver_list_manifest_paths(bronze, sport_id)
+
+    # Filter to unprocessed only before iterating, so the loop does real work immediately.
+    unprocessed = []
+    for path in manifest_paths:
+        parts = path.split("/")
+        snapshot_id = next((p.replace("snapshot_id=", "") for p in parts if p.startswith("snapshot_id=")), None)
+        event_id_part = next((p.replace("event_id=", "") for p in parts if p.startswith("event_id=")), None)
+        fi_part = next((p.replace("fi=", "") for p in parts if p.startswith("fi=")), None)
+        if snapshot_id and event_id_part and fi_part:
+            key = f"{snapshot_id}_{event_id_part}_{fi_part}"
+            if key not in processed_keys:
+                unprocessed.append(path)
+
+    # Re-sort: live events newest-first (keeps live display current), then non-live
+    # events oldest-first (drains ended-match backlog from the earliest unprocessed snapshot).
+    control_data = download_json(bronze, "betsapi/control/active_inplay_fi/latest.json") or {}
+    live_eids: set = {
+        str(m.get("event_id") or "")
+        for m in (control_data.get("active_matches") or [])
+        if m.get("event_id")
+    }
+
+    def _eid(path: str) -> str:
+        for part in path.split("/"):
+            if part.startswith("event_id="):
+                return part[9:]
+        return ""
+
+    def _sid(path: str) -> str:
+        for part in path.split("/"):
+            if part.startswith("snapshot_id="):
+                return part[12:]
+        return ""
+
+    live_unprocessed = [p for p in unprocessed if _eid(p) in live_eids]
+    non_live_unprocessed = [p for p in unprocessed if _eid(p) not in live_eids]
+    live_unprocessed.sort(key=_sid, reverse=True)      # newest first — live display stays current
+    non_live_unprocessed.sort(key=_sid, reverse=False)  # oldest first — backlog drains from bottom up
+
+    # Split budget: at most 6 min for live events, last 3 min reserved for non-live backlog.
+    # This guarantees ended-match backlog makes progress even when live data is heavy.
+    live_budget = 360
+    processed = failed = stopped_early = 0
+    skipped = len(manifest_paths) - len(unprocessed)
+
+    def _process_one(manifest_path: str) -> None:
+        nonlocal processed, failed
+        manifest = download_required_json(bronze, manifest_path)
+        base_path = manifest_path.removesuffix("/manifest.json")
+        events_inplay_payload = (
+            download_json(bronze, f"{base_path}/api_inplay_event_list.json")
+            or download_json(bronze, f"{base_path}/events_inplay_full.json")
+            or download_required_json(bronze, f"{base_path}/events_inplay.json")
+        )
+        bet365_event_payload = (
+            download_json(bronze, f"{base_path}/api_live_market_odds.json")
+            or download_json(bronze, f"{base_path}/bet365_event_by_fi.json")
+            or download_required_json(bronze, f"{base_path}/bet365_event.json")
+        )
+        bet365_event_stats_payload = download_json(bronze, f"{base_path}/api_live_market_stats.json")
+        event_odds_payload = (
+            download_json(bronze, f"{base_path}/api_event_odds.json")
+            or download_json(bronze, f"{base_path}/event_odds_by_event_id.json")
+            or download_required_json(bronze, f"{base_path}/event_odds.json")
+        )
+        event_view_payload = (
+            download_json(bronze, f"{base_path}/api_event_view.json")
+            or download_json(bronze, f"{base_path}/event_view_by_event_id.json")
+        )
+        event_odds_summary_payload = (
+            download_json(bronze, f"{base_path}/api_event_odds_summary.json")
+            or download_json(bronze, f"{base_path}/event_odds_summary_by_event_id.json")
+        )
+        lineage_payload = download_json(bronze, f"{base_path}/lineage.json")
+        parsed = silver_parse_snapshot(
+            manifest,
+            events_inplay_payload,
+            bet365_event_payload,
+            event_odds_payload,
+            event_view_payload=event_view_payload,
+            event_odds_summary_payload=event_odds_summary_payload,
+            lineage_payload=lineage_payload,
+            bet365_event_stats_payload=bet365_event_stats_payload,
+        )
+        silver_write_outputs(silver, parsed)
+        processed += 1
+
+    for manifest_path in live_unprocessed:
+        if time.monotonic() - run_start > live_budget:
+            break
         try:
-            manifest = download_required_json(bronze, manifest_path)
-            snapshot_id = manifest["snapshot_id"]
-            event_id = str(manifest["event_id"])
-            fi = str(manifest["fi"])
-            marker_path = f"cricket/control/processed_snapshots/{snapshot_id}_{event_id}_{fi}.json"
-            if blob_exists(silver, marker_path):
-                skipped += 1
-                continue
-            base_path = manifest_path.removesuffix("/manifest.json")
-            events_inplay_payload = (
-                download_json(bronze, f"{base_path}/api_inplay_event_list.json")
-                or download_json(bronze, f"{base_path}/events_inplay_full.json")
-                or download_required_json(bronze, f"{base_path}/events_inplay.json")
-            )
-            bet365_event_payload = (
-                download_json(bronze, f"{base_path}/api_live_market_odds.json")
-                or download_json(bronze, f"{base_path}/bet365_event_by_fi.json")
-                or download_required_json(bronze, f"{base_path}/bet365_event.json")
-            )
-            bet365_event_stats_payload = download_json(bronze, f"{base_path}/api_live_market_stats.json")
-            event_odds_payload = (
-                download_json(bronze, f"{base_path}/api_event_odds.json")
-                or download_json(bronze, f"{base_path}/event_odds_by_event_id.json")
-                or download_required_json(bronze, f"{base_path}/event_odds.json")
-            )
-            event_view_payload = (
-                download_json(bronze, f"{base_path}/api_event_view.json")
-                or download_json(bronze, f"{base_path}/event_view_by_event_id.json")
-            )
-            event_odds_summary_payload = (
-                download_json(bronze, f"{base_path}/api_event_odds_summary.json")
-                or download_json(bronze, f"{base_path}/event_odds_summary_by_event_id.json")
-            )
-            lineage_payload = download_json(bronze, f"{base_path}/lineage.json")
-            parsed = silver_parse_snapshot(
-                manifest,
-                events_inplay_payload,
-                bet365_event_payload,
-                event_odds_payload,
-                event_view_payload=event_view_payload,
-                event_odds_summary_payload=event_odds_summary_payload,
-                lineage_payload=lineage_payload,
-                bet365_event_stats_payload=bet365_event_stats_payload,
-            )
-            silver_write_outputs(silver, parsed)
-            processed += 1
+            _process_one(manifest_path)
         except Exception:
             failed += 1
             logging.exception("Failed to parse bronze snapshot to silver")
 
-    logging.info(json.dumps({
+    for manifest_path in non_live_unprocessed:
+        if time.monotonic() - run_start > budget_seconds:
+            stopped_early = 1
+            break
+        try:
+            _process_one(manifest_path)
+        except Exception:
+            failed += 1
+            logging.exception("Failed to parse bronze snapshot to silver")
+
+    logging.warning(json.dumps({
         "event": "silver_parse_bronze_to_silver_completed",
         "processed": processed,
         "skipped": skipped,
         "failed": failed,
         "checked": len(manifest_paths),
+        "stopped_early": stopped_early,
+        "elapsed_seconds": round(time.monotonic() - run_start, 1),
     }))

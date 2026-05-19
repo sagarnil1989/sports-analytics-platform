@@ -71,7 +71,11 @@ def bronze_capture_cricket_inplay_snapshot() -> None:
     9. /v1/bet365/event?lineup=1             -> Bet365 lineup data (FI)
     10. /v1/bet365/event?raw=1               -> Bet365 raw event feed (FI)
     """
+    import time as _time
     from storage import download_json
+    run_start = _time.monotonic()
+    budget_seconds = 480  # exit at 8 min — well inside the 10-min Azure Functions ceiling
+
     sport_id = get_env("SPORT_ID", "3")
     container = get_bronze_container_client()
 
@@ -85,9 +89,14 @@ def bronze_capture_cricket_inplay_snapshot() -> None:
 
     events_inplay_payload = call_betsapi(path="/v3/events/inplay", params={"sport_id": sport_id})
 
+    captured = skipped = 0
     for match in active_matches:
+        if _time.monotonic() - run_start > budget_seconds:
+            logging.warning(json.dumps({"event": "bronze_capture_budget_reached", "captured": captured, "remaining": len(active_matches) - captured - skipped}))
+            break
         if str(match.get("league_id") or "") not in allowed_leagues:
             logging.info(json.dumps({"event": "bronze_inplay_snapshot_skipped_league", "league_id": match.get("league_id"), "league_name": match.get("league_name")}))
+            skipped += 1
             continue
         snapshot_time = utc_now()
         snapshot_id = ts_compact(snapshot_time)
@@ -175,3 +184,4 @@ def bronze_capture_cricket_inplay_snapshot() -> None:
         upload_json(container, f"{base_path}/api_live_market_raw.json", bet365_event_raw_payload)
         upload_json(container, f"{base_path}/lineage.json", lineage)
         upload_json(container, f"{base_path}/manifest.json", manifest)
+        captured += 1

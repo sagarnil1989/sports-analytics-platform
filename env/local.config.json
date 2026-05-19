@@ -15,7 +15,7 @@
   "sql_server_name": "sql-ramanuj",
   "sql_database_name": "sqldb-ramanuj-local",
   "sql_admin_login": "sqladminuser",
-  "sql_admin_password": "CHANGE_ME_StrongPassword_123!",
+  "sql_admin_password": "Shlok_2025",
   "function_app_plan_name": "plan-ramanuj-func",
   "function_app_name": "func-ramanuj",
   "azure_functions_worker_process_terminate_timeout": "1800",

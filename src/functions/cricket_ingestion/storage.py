@@ -153,7 +153,7 @@ def call_betsapi(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     query["token"] = token
     started = utc_now()
     try:
-        response = requests.get(url, params=query, timeout=20)
+        response = requests.get(url, params=query, timeout=8)
         elapsed_ms = int((utc_now() - started).total_seconds() * 1000)
         try:
             body = response.json()

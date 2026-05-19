@@ -17,15 +17,35 @@ from storage import (
 from innings_tracker import gold_write_innings_tracker_from_silver
 
 
-def gold_list_latest_silver_match_snapshots(silver_container, limit: int) -> List[str]:
-    prefix = "cricket/inplay/"
-    snapshots = []
-    for blob in silver_container.list_blobs(name_starts_with=prefix):
-        name = blob.name
-        if name.endswith("/match_state.json"):
-            snapshots.append((getattr(blob, "last_modified", None), name))
-    snapshots.sort(key=lambda x: x[0] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
-    return [name for _, name in snapshots[:limit]]
+def gold_list_latest_silver_match_snapshots(silver_container, live_event_ids: List[str]) -> List[str]:
+    """Return the newest silver match_state.json path for each live event_id.
+
+    Silver paths are partitioned by year/month/day/hour, so we scan only the last
+    4 hour partitions per event_id rather than all historical silver data.
+    With 0 live events returns immediately with no blob listing at all.
+    """
+    now = utc_now()
+    hour_prefixes = []
+    for h in range(4):
+        t = now - timedelta(hours=h)
+        hour_prefixes.append(
+            f"cricket/inplay/year={t.year}/month={t.month:02d}/day={t.day:02d}/hour={t.hour:02d}/"
+        )
+
+    result: List[str] = []
+    for eid in live_event_ids:
+        best: tuple = (None, None)
+        for hour_prefix in hour_prefixes:
+            prefix = f"{hour_prefix}event_id={eid}/"
+            for blob in silver_container.list_blobs(name_starts_with=prefix):
+                if not blob.name.endswith("/match_state.json"):
+                    continue
+                lm = getattr(blob, "last_modified", None)
+                if best[0] is None or (lm and lm > best[0]):
+                    best = (lm, blob.name)
+        if best[1]:
+            result.append(best[1])
+    return result
 
 
 def _base_path_from_match_snapshot_path(match_snapshot_path: str) -> str:
@@ -245,19 +265,22 @@ def gold_write_league_indexes(gold_container, matches: List[Dict[str, Any]]) -> 
 
 def gold_build_match_pages() -> None:
     """Timer trigger body: build gold match pages from newest silver snapshots."""
-    max_events = get_int_env("MAX_GOLD_EVENTS_PER_RUN", 100)
+    bronze = get_named_container_client("bronze")
     silver = get_named_container_client("silver")
     gold = get_named_container_client("gold")
 
-    all_paths = gold_list_latest_silver_match_snapshots(silver, max_events * 20)
-    seen_events: Dict[str, str] = {}
-    for path in all_paths:
-        m = re.search(r"/event_id=([^/]+)/", path)
-        if m:
-            eid = m.group(1)
-            if eid not in seen_events:
-                seen_events[eid] = path
-    match_snapshot_paths = list(seen_events.values())[:max_events]
+    # Read the live event list from bronze control file (written every 5s by discover_cricket_inplay).
+    # This is a single small blob read — avoids scanning all historical silver data.
+    control = download_json(bronze, "betsapi/control/active_inplay_fi/latest.json") or {}
+    active_matches = control.get("active_matches") or []
+    live_event_ids = [str(m.get("event_id") or m.get("id") or "") for m in active_matches]
+    live_event_ids = [e for e in live_event_ids if e]
+
+    if not live_event_ids:
+        logging.info(json.dumps({"event": "gold_build_match_pages_skipped", "reason": "no_live_events"}))
+        return
+
+    match_snapshot_paths = gold_list_latest_silver_match_snapshots(silver, live_event_ids)
 
     built_pages = []
     processed = failed = 0

@@ -38,6 +38,7 @@ from views import (
     view_match_live_markets,
     view_match_markets_raw,
     view_admin_rebuild_innings,
+    auto_rebuild_ended_innings,
     view_admin_reprocess_silver,
     view_admin_leagues,
     view_admin_league_toggle,
@@ -76,11 +77,16 @@ def discover_cricket_ended(timer: func.TimerRequest) -> None:
     bronze_discover_cricket_ended()
 
 
+@app.timer_trigger(schedule="0 */10 * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
+def auto_rebuild_ended_innings_tracker(timer: func.TimerRequest) -> None:
+    auto_rebuild_ended_innings()
+
+
 # ---------------------------------------------------------------------------
 # Timer triggers — Silver
 # ---------------------------------------------------------------------------
 
-@app.timer_trigger(schedule="*/10 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
+@app.timer_trigger(schedule="0 0 */1 * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
 def parse_cricket_bronze_to_silver(timer: func.TimerRequest) -> None:
     silver_parse_bronze_to_silver()
 
@@ -262,6 +268,7 @@ def run_prematch_now(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="mgmt/innings/{event_id}/rebuild", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def admin_rebuild_innings_accumulator(req: func.HttpRequest) -> func.HttpResponse:
     return view_admin_rebuild_innings(req)
+
 
 
 @app.route(route="mgmt/reprocess-silver", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)

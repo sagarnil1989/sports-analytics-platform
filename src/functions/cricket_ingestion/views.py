@@ -1264,6 +1264,14 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
         inn1_last_over = _last_over(inn1_rows)
         inn2_last_over = _last_over(inn2_rows)
 
+        # Detect whether away team batted first
+        inn1_bat_team = None
+        for r in rows_data:
+            if r.get("innings") == 1 and r.get("batting_team"):
+                inn1_bat_team = str(r["batting_team"]).strip()
+                break
+        away_batted_first = bool(inn1_bat_team and away_team and inn1_bat_team == away_team.strip())
+
         scoreboard_html = ""
         if final_ss and "," in final_ss:
             sc_parts = [p.strip() for p in final_ss.split(",", 1)]
@@ -1275,15 +1283,33 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
             home_runs, home_wkts, home_raw = _parse_score(sc_parts[0])
             away_runs, away_wkts, away_raw = _parse_score(sc_parts[1])
 
-            # Determine result
-            result_text = ""
-            if home_runs is not None and away_runs is not None:
-                if away_runs > home_runs:
-                    result_text = f"{escape(away_team)} won by {10 - away_wkts} wicket{'s' if (10 - away_wkts) != 1 else ''}"
-                elif home_runs > away_runs:
-                    result_text = f"{escape(home_team)} won by {home_runs - away_runs} run{'s' if (home_runs - away_runs) != 1 else ''}"
+            # Assign 1st/2nd innings display based on batting order
+            if away_batted_first:
+                inn1_team, inn1_raw, inn1_wkts, inn1_ov = away_team, away_raw, away_wkts, inn1_last_over
+                inn2_team, inn2_raw, inn2_wkts, inn2_ov = home_team, home_raw, home_wkts, inn2_last_over
+                # Away defended; home chased
+                if home_runs is not None and away_runs is not None:
+                    if home_runs > away_runs:
+                        result_text = f"{escape(home_team)} won by {10 - home_wkts} wicket{'s' if (10 - home_wkts) != 1 else ''}"
+                    elif away_runs > home_runs:
+                        result_text = f"{escape(away_team)} won by {away_runs - home_runs} run{'s' if (away_runs - home_runs) != 1 else ''}"
+                    else:
+                        result_text = "Match tied"
                 else:
-                    result_text = "Match tied"
+                    result_text = ""
+            else:
+                inn1_team, inn1_raw, inn1_wkts, inn1_ov = home_team, home_raw, home_wkts, inn1_last_over
+                inn2_team, inn2_raw, inn2_wkts, inn2_ov = away_team, away_raw, away_wkts, inn2_last_over
+                # Home defended; away chased
+                if home_runs is not None and away_runs is not None:
+                    if away_runs > home_runs:
+                        result_text = f"{escape(away_team)} won by {10 - away_wkts} wicket{'s' if (10 - away_wkts) != 1 else ''}"
+                    elif home_runs > away_runs:
+                        result_text = f"{escape(home_team)} won by {home_runs - away_runs} run{'s' if (home_runs - away_runs) != 1 else ''}"
+                    else:
+                        result_text = "Match tied"
+                else:
+                    result_text = ""
 
             def _ov_str(ov, wkts):
                 if wkts == 10:
@@ -1298,14 +1324,14 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
             <div class="scoreboard">
                 <div class="sb-innings">
                     <div class="sb-team-score">
-                        <span class="sb-teamname">{escape(home_team)}</span>
-                        <span class="sb-runs">{escape(home_raw)}</span>
-                        <span class="sb-overs">{_ov_str(inn1_last_over, home_wkts)}</span>
+                        <span class="sb-teamname">{escape(inn1_team)}</span>
+                        <span class="sb-runs">{escape(inn1_raw)}</span>
+                        <span class="sb-overs">{_ov_str(inn1_ov, inn1_wkts)}</span>
                     </div>
                     <div class="sb-team-score">
-                        <span class="sb-teamname">{escape(away_team)}</span>
-                        <span class="sb-runs">{escape(away_raw)}</span>
-                        <span class="sb-overs">{_ov_str(inn2_last_over, away_wkts)}</span>
+                        <span class="sb-teamname">{escape(inn2_team)}</span>
+                        <span class="sb-runs">{escape(inn2_raw)}</span>
+                        <span class="sb-overs">{_ov_str(inn2_ov, inn2_wkts)}</span>
                     </div>
                 </div>
                 {f'<div class="sb-result">{result_text}</div>' if result_text else ""}
@@ -2152,205 +2178,328 @@ def view_match_markets_raw(req: func.HttpRequest) -> func.HttpResponse:
 # Admin routes
 # ------------------------------------------------------------------
 
+def _rebuild_innings_core(event_id: str) -> Dict[str, Any]:
+    """Rebuild innings_1.json and innings_1_from_silver.json for one event.
+
+    Returns a result dict with keys: silver_snapshots_scanned, raw_points_extracted,
+    rows_written, errors, message. Raises on fatal errors.
+    """
+    import re as _re
+    from datetime import datetime as _dt
+
+    silver = get_named_container_client("silver")
+    gold   = get_named_container_client("gold")
+    bronze = get_named_container_client("bronze")
+
+    # Reconstruct silver snapshot paths from bronze manifest listing.
+    bronze_prefix = f"betsapi/inplay_snapshot/sport_id=3/event_id={event_id}/"
+    seen_sids: set = set()
+    snapshot_paths: List[str] = []
+    for blob in bronze.list_blobs(name_starts_with=bronze_prefix):
+        if not blob.name.endswith("/manifest.json"):
+            continue
+        m = _re.search(r"/snapshot_id=([^/]+)/manifest\.json$", blob.name)
+        if not m:
+            continue
+        sid = m.group(1)
+        if sid in seen_sids:
+            continue
+        seen_sids.add(sid)
+        try:
+            ts = _dt.strptime(sid[:15], "%Y%m%dT%H%M%S")
+            base = (
+                f"cricket/inplay/year={ts.year}/month={ts.month:02d}"
+                f"/day={ts.day:02d}/hour={ts.hour:02d}"
+                f"/event_id={event_id}/snapshot_id={sid}"
+            )
+            snapshot_paths.append(f"{base}/match_state.json")
+        except Exception:
+            continue
+
+    if not snapshot_paths:
+        return {"event_id": event_id, "message": "no silver snapshots found", "rows_written": 0,
+                "silver_snapshots_scanned": 0, "raw_points_extracted": 0, "errors": 0}
+
+    snapshot_paths.sort()
+
+    gold_tracker_path = f"cricket/innings_tracker/event_id={event_id}/innings_1.json"
+    existing_gold = download_json(gold, gold_tracker_path) or {}
+
+    # Scan last 50 silver snapshots for final score + venue.
+    silver_score = None
+    stadium_data = None
+    for ms_path in reversed(snapshot_paths[-50:]):
+        ms = download_json(silver, ms_path)
+        if ms:
+            if not silver_score and ms.get("score_summary_events"):
+                silver_score = ms["score_summary_events"]
+            if not stadium_data and ms.get("stadium_data"):
+                stadium_data = ms["stadium_data"]
+        if silver_score and stadium_data:
+            break
+    if not stadium_data:
+        stadium_data = existing_gold.get("stadium_data") or None
+
+    def _norm_score(s):
+        return s.replace("-", ",") if s else s
+    silver_score = _norm_score(silver_score)
+    gold_score   = _norm_score(existing_gold.get("score_summary_events") or None)
+
+    def _2nd_runs(ss):
+        if not ss:
+            return -1
+        parts = ss.split(",", 1)
+        if len(parts) == 2:
+            m = _re.match(r'(\d+)', parts[1].strip())
+            return int(m.group(1)) if m else 0
+        return 0
+
+    final_score = silver_score or gold_score if _2nd_runs(silver_score) >= _2nd_runs(gold_score) else gold_score
+
+    raw_points: List[Dict[str, Any]] = []
+    errors = 0
+    for ms_path in snapshot_paths:
+        base = ms_path.removesuffix("/match_state.json")
+        try:
+            point = download_json(silver, f"{base}/innings_snapshot.json")
+            if point is not None:
+                if not point.get("ball_window"):
+                    ms2 = download_json(silver, ms_path)
+                    if ms2:
+                        pg_raw = str(ms2.get("ev_stats_pg_raw") or "").strip()
+                        s3_raw = str(ms2.get("ev_stats_s3_raw") or "").strip()
+                        if "#" in pg_raw:
+                            try:
+                                ball_part, suffix = pg_raw.rsplit("#", 1)
+                                parts2 = suffix.split(":")
+                                if len(parts2) >= 3:
+                                    point["ball_window"] = [s.strip() for s in ball_part.split(":") if s.strip()]
+                                    point["innings"] = 2 if s3_raw and s3_raw not in ("", "0") else 1
+                            except Exception:
+                                pass
+                if point.get("home_team_odds") is None or point.get("away_team_odds") is None:
+                    mkt_odds_doc = download_json(silver, f"{base}/market_odds.json") or {}
+                    for mr in mkt_odds_doc.get("rows", []):
+                        if mr.get("market_key") == "3_1":
+                            h = mr.get("home_odds_decimal")
+                            a = mr.get("away_odds_decimal")
+                            if h and a:
+                                point["home_team_odds"] = h
+                                point["away_team_odds"] = a
+                                break
+            if point is None:
+                match_state = download_json(silver, ms_path)
+                if not match_state:
+                    continue
+                team_scores_doc = download_json(silver, f"{base}/team_scores.json") or {}
+                active_markets_doc = download_json(silver, f"{base}/active_markets.json") or {}
+                point = extract_innings_snapshot(match_state, team_scores_doc.get("rows", []), active_markets_doc.get("rows", []))
+                if point is not None and (point.get("home_team_odds") is None or point.get("away_team_odds") is None):
+                    mkt_odds_doc = download_json(silver, f"{base}/market_odds.json") or {}
+                    for mr in mkt_odds_doc.get("rows", []):
+                        if mr.get("market_key") == "3_1":
+                            h = mr.get("home_odds_decimal")
+                            a = mr.get("away_odds_decimal")
+                            if h and a:
+                                point["home_team_odds"] = h
+                                point["away_team_odds"] = a
+                                break
+            if point is not None:
+                raw_points.append(point)
+        except Exception:
+            errors += 1
+
+    raw_points.sort(key=lambda p: str(p.get("snapshot_time_utc") or ""))
+    seen: Dict[tuple, Dict[str, Any]] = {}
+    for p in raw_points:
+        key = (p.get("innings", 1), p.get("over"), p.get("score"))
+        seen[key] = p
+    deduped = sorted(seen.values(), key=lambda p: str(p.get("snapshot_time_utc") or ""))
+
+    acc_path = f"cricket/inplay/control/event_id={event_id}/innings_accumulator.json"
+    old_acc = download_json(silver, acc_path) or {}
+    new_acc = {**old_acc, "event_id": event_id, "rows": deduped, "last_updated_utc": utc_now().isoformat(), "rebuilt_from_snapshot_count": len(snapshot_paths)}
+    if deduped and not new_acc.get("home_team_name"):
+        p0 = deduped[0]
+        new_acc["home_team_name"] = new_acc.get("home_team_name") or p0.get("batting_team")
+        new_acc["away_team_name"] = new_acc.get("away_team_name") or p0.get("bowling_team")
+    upload_json(silver, acc_path, new_acc, overwrite=True)
+
+    outcome = None
+    actual_total = None
+    import re as _re2
+    m_score = _re2.match(r'^(\d+)', str(final_score or ""))
+    if m_score:
+        actual_total = int(m_score.group(1))
+        last_pred = next(
+            (r["predicted_total"] for r in reversed(deduped)
+             if r.get("innings", 1) == 1 and r.get("predicted_total") is not None),
+            None
+        )
+        if last_pred is not None:
+            outcome = "over" if actual_total > last_pred else ("under" if actual_total < last_pred else "push")
+
+    tracker = {**existing_gold, "rows": deduped, "last_updated_utc": utc_now().isoformat()}
+    if final_score:
+        tracker["score_summary_events"] = final_score
+    if outcome is not None:
+        tracker["outcome"] = outcome
+    if actual_total is not None:
+        tracker["actual_total"] = actual_total
+    if stadium_data:
+        tracker["stadium_data"] = stadium_data
+    upload_json(gold, gold_tracker_path, tracker, overwrite=True)
+
+    if deduped:
+        silver_tracker_path = f"cricket/innings_tracker/event_id={event_id}/innings_1_from_silver.json"
+        upload_json(gold, silver_tracker_path, tracker, overwrite=True)
+
+    return {
+        "event_id": event_id,
+        "silver_snapshots_scanned": len(snapshot_paths),
+        "raw_points_extracted": len(raw_points),
+        "rows_written": len(deduped),
+        "errors": errors,
+        "message": "accumulator rebuilt — reload the innings tracker page",
+    }
+
+
+def auto_rebuild_ended_innings() -> None:
+    """Timer trigger body: detect matches that ended and auto-rebuild their innings tracker.
+
+    A match is a candidate when:
+      1. gold/innings_tracker/event_id={eid}/innings_1.json exists (or silver accumulator)
+      2. innings_1.json has not been modified for > 1 hour (match is quiet)
+      3. The match is NOT in the live index
+      4. innings_1_from_silver.json does not exist, OR the silver accumulator has been
+         updated after the file was last written (stale rebuild needed)
+      5. The match's league_id is in the allowed leagues list
+
+    Processes up to 2 matches per run to stay within the 10-minute function timeout.
+    """
+    from datetime import timedelta
+    from leagues import load_allowed_league_ids
+
+    now = utc_now()
+    one_hour_ago = now - timedelta(hours=1)
+    gold = get_named_container_client("gold")
+    allowed_leagues = load_allowed_league_ids()
+
+    # Live event IDs to exclude
+    live_eids: set = set()
+    try:
+        live_idx = download_json(gold, "cricket/matches/latest/index.json") or {}
+        for m in (live_idx.get("matches") or []):
+            eid = str(m.get("event_id") or "")
+            if eid:
+                live_eids.add(eid)
+    except Exception:
+        pass
+
+    # Map event_id → last_modified of innings_1_from_silver.json (None if not yet built)
+    silver_file_written_at: Dict[str, Any] = {}
+    tracker_prefix = "cricket/innings_tracker/event_id="
+    for blob in gold.list_blobs(name_starts_with=tracker_prefix):
+        if blob.name.endswith("innings_1_from_silver.json"):
+            parts = blob.name.split("/")
+            ep = next((p for p in parts if p.startswith("event_id=")), None)
+            if ep:
+                silver_file_written_at[ep.replace("event_id=", "")] = blob.last_modified
+
+    # Find candidates from two sources:
+    # Source A — innings_1.json quiet for > 1 hour (match was captured live in gold)
+    # Source B — silver accumulator exists but no innings_1.json (gold missed the match)
+    # Both sources also include events where the accumulator was updated AFTER
+    # innings_1_from_silver.json was last written (stale rebuild).
+    candidates: List[str] = []
+    seen: set = set()
+
+    silver = get_named_container_client("silver")
+    acc_prefix = "cricket/inplay/control/event_id="
+    acc_last_mod: Dict[str, Any] = {}
+    for blob in silver.list_blobs(name_starts_with=acc_prefix):
+        if not blob.name.endswith("innings_accumulator.json"):
+            continue
+        parts = blob.name.split("/")
+        ep = next((p for p in parts if p.startswith("event_id=")), None)
+        if ep:
+            acc_last_mod[ep.replace("event_id=", "")] = blob.last_modified
+
+    for blob in gold.list_blobs(name_starts_with=tracker_prefix):
+        if not blob.name.endswith("innings_1.json"):
+            continue
+        parts = blob.name.split("/")
+        ep = next((p for p in parts if p.startswith("event_id=")), None)
+        if not ep:
+            continue
+        eid = ep.replace("event_id=", "")
+        if eid in live_eids or eid in seen:
+            continue
+        last_mod = blob.last_modified
+        if last_mod and last_mod > one_hour_ago:
+            continue
+        # Skip if innings_1_from_silver.json exists AND the accumulator hasn't grown since
+        silver_ts = silver_file_written_at.get(eid)
+        if silver_ts is not None:
+            acc_ts = acc_last_mod.get(eid)
+            if acc_ts is None or acc_ts <= silver_ts:
+                continue  # accumulator not updated since last rebuild — nothing new to do
+        candidates.append(eid)
+        seen.add(eid)
+
+    # Source B: silver accumulators with no innings_1.json (or accumulator newer than existing file)
+    for eid, acc_ts in acc_last_mod.items():
+        if eid in live_eids or eid in seen:
+            continue
+        if acc_ts and acc_ts > one_hour_ago:
+            continue
+        silver_ts = silver_file_written_at.get(eid)
+        if silver_ts is not None and acc_ts is not None and acc_ts <= silver_ts:
+            continue  # file is up to date
+        candidates.append(eid)
+        seen.add(eid)
+
+    if not candidates:
+        logging.info(json.dumps({"event": "auto_rebuild_ended_innings_no_candidates"}))
+        return
+
+    # Filter by allowed league and rebuild up to 2 per run
+    rebuilt = 0
+    for eid in candidates:
+        if rebuilt >= 2:
+            break
+        # Try gold innings_1.json first, fall back to silver accumulator for league_id
+        tracker = (
+            download_json(gold, f"cricket/innings_tracker/event_id={eid}/innings_1.json")
+            or download_json(silver, f"cricket/inplay/control/event_id={eid}/innings_accumulator.json")
+        )
+        if not tracker:
+            continue
+        league_id = str(tracker.get("league_id") or "")
+        if league_id not in allowed_leagues:
+            logging.info(json.dumps({"event": "auto_rebuild_skip_league", "event_id": eid, "league_id": league_id}))
+            continue
+        try:
+            result = _rebuild_innings_core(eid)
+            logging.warning(json.dumps({"event": "auto_rebuild_ended_innings_done", **result}))
+            rebuilt += 1
+        except Exception:
+            logging.exception(json.dumps({"event": "auto_rebuild_ended_innings_failed", "event_id": eid}))
+
+    logging.warning(json.dumps({
+        "event": "auto_rebuild_ended_innings_completed",
+        "candidates_found": len(candidates),
+        "rebuilt_this_run": rebuilt,
+    }))
+
+
 def view_admin_rebuild_innings(req: func.HttpRequest) -> func.HttpResponse:
     event_id = req.route_params.get("event_id", "").strip()
     if not event_id:
         return func.HttpResponse("event_id required", status_code=400)
-
     try:
-        silver = get_named_container_client("silver")
-        gold = get_named_container_client("gold")
-
-        import re as _re
-        from datetime import datetime as _dt
-
-        # List bronze manifests for this event (event-scoped prefix = ~855 blobs)
-        # instead of scanning all 55k+ silver inplay blobs.
-        # Parse snapshot_id from each bronze path, reconstruct the silver path.
-        bronze = get_named_container_client("bronze")
-        bronze_prefix = f"betsapi/inplay_snapshot/sport_id=3/event_id={event_id}/"
-        seen_sids: set = set()
-        snapshot_paths: List[str] = []
-        for blob in bronze.list_blobs(name_starts_with=bronze_prefix):
-            if not blob.name.endswith("/manifest.json"):
-                continue
-            m = _re.search(r"/snapshot_id=([^/]+)/manifest\.json$", blob.name)
-            if not m:
-                continue
-            sid = m.group(1)
-            if sid in seen_sids:
-                continue
-            seen_sids.add(sid)
-            try:
-                ts = _dt.strptime(sid[:15], "%Y%m%dT%H%M%S")
-                base = (
-                    f"cricket/inplay/year={ts.year}/month={ts.month:02d}"
-                    f"/day={ts.day:02d}/hour={ts.hour:02d}"
-                    f"/event_id={event_id}/snapshot_id={sid}"
-                )
-                snapshot_paths.append(f"{base}/match_state.json")
-            except Exception:
-                continue
-
-        if not snapshot_paths:
-            return func.HttpResponse(
-                json.dumps({"event_id": event_id, "message": "no silver snapshots found", "rows_written": 0}),
-                mimetype="application/json", status_code=200,
-            )
-
-        snapshot_paths.sort()
-
-        # Load existing gold tracker upfront — used for score/outcome fallback
-        gold_tracker_path = f"cricket/innings_tracker/event_id={event_id}/innings_1.json"
-        existing_gold = download_json(gold, gold_tracker_path) or {}
-
-        # Scan last 50 silver snapshots for final score + venue.
-        silver_score = None
-        stadium_data = None
-        for ms_path in reversed(snapshot_paths[-50:]):
-            ms = download_json(silver, ms_path)
-            if ms:
-                if not silver_score and ms.get("score_summary_events"):
-                    silver_score = ms["score_summary_events"]
-                if not stadium_data and ms.get("stadium_data"):
-                    stadium_data = ms["stadium_data"]
-            if silver_score and stadium_data:
-                break
-        if not stadium_data:
-            stadium_data = existing_gold.get("stadium_data") or None
-
-        # Normalise both scores to comma separator before comparing.
-        def _norm_score(s):
-            return s.replace("-", ",") if s else s
-        silver_score = _norm_score(silver_score)
-        gold_score   = _norm_score(existing_gold.get("score_summary_events") or None)
-
-        # Prefer whichever score has a higher 2nd-innings run count — that is the
-        # more complete reading. Silver may stop at an intermediate snapshot;
-        # existing_gold may carry a stale partial score from a previous run.
-        def _2nd_runs(ss):
-            if not ss:
-                return -1
-            parts = ss.split(",", 1)
-            if len(parts) == 2:
-                m = _re.match(r'(\d+)', parts[1].strip())
-                return int(m.group(1)) if m else 0
-            return 0
-
-        if _2nd_runs(silver_score) >= _2nd_runs(gold_score):
-            final_score = silver_score or gold_score
-        else:
-            final_score = gold_score
-
-        raw_points: List[Dict[str, Any]] = []
-        errors = 0
-        for ms_path in snapshot_paths:
-            base = ms_path.removesuffix("/match_state.json")
-            try:
-                # Fast path: innings_snapshot.json is pre-computed and includes ball_window + innings
-                point = download_json(silver, f"{base}/innings_snapshot.json")
-                if point is not None:
-                    # Backfill ball_window if the snapshot was written before ball_window support
-                    if not point.get("ball_window"):
-                        ms2 = download_json(silver, ms_path)
-                        if ms2:
-                            pg_raw = str(ms2.get("ev_stats_pg_raw") or "").strip()
-                            s3_raw = str(ms2.get("ev_stats_s3_raw") or "").strip()
-                            if "#" in pg_raw:
-                                try:
-                                    ball_part, suffix = pg_raw.rsplit("#", 1)
-                                    parts2 = suffix.split(":")
-                                    if len(parts2) >= 3:
-                                        point["ball_window"] = [s.strip() for s in ball_part.split(":") if s.strip()]
-                                        point["innings"] = 2 if s3_raw and s3_raw not in ("", "0") else 1
-                                except Exception:
-                                    pass
-                    # Backfill win odds if missing — read market_odds.json (same as slow path)
-                    if point.get("home_team_odds") is None or point.get("away_team_odds") is None:
-                        mkt_odds_doc = download_json(silver, f"{base}/market_odds.json") or {}
-                        for mr in mkt_odds_doc.get("rows", []):
-                            if mr.get("market_key") == "3_1":
-                                h = mr.get("home_odds_decimal")
-                                a = mr.get("away_odds_decimal")
-                                if h and a:
-                                    point["home_team_odds"] = h
-                                    point["away_team_odds"] = a
-                                    break
-                if point is None:
-                    # Slow path: recompute from raw silver files
-                    match_state = download_json(silver, ms_path)
-                    if not match_state:
-                        continue
-                    team_scores_doc = download_json(silver, f"{base}/team_scores.json") or {}
-                    active_markets_doc = download_json(silver, f"{base}/active_markets.json") or {}
-                    point = extract_innings_snapshot(match_state, team_scores_doc.get("rows", []), active_markets_doc.get("rows", []))
-                    if point is not None and (point.get("home_team_odds") is None or point.get("away_team_odds") is None):
-                        mkt_odds_doc = download_json(silver, f"{base}/market_odds.json") or {}
-                        for mr in mkt_odds_doc.get("rows", []):
-                            if mr.get("market_key") == "3_1":
-                                h = mr.get("home_odds_decimal")
-                                a = mr.get("away_odds_decimal")
-                                if h and a:
-                                    point["home_team_odds"] = h
-                                    point["away_team_odds"] = a
-                                    break
-                if point is not None:
-                    raw_points.append(point)
-            except Exception:
-                errors += 1
-
-        raw_points.sort(key=lambda p: str(p.get("snapshot_time_utc") or ""))
-        seen: Dict[tuple, Dict[str, Any]] = {}
-        for p in raw_points:
-            key = (p.get("innings", 1), p.get("over"), p.get("score"))
-            seen[key] = p
-        deduped = sorted(seen.values(), key=lambda p: str(p.get("snapshot_time_utc") or ""))
-
-        acc_path = f"cricket/inplay/control/event_id={event_id}/innings_accumulator.json"
-        old_acc = download_json(silver, acc_path) or {}
-        new_acc = {**old_acc, "event_id": event_id, "rows": deduped, "last_updated_utc": utc_now().isoformat(), "rebuilt_from_snapshot_count": len(snapshot_paths)}
-        if deduped and not new_acc.get("home_team_name"):
-            p0 = deduped[0]
-            new_acc["home_team_name"] = new_acc.get("home_team_name") or p0.get("batting_team")
-            new_acc["away_team_name"] = new_acc.get("away_team_name") or p0.get("bowling_team")
-        upload_json(silver, acc_path, new_acc, overwrite=True)
-
-        # Compute outcome from actual 1st innings total vs last predicted total
-        outcome = None
-        actual_total = None
-        m_score = _re.match(r'^(\d+)', str(final_score or ""))
-        if m_score:
-            actual_total = int(m_score.group(1))
-            last_pred = next(
-                (r["predicted_total"] for r in reversed(deduped)
-                 if r.get("innings", 1) == 1 and r.get("predicted_total") is not None),
-                None
-            )
-            if last_pred is not None:
-                outcome = "over" if actual_total > last_pred else ("under" if actual_total < last_pred else "push")
-
-        tracker = {**existing_gold, "rows": deduped, "last_updated_utc": utc_now().isoformat()}
-        if final_score:
-            tracker["score_summary_events"] = final_score
-        if outcome is not None:
-            tracker["outcome"] = outcome
-        if actual_total is not None:
-            tracker["actual_total"] = actual_total
-        if stadium_data:
-            tracker["stadium_data"] = stadium_data
-        upload_json(gold, gold_tracker_path, tracker, overwrite=True)
-
-        # Always write innings_1_from_silver.json — the view reads from this file.
-        # The old conditional (time_status == "3") failed for large matches where
-        # silver hadn't parsed the last bronze snapshot, leaving stale data in the view.
-        if deduped:
-            silver_tracker_path = f"cricket/innings_tracker/event_id={event_id}/innings_1_from_silver.json"
-            upload_json(gold, silver_tracker_path, tracker, overwrite=True)
-
-        return func.HttpResponse(
-            json.dumps({"event_id": event_id, "silver_snapshots_scanned": len(snapshot_paths), "raw_points_extracted": len(raw_points), "rows_written": len(deduped), "errors": errors, "message": "accumulator rebuilt — reload the innings tracker page"}, indent=2),
-            mimetype="application/json", status_code=200,
-        )
+        result = _rebuild_innings_core(event_id)
+        return func.HttpResponse(json.dumps(result, indent=2), mimetype="application/json", status_code=200)
     except Exception as ex:
         logging.exception("admin_rebuild_innings_accumulator failed")
         return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
@@ -2523,7 +2672,6 @@ def view_home(req: func.HttpRequest) -> func.HttpResponse:
         <div class="card"><a href="/api/ended/view">Ended Matches</a><p>Recently finished matches with final results</p></div>
         <div class="card"><a href="/api/innings-tracker">Innings Tracker Analytics</a><p>Over/Under prediction accuracy by over stage, team, venue and odds</p></div>
         <div class="card"><a href="/api/mgmt/leagues/view">League Filter</a><p>Select which leagues to capture — excluded leagues skip bronze, silver and gold entirely</p></div>
-        <div class="card"><a href="http://marquez-ramanuj.westeurope.azurecontainer.io:3000" target="_blank">Data Lineage (Marquez)</a><p>Visual bronze → silver → gold lineage graph</p></div>
     </body>
     </html>
     """
