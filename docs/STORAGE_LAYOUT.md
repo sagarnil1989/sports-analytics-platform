@@ -21,9 +21,16 @@ betsapi/inplay_snapshot/sport_id={sport_id}/event_id={event_id}/fi={fi}/snapshot
 | `api_event_view.json` | Raw response from `/v1/event/view`. Detailed scoreboard for this one match: innings, overs, batters, bowlers. |
 | `api_event_odds_summary.json` | Raw response from `/v2/event/odds/summary`. A compact view of available odds markets for this match. |
 | `api_event_odds.json` | Raw response from `/v2/event/odds`. Full odds history timeline — how prices moved as the score changed. |
-| `api_live_market_odds.json` | Raw response from `/v1/bet365/event?FI=…`. The live Bet365 market stream: match winner, over/under runs, player props. This is the richest source of market data. |
-| `lineage.json` | API call log: what was called, with which IDs, how long it took, how many records came back. Useful for debugging and cost tracking. |
+| `api_event_history.json` | Raw response from `/v1/event/history`. Ball-by-ball timeline. |
+| `api_event_stats_trend.json` | Raw response from `/v1/event/stats_trend`. Rolling stats trend. |
+| `api_live_market_odds.json` | Raw response from `/v1/bet365/event?FI=…`. The live Bet365 market stream: match winner, over/under runs, player props. |
+| `api_live_market_stats.json` | Raw response from `/v1/bet365/event?FI=…&stats=1`. Bet365 live stats including the PG/score field used for over tracking. |
+| `api_live_market_lineup.json` | Raw response from `/v1/bet365/event?FI=…&lineup=1`. Bet365 lineup data. |
+| `api_live_market_raw.json` | Raw response from `/v1/bet365/event?FI=…&raw=1`. Bet365 raw event feed. |
+| `lineage.json` | API call log: what was called, with which IDs, how long it took, how many records came back. |
 | `manifest.json` | Snapshot metadata: event ID, FI, snapshot time, paths to all other files in this folder. |
+
+**Deduplication:** before writing, `api_live_market_stats` and `api_live_market_odds` are hashed and compared against the previous snapshot. If both match and a heartbeat was written in the last 5 minutes, the snapshot is skipped entirely. A heartbeat is force-written every 5 minutes regardless.
 
 ### Prematch snapshots
 
@@ -34,15 +41,22 @@ betsapi/prematch_snapshot/sport_id={sport_id}/event_id={event_id}/fi={fi}/snapsh
 
 | File | What it contains |
 |---|---|
-| `api_prematch_odds.json` | Raw response from `/v4/bet365/prematch?FI=…`. Prematch Bet365 markets: match winner, over/under totals, player runs, 1st over specials, innings scores. Captured before the match starts. |
-| `manifest.json` | Snapshot metadata: event ID, FI, snapshot time, path to the odds file. |
+| `api_prematch_odds.json` | Raw response from `/v4/bet365/prematch?FI=…`. Prematch Bet365 markets. |
+| `manifest.json` | Snapshot metadata. |
+
+### Ended match index
+
+| Path | What it contains |
+|---|---|
+| `cricket/ended/latest/index.json` | Index of recently ended cricket matches. Written by `discover_cricket_ended` in the Function App. Read by HTTP routes. |
 
 ### Control files
 
 | Path | What it contains |
 |---|---|
-| `betsapi/control/active_inplay_fi/latest.json` | The current list of live matches being monitored. Written by `discover_cricket_inplay`, read by `capture_cricket_inplay_snapshot`. |
-| `betsapi/control/upcoming_cricket/latest.json` | The current list of upcoming matches with Bet365 IDs. Written by `discover_cricket_upcoming`, read by `capture_cricket_prematch_odds`. |
+| `betsapi/control/active_inplay_fi/latest.json` | Current list of live matches being monitored. Written by `discover_cricket_inplay`, read by `capture_cricket_inplay_snapshot`. |
+| `betsapi/control/upcoming_cricket/latest.json` | Current list of upcoming matches with Bet365 IDs. |
+| `betsapi/control/snapshot_hash/event_id={event_id}.json` | MD5 hashes of the last written `api_live_market_stats` and `api_live_market_odds` payloads for this event. Used for dedup — skip writing if unchanged and heartbeat is fresh. |
 
 ### Raw discovery files (timestamped, for audit)
 
@@ -66,53 +80,47 @@ cricket/inplay/year={year}/month={mm}/day={dd}/hour={hh}/event_id={event_id}/sna
 
 | File | What it contains |
 |---|---|
-| `match_state.json` | Match header for this snapshot: event ID, FI, teams, league, score summary, time status, and API lineage. One row. |
-| `team_scores.json` | Structured team scoring rows: runs, wickets, overs, inning number. One row per team per inning. |
-| `player_entries.json` | Parsed player data from `/v1/event/view`: batter stats (runs, balls, fours, sixes), bowler stats (overs, wickets, runs). |
-| `market_odds.json` | Structured odds records from `/v2/event/odds`: one row per market per selection with decimal odds, timestamp, and provider. |
-| `active_markets.json` | Currently live Bet365 markets parsed from `/v1/bet365/event`: one row per odds selection with market group, market name, team, selection, handicap, and decimal odds. |
-| `lineage.json` | API call lineage copied from the bronze lineage file: which APIs were called, with which identifiers, and what they returned. |
+| `match_state.json` | Match header: event ID, FI, teams, league, score summary, time status, API lineage. |
+| `team_scores.json` | Structured team scoring rows: runs, wickets, overs, inning number. |
+| `player_entries.json` | Parsed player data: batter stats (runs, balls, fours, sixes), bowler stats (overs, wickets, runs). |
+| `market_odds.json` | Structured odds records: one row per market per selection with decimal odds, timestamp, provider. |
+| `active_markets.json` | Currently live Bet365 markets: one row per odds selection with market group, name, team, selection, handicap, decimal odds. |
+| `innings_snapshot.json` | Single innings data point for this snapshot: over, score, ball window, predicted total. |
+| `lineage.json` | API call lineage copied from bronze. |
 
 ### Control files (per event, not per snapshot)
 
 | Path | What it contains |
 |---|---|
-| `cricket/inplay/control/event_id={event_id}/last_known_markets.json` | The most recent non-empty `active_markets` snapshot for this event. Used as a fallback if Bet365 suspends prices mid-match so the page never shows zero markets. |
-| `cricket/control/processed_snapshots/{snapshot_id}_{event_id}_{fi}.json` | Marker written after a bronze snapshot is successfully parsed. Prevents reprocessing the same snapshot on every silver run. |
+| `cricket/inplay/control/event_id={event_id}/last_known_markets.json` | Most recent non-empty `active_markets` snapshot. Fallback if Bet365 suspends prices mid-match. |
+| `cricket/inplay/control/event_id={event_id}/innings_accumulator.json` | Running innings timeline for this event: all data points collected so far. Updated by the gold rebuild. |
+| `cricket/control/processed_snapshots/{snapshot_id}_{event_id}_{fi}.json` | Marker written after a bronze snapshot is successfully parsed. Prevents reprocessing. |
 
 ---
 
 ## Gold container — website-ready data
 
-Gold contains the smallest, fastest files. HTTP routes read from gold directly so they never have to scan thousands of historical files.
+Gold contains the smallest, fastest files. HTTP routes read from gold directly.
 
-### Live match data
+**Note: live match gold pages (match_dashboard, innings_1.json) are out of scope. Gold only contains ended match data.**
+
+### Innings tracker (ended matches)
 
 | Path | What it contains |
 |---|---|
-| `cricket/matches/latest/index.json` | Index of all currently live matches: one row per match with event ID, team names, score, league, snapshot time. Rebuilt every 10 seconds by the gold builder. |
-| `cricket/matches/latest/event_id={event_id}/match_dashboard.json` | Full dashboard for one live match: match header, score, team scores, player stats, odds history, and active markets. Read by `/api/matches/{event_id}` and `/api/matches/{event_id}/view`. |
-| `cricket/matches/latest/event_id={event_id}/lineage.json` | API lineage for the latest snapshot of this match. Read by `/api/matches/{event_id}/lineage`. |
-| `cricket/matches/history/event_id={event_id}/year=…/…/snapshot_id={snapshot_id}/match_dashboard.json` | Historical archive of every match dashboard, one per snapshot. Not read by HTTP routes but kept for analytics. |
-| `cricket/leagues/index.json` | Index of all live leagues: one row per league with match count. |
-| `cricket/leagues/{league_id}/matches.json` | All live matches for one league. Read by `/api/leagues/{league_id}/matches`. |
+| `cricket/innings_tracker/event_id={event_id}/innings_1_from_silver.json` | Full innings timeline rebuilt from all silver snapshots after match ends. Gate file — match appears in ended view only once this exists. |
+| `cricket/innings_tracker/event_id={event_id}/innings_1.json` | Innings accumulator written during gold rebuild. |
 
 ### Prematch data
 
 | Path | What it contains |
 |---|---|
 | `cricket/prematch/latest/index.json` | Index of all upcoming matches that have prematch odds. |
-| `cricket/prematch/latest/event_id={event_id}/prematch_dashboard.json` | All prematch markets for one match: flattened odds rows with category, market name, selection, header (Over/Under/Yes/No), handicap, and decimal odds. Read by `/api/prematch/{event_id}` and `/api/prematch/{event_id}/view`. |
+| `cricket/prematch/latest/event_id={event_id}/prematch_dashboard.json` | All prematch markets for one match. |
 | `cricket/prematch/history/event_id={event_id}/snapshot_id={snapshot_id}/prematch_dashboard.json` | Historical archive of every prematch snapshot. |
 | `cricket/prematch/leagues/index.json` | Index of all leagues that have prematch data. |
 | `cricket/prematch/leagues/{league_id}/matches.json` | All prematch matches for one league. |
-| `cricket/prematch/results/event_id={event_id}/results.json` | User-saved Pass/Fail results for each prematch market selection. Written by `POST /api/prematch/{event_id}/results`. Each key is `{market_name}||{category_key}||{selection_name}||{handicap}||{Over or Under}` and the value is `pass`, `fail`, or `pending`. |
-
-### Ended match data
-
-| Path | What it contains |
-|---|---|
-| `cricket/ended/latest/index.json` | Index of recently ended cricket matches from `/v3/events/ended`. Used to populate the Ended Cricket Matches page. |
+| `cricket/prematch/results/event_id={event_id}/results.json` | User-saved Pass/Fail results for each prematch market selection. |
 
 ---
 
@@ -121,26 +129,29 @@ Gold contains the smallest, fastest files. HTTP routes read from gold directly s
 ```
 BetsAPI
   │
-  ▼
-[bronze]  Raw API responses — exactly as received
+  ▼  Function App — capture_cricket_inplay_snapshot (every 5s, with dedup)
+[bronze]  Raw API responses — deduplicated by stats+odds hash
   │
-  ▼  parse_cricket_bronze_to_silver (every 10 seconds)
-[silver]  Flat, typed records — teams, players, markets, odds history
+  ▼  ADF pl_build_ended_match — Activity 1: silver_build_ended_match (daily 02:00 CET)
+[silver]  Flat, typed records — only for matches quiet >1 hour (ended/inactive)
   │
-  ▼  build_cricket_gold_match_pages (every 10 seconds)
-[gold]    Small website-ready files — read directly by HTTP routes
+  ▼  ADF pl_build_ended_match — Activity 2: gold_build_ended_match (chained on success)
+[gold]    innings_1_from_silver.json — read by HTTP routes
 ```
 
-For prematch:
-
+Ended match index:
 ```
-BetsAPI /v4/bet365/prematch
+[gold]  innings_1_from_silver.json
   │
-  ▼
-[bronze]  api_prematch_odds.json
-  │
-  ▼  build_cricket_prematch_pages (every 60 seconds)
-[gold]    prematch_dashboard.json + index files
+  ▼  Function App — discover_cricket_ended (every 1 hour)
+[bronze]  cricket/ended/latest/index.json  →  read by /api/ended/view
+```
+
+Manual backfill:
+```
+ADF pl_backfill [event_id=optional]
+  Activity 1: silver_backfill  →  silver files + markers
+  Activity 2: gold_backfill    →  innings_1_from_silver.json (on success)
 ```
 
 ---

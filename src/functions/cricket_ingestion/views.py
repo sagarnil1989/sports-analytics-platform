@@ -15,6 +15,7 @@ from storage import (
     download_json,
     download_required_json,
     format_unix_ts,
+    get_bronze_container_client,
     get_named_container_client,
     safe_float,
     upload_json,
@@ -492,8 +493,8 @@ def view_prematch_league_matches_html(req: func.HttpRequest) -> func.HttpRespons
 
 def view_ended_matches(req: func.HttpRequest) -> func.HttpResponse:
     try:
-        gold = get_named_container_client("gold")
-        data = download_required_json(gold, "cricket/ended/latest/index.json")
+        bronze = get_bronze_container_client()
+        data = download_required_json(bronze, "cricket/ended/latest/index.json")
         return func.HttpResponse(json.dumps(data, indent=2, ensure_ascii=False), status_code=200, mimetype="application/json")
     except Exception as ex:
         logging.exception("Failed to return ended index")
@@ -502,8 +503,8 @@ def view_ended_matches(req: func.HttpRequest) -> func.HttpResponse:
 
 def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
     try:
-        gold = get_named_container_client("gold")
-        index = download_required_json(gold, "cricket/ended/latest/index.json")
+        bronze = get_bronze_container_client()
+        index = download_required_json(bronze, "cricket/ended/latest/index.json")
         matches = index.get("matches", []) if isinstance(index, dict) else []
         matches_sorted = sorted(matches, key=lambda m: m.get("event_time_utc") or m.get("event_time_unix") or "", reverse=True)
         league_names = sorted({str(m.get("league_name") or "Unknown") for m in matches})
@@ -2178,43 +2179,144 @@ def view_match_markets_raw(req: func.HttpRequest) -> func.HttpResponse:
 # Admin routes
 # ------------------------------------------------------------------
 
-def _rebuild_innings_core(event_id: str) -> Dict[str, Any]:
+def _silver_snapshot_paths_for_event(silver_container, event_id: str) -> List[str]:
+    """List all silver match_state.json paths for one event, sorted oldest-first. No bronze access."""
+    paths = []
+    seen_sids: set = set()
+    for blob in silver_container.list_blobs(name_starts_with="cricket/inplay/year="):
+        if not blob.name.endswith("/match_state.json"):
+            continue
+        if f"/event_id={event_id}/" not in blob.name:
+            continue
+        parts = blob.name.split("/")
+        sid = next((p for p in parts if p.startswith("snapshot_id=")), None)
+        if not sid or sid in seen_sids:
+            continue
+        seen_sids.add(sid)
+        paths.append(blob.name)
+    paths.sort()
+    return paths
+
+
+def gold_rebuild_ended_matches(event_id: Optional[str] = None) -> None:
+    """Build/rebuild innings_1_from_silver.json from silver data only. No bronze access.
+
+    Finds event_ids that have silver-processed snapshots but are missing or have a stale
+    innings_1_from_silver.json, then rebuilds each one from silver snapshot data.
+
+    Args:
+        event_id: If provided, process only this event. Otherwise process all stale events.
+    """
+    silver = get_named_container_client("silver")
+    gold = get_named_container_client("gold")
+
+    # Find newest silver marker timestamp per event_id.
+    # Marker filename: {snapshot_id}_{event_id}_{fi}.json — rsplit("_", 2) isolates event_id reliably.
+    marker_prefix = "cricket/control/processed_snapshots/"
+    silver_newest: Dict[str, Any] = {}
+    for blob in silver.list_blobs(name_starts_with=marker_prefix):
+        fname = blob.name.rsplit("/", 1)[-1]
+        if not fname.endswith(".json"):
+            continue
+        parts = fname[:-5].rsplit("_", 2)
+        if len(parts) != 3:
+            continue
+        eid = parts[1]
+        lm = blob.last_modified
+        if lm and (eid not in silver_newest or lm > silver_newest[eid]):
+            silver_newest[eid] = lm
+
+    if event_id:
+        if event_id not in silver_newest:
+            logging.warning(json.dumps({
+                "event": "gold_rebuild_ended_matches_skipped",
+                "reason": "no silver processed snapshots found",
+                "event_id": event_id,
+            }))
+            return
+        to_rebuild = [event_id]
+    else:
+        # Only rebuild events where silver has data newer than the existing gold file.
+        gold_ts: Dict[str, Any] = {}
+        for blob in gold.list_blobs(name_starts_with="cricket/innings_tracker/event_id="):
+            if blob.name.endswith("innings_1_from_silver.json"):
+                bparts = blob.name.split("/")
+                ep = next((p for p in bparts if p.startswith("event_id=")), None)
+                if ep:
+                    gold_ts[ep.replace("event_id=", "")] = blob.last_modified
+
+        to_rebuild = []
+        for eid, silver_lm in silver_newest.items():
+            gold_lm = gold_ts.get(eid)
+            if gold_lm is None or (silver_lm and silver_lm > gold_lm):
+                to_rebuild.append(eid)
+
+    logging.info(json.dumps({
+        "event": "gold_rebuild_ended_matches_started",
+        "total_silver_events": len(silver_newest),
+        "to_rebuild": len(to_rebuild),
+    }))
+
+    rebuilt = failed = 0
+    for eid in to_rebuild:
+        paths = _silver_snapshot_paths_for_event(silver, eid)
+        try:
+            _rebuild_innings_core(eid, snapshot_paths=paths)
+            rebuilt += 1
+        except Exception:
+            failed += 1
+            logging.exception(json.dumps({"event": "gold_rebuild_failed", "event_id": eid}))
+
+    logging.warning(json.dumps({
+        "event": "gold_rebuild_ended_matches_done",
+        "rebuilt": rebuilt,
+        "failed": failed,
+    }))
+
+
+def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = None) -> Dict[str, Any]:
     """Rebuild innings_1.json and innings_1_from_silver.json for one event.
 
     Returns a result dict with keys: silver_snapshots_scanned, raw_points_extracted,
     rows_written, errors, message. Raises on fatal errors.
+
+    Args:
+        event_id: The match event ID.
+        snapshot_paths: Pre-computed list of silver match_state.json paths, sorted oldest-first.
+            If None, paths are derived from bronze manifest listings (used by the HTTP admin endpoint).
     """
     import re as _re
     from datetime import datetime as _dt
 
     silver = get_named_container_client("silver")
     gold   = get_named_container_client("gold")
-    bronze = get_named_container_client("bronze")
 
-    # Reconstruct silver snapshot paths from bronze manifest listing.
-    bronze_prefix = f"betsapi/inplay_snapshot/sport_id=3/event_id={event_id}/"
-    seen_sids: set = set()
-    snapshot_paths: List[str] = []
-    for blob in bronze.list_blobs(name_starts_with=bronze_prefix):
-        if not blob.name.endswith("/manifest.json"):
-            continue
-        m = _re.search(r"/snapshot_id=([^/]+)/manifest\.json$", blob.name)
-        if not m:
-            continue
-        sid = m.group(1)
-        if sid in seen_sids:
-            continue
-        seen_sids.add(sid)
-        try:
-            ts = _dt.strptime(sid[:15], "%Y%m%dT%H%M%S")
-            base = (
-                f"cricket/inplay/year={ts.year}/month={ts.month:02d}"
-                f"/day={ts.day:02d}/hour={ts.hour:02d}"
-                f"/event_id={event_id}/snapshot_id={sid}"
-            )
-            snapshot_paths.append(f"{base}/match_state.json")
-        except Exception:
-            continue
+    if snapshot_paths is None:
+        # Derive silver paths from bronze manifest listing (original behaviour for HTTP admin endpoint).
+        bronze = get_named_container_client("bronze")
+        bronze_prefix = f"betsapi/inplay_snapshot/sport_id=3/event_id={event_id}/"
+        seen_sids: set = set()
+        snapshot_paths = []
+        for blob in bronze.list_blobs(name_starts_with=bronze_prefix):
+            if not blob.name.endswith("/manifest.json"):
+                continue
+            m = _re.search(r"/snapshot_id=([^/]+)/manifest\.json$", blob.name)
+            if not m:
+                continue
+            sid = m.group(1)
+            if sid in seen_sids:
+                continue
+            seen_sids.add(sid)
+            try:
+                ts = _dt.strptime(sid[:15], "%Y%m%dT%H%M%S")
+                base = (
+                    f"cricket/inplay/year={ts.year}/month={ts.month:02d}"
+                    f"/day={ts.day:02d}/hour={ts.hour:02d}"
+                    f"/event_id={event_id}/snapshot_id={sid}"
+                )
+                snapshot_paths.append(f"{base}/match_state.json")
+            except Exception:
+                continue
 
     if not snapshot_paths:
         return {"event_id": event_id, "message": "no silver snapshots found", "rows_written": 0,
@@ -2225,9 +2327,15 @@ def _rebuild_innings_core(event_id: str) -> Dict[str, Any]:
     gold_tracker_path = f"cricket/innings_tracker/event_id={event_id}/innings_1.json"
     existing_gold = download_json(gold, gold_tracker_path) or {}
 
-    # Scan last 50 silver snapshots for final score + venue.
+    # Scan last 50 silver snapshots for final score, venue, and match metadata.
     silver_score = None
     stadium_data = None
+    silver_match_name = None
+    silver_league_id  = None
+    silver_league_name = None
+    silver_home_team  = None
+    silver_away_team  = None
+    silver_match_date = None
     for ms_path in reversed(snapshot_paths[-50:]):
         ms = download_json(silver, ms_path)
         if ms:
@@ -2235,7 +2343,19 @@ def _rebuild_innings_core(event_id: str) -> Dict[str, Any]:
                 silver_score = ms["score_summary_events"]
             if not stadium_data and ms.get("stadium_data"):
                 stadium_data = ms["stadium_data"]
-        if silver_score and stadium_data:
+            if not silver_match_name and ms.get("match_name"):
+                silver_match_name = ms["match_name"]
+            if not silver_league_id and ms.get("league_id"):
+                silver_league_id = str(ms["league_id"])
+            if not silver_league_name and ms.get("league_name"):
+                silver_league_name = ms["league_name"]
+            if not silver_home_team and ms.get("home_team_name"):
+                silver_home_team = ms["home_team_name"]
+            if not silver_away_team and ms.get("away_team_name"):
+                silver_away_team = ms["away_team_name"]
+            if not silver_match_date and ms.get("event_time_utc"):
+                silver_match_date = ms["event_time_utc"]
+        if silver_score and stadium_data and silver_match_name and silver_league_id and silver_home_team:
             break
     if not stadium_data:
         stadium_data = existing_gold.get("stadium_data") or None
@@ -2348,6 +2468,20 @@ def _rebuild_innings_core(event_id: str) -> Dict[str, Any]:
         tracker["actual_total"] = actual_total
     if stadium_data:
         tracker["stadium_data"] = stadium_data
+    # Backfill header metadata from silver when existing_gold is missing them.
+    # This handles events where innings_1.json was never built or had null metadata.
+    if not tracker.get("match_name") and silver_match_name:
+        tracker["match_name"] = silver_match_name
+    if not tracker.get("league_id") and silver_league_id:
+        tracker["league_id"] = silver_league_id
+    if not tracker.get("league_name") and silver_league_name:
+        tracker["league_name"] = silver_league_name
+    if not tracker.get("home_team_name") and silver_home_team:
+        tracker["home_team_name"] = silver_home_team
+    if not tracker.get("away_team_name") and silver_away_team:
+        tracker["away_team_name"] = silver_away_team
+    if not tracker.get("match_date_utc") and silver_match_date:
+        tracker["match_date_utc"] = silver_match_date
     upload_json(gold, gold_tracker_path, tracker, overwrite=True)
 
     if deduped:
@@ -2531,12 +2665,15 @@ def view_admin_reprocess_silver(req: func.HttpRequest) -> func.HttpResponse:
 def view_admin_leagues(req: func.HttpRequest) -> func.HttpResponse:
     try:
         leagues = collect_known_leagues()
+        leagues.sort(key=lambda x: x.get("last_match_date") or "", reverse=True)
         allowed = load_allowed_league_ids()
         rows_html = ""
         for lg in leagues:
             lid = escape(str(lg.get("league_id") or ""))
             lname = escape(str(lg.get("league_name") or lid))
             sources = ", ".join(lg.get("sources", []))
+            first_date = escape(str(lg.get("first_match_date") or "-"))
+            last_date  = escape(str(lg.get("last_match_date") or "-"))
             is_allowed = str(lg.get("league_id") or "") in allowed
             checked = "checked" if is_allowed else ""
             bg = ' style="background:#f0fff0"' if is_allowed else ""
@@ -2545,6 +2682,8 @@ def view_admin_leagues(req: func.HttpRequest) -> func.HttpResponse:
                 <td>{lid}</td>
                 <td><b>{lname}</b></td>
                 <td style="color:#666;font-size:12px;">{escape(sources)}</td>
+                <td style="font-size:12px;">{first_date}</td>
+                <td style="font-size:12px;">{last_date}</td>
                 <td>
                     <label class="toggle">
                         <input type="checkbox" {checked}
@@ -2584,7 +2723,7 @@ def view_admin_leagues(req: func.HttpRequest) -> func.HttpResponse:
     Changes apply from the next capture cycle (within 5 seconds for live, 1 minute for prematch).</p>
     <p id="save-status" style="color:#28a745;font-weight:bold;display:none;">Saved.</p>
     <table>
-        <thead><tr><th>League ID</th><th>League Name</th><th>Seen In</th><th>Capture</th><th>Status</th></tr></thead>
+        <thead><tr><th>League ID</th><th>League Name</th><th>Seen In</th><th>First Match</th><th>Last Match</th><th>Capture</th><th>Status</th></tr></thead>
         <tbody>{rows_html}</tbody>
     </table>
     <script>

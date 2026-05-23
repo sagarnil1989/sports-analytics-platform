@@ -187,7 +187,11 @@ def bronze_discover_cricket_ended() -> None:
     A match appears here if and only if:
       1. innings_1_from_silver.json exists in gold for that event_id
       2. The match is NOT currently live (not in the live matches index)
-      3. The league is not excluded and the event is not blocked
+      3. The event is not in the admin block list
+
+    League filtering is intentionally NOT applied here — if a match reached gold,
+    it already passed the league filter at bronze capture time. Filtering again
+    caused silent gaps when tracker metadata was null.
 
     No BetsAPI call is made — all data comes from gold/silver/bronze blobs.
     Score and match name are ordered by batting order (1st innings team first).
@@ -197,7 +201,6 @@ def bronze_discover_cricket_ended() -> None:
     bronze = get_bronze_container_client()
     gold = get_named_container_client("gold")
 
-    allowed_leagues = load_allowed_league_ids()
     blocked_events = load_blocked_event_ids()
 
     # ── 1. Get currently-live event IDs ──────────────────────────────────────
@@ -255,9 +258,6 @@ def bronze_discover_cricket_ended() -> None:
             continue
 
         league_id = str(tracker.get("league_id") or "")
-        if league_id not in allowed_leagues:
-            continue
-
         home_name = str(tracker.get("home_team_name") or "")
         away_name = str(tracker.get("away_team_name") or "")
         match_name = tracker.get("match_name") or f"{home_name} vs {away_name}"
@@ -314,7 +314,7 @@ def bronze_discover_cricket_ended() -> None:
         "ended_match_count": len(matches),
         "matches": matches,
     }
-    upload_json(gold, "cricket/ended/latest/index.json", ended_index, overwrite=True)
+    upload_json(bronze, "cricket/ended/latest/index.json", ended_index, overwrite=True)
 
     logging.info(json.dumps({
         "event": "bronze_discover_cricket_ended_completed",

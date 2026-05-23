@@ -1,13 +1,9 @@
 import azure.functions as func
 
 from bronze import bronze_discover_cricket_inplay, bronze_capture_cricket_inplay_snapshot
-from silver import silver_parse_bronze_to_silver
-from gold import gold_build_match_pages
 from prematch import (
     bronze_discover_cricket_upcoming,
     bronze_capture_cricket_prematch_odds,
-    bronze_discover_cricket_ended,
-    gold_build_cricket_prematch_pages,
 )
 from views import (
     view_prematch_matches,
@@ -31,14 +27,12 @@ from views import (
     view_match_page_html,
     view_match_lineage_json,
     view_match_lineage_html,
-    view_innings_tracker_html,
     view_silver_innings_tracker_html,
     view_innings_tracker_analytics,
     view_market_heatmap_html,
     view_match_live_markets,
     view_match_markets_raw,
     view_admin_rebuild_innings,
-    auto_rebuild_ended_innings,
     view_admin_reprocess_silver,
     view_admin_leagues,
     view_admin_league_toggle,
@@ -62,48 +56,20 @@ def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
     bronze_capture_cricket_inplay_snapshot()
 
 
-@app.timer_trigger(schedule="0 */1 * * * *", arg_name="timer", run_on_startup=True, use_monitor=False)
+@app.timer_trigger(schedule="0 0 */1 * * *", arg_name="timer", run_on_startup=True, use_monitor=False)
 def discover_cricket_upcoming(timer: func.TimerRequest) -> None:
     bronze_discover_cricket_upcoming()
 
 
-@app.timer_trigger(schedule="10 */1 * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
+@app.timer_trigger(schedule="0 10 */1 * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
 def capture_cricket_prematch_odds(timer: func.TimerRequest) -> None:
     bronze_capture_cricket_prematch_odds()
 
 
-@app.timer_trigger(schedule="30 */5 * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
-def discover_cricket_ended(timer: func.TimerRequest) -> None:
-    bronze_discover_cricket_ended()
+# discover_cricket_ended moved to ADF (pl_discover_cricket_ended) — no Function App timeout there.
 
-
-@app.timer_trigger(schedule="0 */10 * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
-def auto_rebuild_ended_innings_tracker(timer: func.TimerRequest) -> None:
-    auto_rebuild_ended_innings()
-
-
-# ---------------------------------------------------------------------------
-# Timer triggers — Silver
-# ---------------------------------------------------------------------------
-
-@app.timer_trigger(schedule="0 0 */1 * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
-def parse_cricket_bronze_to_silver(timer: func.TimerRequest) -> None:
-    silver_parse_bronze_to_silver()
-
-
-# ---------------------------------------------------------------------------
-# Timer triggers — Gold
-# ---------------------------------------------------------------------------
-
-@app.timer_trigger(schedule="*/10 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
-def build_cricket_gold_match_pages(timer: func.TimerRequest) -> None:
-    gold_build_match_pages()
-
-
-@app.timer_trigger(schedule="30 */1 * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
-def build_cricket_prematch_pages(timer: func.TimerRequest) -> None:
-    gold_build_cricket_prematch_pages()
-
+# silver (parse_cricket_bronze_to_silver) and gold (build_cricket_gold_match_pages,
+# build_cricket_prematch_pages, auto_rebuild_ended_innings_tracker) moved to ADF + Databricks.
 
 # ---------------------------------------------------------------------------
 # HTTP routes — Prematch
@@ -258,11 +224,6 @@ def get_innings_tracker_analytics(req: func.HttpRequest) -> func.HttpResponse:
 # ---------------------------------------------------------------------------
 # HTTP routes — Admin
 # ---------------------------------------------------------------------------
-
-@app.route(route="run-prematch-now", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
-def run_prematch_now(req: func.HttpRequest) -> func.HttpResponse:
-    gold_build_cricket_prematch_pages()
-    return func.HttpResponse("Prematch build triggered.", status_code=200)
 
 
 @app.route(route="mgmt/innings/{event_id}/rebuild", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)

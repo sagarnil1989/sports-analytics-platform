@@ -60,16 +60,28 @@ def collect_known_leagues() -> List[Dict[str, Any]]:
     gold = get_named_container_client("gold")
     leagues: Dict[str, Dict[str, Any]] = {}
 
-    def merge(lid: Optional[str], lname: Optional[str], source: str) -> None:
+    def _date10(val: Any) -> Optional[str]:
+        """Extract YYYY-MM-DD from an ISO datetime string, or return None."""
+        s = str(val or "").strip()
+        return s[:10] if len(s) >= 10 and s[4] == "-" else None
+
+    def merge(lid: Optional[str], lname: Optional[str], source: str, event_date: Optional[str] = None) -> None:
         lid = str(lid or "").strip()
         if not lid:
             return
         if lid not in leagues:
-            leagues[lid] = {"league_id": lid, "league_name": lname or lid, "sources": []}
+            leagues[lid] = {"league_id": lid, "league_name": lname or lid, "sources": [], "first_match_date": None, "last_match_date": None}
         if source not in leagues[lid]["sources"]:
             leagues[lid]["sources"].append(source)
         if lname and lname != lid and not leagues[lid].get("league_name"):
             leagues[lid]["league_name"] = lname
+        if event_date:
+            cur_first = leagues[lid]["first_match_date"]
+            cur_last  = leagues[lid]["last_match_date"]
+            if cur_first is None or event_date < cur_first:
+                leagues[lid]["first_match_date"] = event_date
+            if cur_last is None or event_date > cur_last:
+                leagues[lid]["last_match_date"] = event_date
 
     for idx_path, source in [
         ("cricket/matches/latest/index.json", "live"),
@@ -79,7 +91,7 @@ def collect_known_leagues() -> List[Dict[str, Any]]:
         try:
             idx = download_json(gold, idx_path) or {}
             for m in (idx.get("matches") or []):
-                merge(m.get("league_id"), m.get("league_name"), source)
+                merge(m.get("league_id"), m.get("league_name"), source, _date10(m.get("event_time_utc")))
         except Exception:
             pass
 
@@ -97,7 +109,8 @@ def collect_known_leagues() -> List[Dict[str, Any]]:
     try:
         tracker_idx = download_json(gold, "cricket/innings_tracker/index.json") or {}
         for m in (tracker_idx.get("matches") or []):
-            merge(m.get("league_id"), m.get("league_name"), "innings_tracker")
+            merge(m.get("league_id"), m.get("league_name"), "innings_tracker",
+                  _date10(m.get("match_date_utc") or m.get("event_time_utc")))
     except Exception:
         pass
 

@@ -1,9 +1,12 @@
+import hashlib
 import json
 import logging
-from typing import Any, Dict, List
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Tuple
 
 from storage import (
     call_betsapi,
+    download_json,
     extract_results,
     get_bronze_container_client,
     get_env,
@@ -15,6 +18,13 @@ from storage import (
     build_live_snapshot_lineage,
 )
 from leagues import load_allowed_league_ids
+
+SNAPSHOT_HEARTBEAT_SECONDS = 300  # force-write every 5 min even if payload unchanged
+
+
+def _payload_hash(data: Any) -> str:
+    """MD5 hex digest of a JSON payload, key-sorted for stable comparison."""
+    return hashlib.md5(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
 def bronze_discover_cricket_inplay() -> None:
@@ -113,6 +123,38 @@ def bronze_capture_cricket_inplay_snapshot() -> None:
         bet365_event_lineup_payload = call_betsapi(path="/v1/bet365/event", params={"FI": fi, "lineup": 1})
         bet365_event_raw_payload = call_betsapi(path="/v1/bet365/event", params={"FI": fi, "raw": 1})
 
+        # ── Dedup check ────────────────────────────────────────────────────────
+        # Hash the two most volatile payloads (score/PG field + market odds).
+        # Skip writing if both are unchanged AND a heartbeat was written recently.
+        new_stats_hash = _payload_hash(bet365_event_stats_payload)
+        new_odds_hash  = _payload_hash(bet365_event_payload)
+
+        hash_control_path = f"betsapi/control/snapshot_hash/event_id={event_id}.json"
+        stored = download_json(container, hash_control_path) or {}
+
+        last_written_str = stored.get("last_written_utc")
+        if last_written_str:
+            last_written_dt = datetime.fromisoformat(last_written_str)
+            if last_written_dt.tzinfo is None:
+                last_written_dt = last_written_dt.replace(tzinfo=timezone.utc)
+            seconds_since_write = (snapshot_time - last_written_dt).total_seconds()
+        else:
+            seconds_since_write = 9999
+
+        if (
+            new_stats_hash == stored.get("stats_hash")
+            and new_odds_hash  == stored.get("odds_hash")
+            and seconds_since_write < SNAPSHOT_HEARTBEAT_SECONDS
+        ):
+            logging.info(json.dumps({
+                "event": "bronze_snapshot_skipped_duplicate",
+                "event_id": event_id,
+                "seconds_since_last_write": round(seconds_since_write),
+            }))
+            skipped += 1
+            continue
+        # ── End dedup check ────────────────────────────────────────────────────
+
         base_path = f"betsapi/inplay_snapshot/sport_id={sport_id}/event_id={event_id}/fi={fi}/snapshot_id={snapshot_id}"
 
         lineage = build_live_snapshot_lineage(
@@ -184,4 +226,12 @@ def bronze_capture_cricket_inplay_snapshot() -> None:
         upload_json(container, f"{base_path}/api_live_market_raw.json", bet365_event_raw_payload)
         upload_json(container, f"{base_path}/lineage.json", lineage)
         upload_json(container, f"{base_path}/manifest.json", manifest)
+
+        upload_json(container, hash_control_path, {
+            "stats_hash":       new_stats_hash,
+            "odds_hash":        new_odds_hash,
+            "last_written_utc": snapshot_time.isoformat(),
+            "last_snapshot_id": snapshot_id,
+        }, overwrite=True)
+
         captured += 1

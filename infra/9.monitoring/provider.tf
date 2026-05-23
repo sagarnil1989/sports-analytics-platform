@@ -12,7 +12,7 @@ terraform {
     resource_group_name  = "rg-tf-state"
     storage_account_name = "tfstateramanuj"
     container_name       = "tfstate"
-    key                  = "7.marquez.tfstate"
+    key                  = "9.monitoring.tfstate"
   }
 }
 

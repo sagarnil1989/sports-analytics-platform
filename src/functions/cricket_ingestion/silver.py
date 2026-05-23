@@ -37,6 +37,36 @@ def silver_list_manifest_paths(bronze_container, sport_id: str) -> List[str]:
     return [name for _, name in manifests]
 
 
+def silver_list_quiet_event_ids(bronze_container, sport_id: str, quiet_threshold_minutes: int = 60) -> set:
+    """Return event_ids whose latest bronze snapshot is older than quiet_threshold_minutes.
+
+    A match is considered quiet (ended or inactive) when no new bronze snapshot
+    has been written for it within the threshold window. Used by
+    silver_parse_ended_matches() to skip still-active matches.
+    """
+    from datetime import timedelta
+    now = utc_now()
+    cutoff = now - timedelta(minutes=quiet_threshold_minutes)
+
+    prefix = f"betsapi/inplay_snapshot/sport_id={sport_id}/"
+    latest_per_eid: Dict[str, datetime] = {}
+
+    for blob in bronze_container.list_blobs(name_starts_with=prefix):
+        if not blob.name.endswith("/manifest.json"):
+            continue
+        lm = getattr(blob, "last_modified", None)
+        if not lm:
+            continue
+        eid_part = next((p for p in blob.name.split("/") if p.startswith("event_id=")), None)
+        if not eid_part:
+            continue
+        eid = eid_part[9:]
+        if eid not in latest_per_eid or lm > latest_per_eid[eid]:
+            latest_per_eid[eid] = lm
+
+    return {eid for eid, lm in latest_per_eid.items() if lm < cutoff}
+
+
 # ------------------------------------------------------------------
 # Parsing helpers
 # ------------------------------------------------------------------
@@ -780,5 +810,131 @@ def silver_parse_bronze_to_silver() -> None:
         "failed": failed,
         "checked": len(manifest_paths),
         "stopped_early": stopped_early,
+        "elapsed_seconds": round(time.monotonic() - run_start, 1),
+    }))
+
+
+def silver_parse_ended_matches(quiet_threshold_minutes: int = 60, event_id: Optional[str] = None) -> None:
+    """Process unprocessed bronze snapshots only for matches that have gone quiet.
+
+    A match is considered quiet when no new bronze snapshot has arrived for it
+    within quiet_threshold_minutes. This ensures only ended or inactive matches
+    are processed — skips any match still actively receiving bronze captures.
+
+    Args:
+        quiet_threshold_minutes: How long a match must have been quiet before
+            its snapshots are eligible for silver processing. Default 60 minutes.
+        event_id: If provided, only process snapshots for this specific event.
+            The quiet threshold still applies — pass None to process all quiet matches.
+    """
+    import time
+    run_start = time.monotonic()
+
+    sport_id = get_env("SPORT_ID", "3")
+    bronze = get_named_container_client("bronze")
+    silver = get_named_container_client("silver")
+
+    # Find event_ids whose latest bronze snapshot is older than the threshold.
+    quiet_eids = silver_list_quiet_event_ids(bronze, sport_id, quiet_threshold_minutes)
+
+    if event_id:
+        if event_id not in quiet_eids:
+            logging.warning(json.dumps({
+                "event": "silver_parse_ended_matches_skipped",
+                "reason": "match not quiet yet or not found in bronze",
+                "event_id": event_id,
+                "quiet_threshold_minutes": quiet_threshold_minutes,
+            }))
+            return
+        quiet_eids = {event_id}
+
+    logging.info(json.dumps({
+        "event": "silver_parse_ended_matches_started",
+        "quiet_event_count": len(quiet_eids),
+        "quiet_threshold_minutes": quiet_threshold_minutes,
+    }))
+
+    # Build processed keys set.
+    processed_keys: set = set()
+    for b in silver.list_blobs(name_starts_with="cricket/control/processed_snapshots/"):
+        fname = b.name.rsplit("/", 1)[-1]
+        if fname.endswith(".json"):
+            processed_keys.add(fname[:-5])
+
+    # List manifests, filter to quiet event_ids and unprocessed only.
+    manifest_paths = silver_list_manifest_paths(bronze, sport_id)
+    unprocessed = []
+    for path in manifest_paths:
+        parts = path.split("/")
+        eid = next((p[9:] for p in parts if p.startswith("event_id=")), None)
+        sid = next((p[12:] for p in parts if p.startswith("snapshot_id=")), None)
+        fi  = next((p[3:] for p in parts if p.startswith("fi=")), None)
+        if not eid or not sid or not fi:
+            continue
+        if eid not in quiet_eids:
+            continue
+        if f"{sid}_{eid}_{fi}" not in processed_keys:
+            unprocessed.append(path)
+
+    # Process oldest-first so backlog drains from the start of the match.
+    unprocessed.sort(key=lambda p: next((x[12:] for x in p.split("/") if x.startswith("snapshot_id=")), ""))
+
+    processed = failed = 0
+
+    def _process_one(manifest_path: str) -> None:
+        nonlocal processed, failed
+        manifest = download_required_json(bronze, manifest_path)
+        base_path = manifest_path.removesuffix("/manifest.json")
+        events_inplay_payload = (
+            download_json(bronze, f"{base_path}/api_inplay_event_list.json")
+            or download_json(bronze, f"{base_path}/events_inplay_full.json")
+            or download_required_json(bronze, f"{base_path}/events_inplay.json")
+        )
+        bet365_event_payload = (
+            download_json(bronze, f"{base_path}/api_live_market_odds.json")
+            or download_json(bronze, f"{base_path}/bet365_event_by_fi.json")
+            or download_required_json(bronze, f"{base_path}/bet365_event.json")
+        )
+        bet365_event_stats_payload = download_json(bronze, f"{base_path}/api_live_market_stats.json")
+        event_odds_payload = (
+            download_json(bronze, f"{base_path}/api_event_odds.json")
+            or download_json(bronze, f"{base_path}/event_odds_by_event_id.json")
+            or download_required_json(bronze, f"{base_path}/event_odds.json")
+        )
+        event_view_payload = (
+            download_json(bronze, f"{base_path}/api_event_view.json")
+            or download_json(bronze, f"{base_path}/event_view_by_event_id.json")
+        )
+        event_odds_summary_payload = (
+            download_json(bronze, f"{base_path}/api_event_odds_summary.json")
+            or download_json(bronze, f"{base_path}/event_odds_summary_by_event_id.json")
+        )
+        lineage_payload = download_json(bronze, f"{base_path}/lineage.json")
+        parsed = silver_parse_snapshot(
+            manifest,
+            events_inplay_payload,
+            bet365_event_payload,
+            event_odds_payload,
+            event_view_payload=event_view_payload,
+            event_odds_summary_payload=event_odds_summary_payload,
+            lineage_payload=lineage_payload,
+            bet365_event_stats_payload=bet365_event_stats_payload,
+        )
+        silver_write_outputs(silver, parsed)
+        processed += 1
+
+    for manifest_path in unprocessed:
+        try:
+            _process_one(manifest_path)
+        except Exception:
+            failed += 1
+            logging.exception("Failed to parse bronze snapshot to silver")
+
+    logging.warning(json.dumps({
+        "event": "silver_parse_ended_matches_completed",
+        "quiet_event_count": len(quiet_eids),
+        "processed": processed,
+        "failed": failed,
+        "unprocessed_found": len(unprocessed),
         "elapsed_seconds": round(time.monotonic() - run_start, 1),
     }))

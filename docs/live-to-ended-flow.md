@@ -1,89 +1,80 @@
 # Live to Ended Match Flow
 
-Explains how a match transitions from the live view (`/api/matches/view`) to the ended
-view (`/api/ended/view`) and what must be true for it to appear in each.
+Explains how a match transitions from active bronze capture to the ended view (`/api/ended/view`) and what must be true for it to appear there.
+
+**Note: live match gold pages are out of scope. The pipeline processes only ended/inactive matches.**
 
 ---
 
 ## Pipeline Steps
 
 ### Step 1 — Bronze captures live snapshots
-**Timer:** `capture_cricket_inplay_snapshot` — every 5 seconds
+**Trigger:** `capture_cricket_inplay_snapshot` (Azure Function App timer) — every 5 seconds
 
-While a match is in progress (`time_status=1`), the bronze pipeline calls BetsAPI and
-writes a snapshot bundle per event:
+While a match is in progress, the Function App calls BetsAPI and writes a snapshot bundle per event:
 ```
 bronze/betsapi/inplay_snapshot/sport_id=3/event_id={id}/fi={fi}/snapshot_id={ts}/
     manifest.json
-    events_inplay.json
-    bet365_event.json
-    event_odds.json
+    api_live_market_stats.json
+    api_live_market_odds.json
+    api_event_view.json
+    api_event_odds.json
     ...
 ```
-The match also appears in the live gold index:
-```
-gold/cricket/matches/latest/index.json
-```
+
+**Deduplication:** before writing, the `api_live_market_stats` and `api_live_market_odds` payloads are hashed and compared against the previous snapshot's hashes (stored in `betsapi/control/snapshot_hash/event_id={id}.json`). If both hashes match and a snapshot was written within the last 5 minutes, the snapshot is skipped. A heartbeat snapshot is force-written every 5 minutes regardless. This reduces bronze volume by ~80–90% during quiet overs.
 
 ---
 
-### Step 2 — Silver processes snapshots
-**Timer:** `parse_cricket_bronze_to_silver` — every 1 hour
+### Step 2 — Silver processes ended match snapshots
+**Trigger:** ADF `pl_build_ended_match` Activity 1 — daily at 02:00 CET
 
-For each unprocessed bronze snapshot, silver:
-1. Loads the full marker set from `silver/cricket/control/processed_snapshots/` in one
-   bulk listing (avoids per-blob network checks)
-2. Filters bronze manifests to unprocessed only
-3. Parses each snapshot and writes per-over innings data into the accumulator:
+Processes bronze snapshots into silver **only for matches that have been quiet for >60 minutes** (no new bronze snapshot in the last hour). Active live matches are never touched.
+
+1. Scans bronze manifests and silver processed_snapshot markers (both scans run in parallel)
+2. Filters to unprocessed snapshots for quiet event_ids only
+3. Processes in parallel with 128 threads (IO-bound blob reads/writes)
+4. For each snapshot: parses BetsAPI JSON → writes structured silver files + marker:
    ```
-   silver/cricket/inplay/control/event_id={id}/innings_accumulator.json
-   ```
-4. Writes a marker so the snapshot is never re-processed:
-   ```
+   silver/cricket/inplay/year={y}/month={m}/day={d}/hour={h}/event_id={id}/snapshot_id={sid}/
+       match_state.json
+       team_scores.json
+       player_entries.json
+       market_odds.json
+       active_markets.json
+       innings_snapshot.json
    silver/cricket/control/processed_snapshots/{snapshot_id}_{event_id}_{fi}.json
    ```
 
-The silver pipeline runs for up to 9 minutes per invocation (hard budget, inside the
-10-minute Azure Functions timeout). If there is a large backlog it continues on the next
-hourly run, making progress each time.
-
 ---
 
-### Step 3 — Auto-rebuild detects the match has ended
-**Timer:** `auto_rebuild_ended_innings_tracker` — every 10 minutes
+### Step 3 — Gold rebuilds innings tracker from silver
+**Trigger:** ADF `pl_build_ended_match` Activity 2 — chained immediately after Activity 1 succeeds (same daily run)
 
-Checks for matches that meet **all** of the following:
-- `innings_1.json` exists in gold (match was captured live) **OR** a silver accumulator exists (gold missed the match but silver processed some snapshots)
-- `innings_1_from_silver.json` does **not** yet exist
-- Event ID is **not** in the current live index
-- File has not been modified for **more than 1 hour** (match is quiet)
-- League is in the allowed list
+Rebuilds `innings_1_from_silver.json` for every event where silver has data newer than the existing gold file. Reads from **silver only — no bronze access**.
 
-For each qualifying match (capped at 2 per run to stay within the timeout), calls
-`_rebuild_innings_core()` which:
-1. Reads all silver accumulator data for the event
-2. Builds the full innings timeline
-3. Writes the gold innings tracker file:
-   ```
-   gold/cricket/innings_tracker/event_id={id}/innings_1_from_silver.json
-   ```
+**Stale detection:** compares the newest silver processed_snapshot marker timestamp per event against `last_modified` of `gold/cricket/innings_tracker/event_id={id}/innings_1_from_silver.json`. Rebuilds only where the gold file is missing or older.
+
+Writes:
+```
+gold/cricket/innings_tracker/event_id={id}/innings_1_from_silver.json
+gold/cricket/innings_tracker/event_id={id}/innings_1.json
+```
 
 ---
 
 ### Step 4 — Ended index picks it up
-**Timer:** `discover_cricket_ended` — every 5 minutes
+**Trigger:** `discover_cricket_ended` (Azure Function App timer) — every 1 hour (+20 min)
 
 Scans gold for all `innings_1_from_silver.json` files, then for each:
-- Skips if the event is still in the live index
 - Skips if the league is excluded or the event is blocked
 - Reads match name, score, batting order from the tracker file
-- Corrects score and name ordering so 1st-innings team always appears first
-- Adds to the ended index:
+- Writes to the ended index in **bronze**:
   ```
-  gold/cricket/ended/latest/index.json
+  bronze/cricket/ended/latest/index.json
   ```
 
-`/api/ended/view` reads this index directly.
+`/api/ended/view` reads this index directly from bronze.
 
 ---
 
@@ -93,9 +84,8 @@ A match appears in `/api/ended/view` only when **all** are true:
 
 | Condition | Set by |
 |---|---|
-| `innings_1_from_silver.json` exists in gold | Step 3 (auto-rebuild) |
-| Event ID not in live index | BetsAPI — match must have ended |
-| League is in the allowed list | League filter toggle |
+| `innings_1_from_silver.json` exists in gold | Step 3 (ADF gold rebuild) |
+| League is in the allowed list | League filter toggle at `/api/mgmt/leagues/view` |
 | Event ID not in blocked list | Admin block list |
 
 ---
@@ -104,35 +94,30 @@ A match appears in `/api/ended/view` only when **all** are true:
 
 | Symptom | Root cause |
 |---|---|
-| `innings_1_from_silver.json` missing | Silver pipeline never processed the bronze snapshots (gap in silver run) |
-| Silver markers missing for early snapshots | Silver pipeline was not running during that window (Consumption plan cold start, or overwhelmed by concurrent matches) |
-| Match still in live index | BetsAPI still reporting it as live — `discover_cricket_ended` skips it |
+| `innings_1_from_silver.json` missing | Daily ADF run has not yet completed, or silver had no data for this match |
+| Silver has no snapshots | Bronze capture was not running during the match, or all snapshots were deduped (no changes detected) |
+| `innings_1_from_silver.json` exists but match not in ended index | `discover_cricket_ended` has not run yet (hourly) |
 | League not allowed | League disabled in the league filter |
 
 ---
 
-## Silver Pipeline Backfill Behaviour (as of May 2026)
+## Backfill (Manual)
 
-Old snapshots that were missed during a live match are automatically picked up on
-subsequent hourly silver runs — no manual trigger needed. The pipeline:
+If a match is missing from the ended view due to a processing gap, trigger `pl_backfill` in ADF Studio:
 
-1. Builds a set of all processed keys in memory (one bulk listing)
-2. Diffs against all bronze manifests to find unprocessed ones
-3. Processes newest-first within the 9-minute budget
-4. Stops cleanly and resumes on the next hourly run
-
-A match with a large backlog (e.g. 2,000+ unprocessed snapshots) will be fully caught
-up within 2–3 hourly runs. Once silver is complete, the auto-rebuild timer picks it up
-within 10 minutes and it appears in the ended view within 15 minutes after that.
+1. **Trigger `pl_backfill`** with `event_id=<id>` (or leave empty for all quiet matches)
+2. Activity 1 processes silver for that match
+3. Activity 2 rebuilds gold on success
+4. `discover_cricket_ended` picks it up on the next hourly run
 
 ---
 
-## Timers Summary
+## Component Summary
 
-| Timer | Schedule | Purpose |
-|---|---|---|
-| `capture_cricket_inplay_snapshot` | Every 5s | Bronze — write live snapshots |
-| `parse_cricket_bronze_to_silver` | Every 1 hour | Silver — process snapshots |
-| `build_cricket_gold_match_pages` | Every 10s | Gold — write live innings_1.json |
-| `auto_rebuild_ended_innings_tracker` | Every 10 min | Rebuild innings_1_from_silver.json for ended matches |
-| `discover_cricket_ended` | Every 5 min | Build ended match index |
+| Component | Schedule | Runtime | Purpose |
+|---|---|---|---|
+| `capture_cricket_inplay_snapshot` | Every 5s (with dedup) | Azure Function App | Bronze — write live snapshots |
+| ADF `pl_build_ended_match` Activity 1 | Daily 02:00 CET | Databricks | Silver — parse bronze for quiet matches |
+| ADF `pl_build_ended_match` Activity 2 | Chained after Activity 1 | Databricks | Gold — rebuild innings tracker from silver |
+| `discover_cricket_ended` | Every 1 hour (+20 min) | Azure Function App | Build ended match index in bronze |
+| ADF `pl_backfill` | Manual only | Databricks | Silver + gold backfill for one match or all |

@@ -332,10 +332,10 @@
 <body>
 
 <h1>Sports Analytics Platform — Architecture Flow</h1>
-<p class="subtitle">Bronze → Silver → Gold medallion architecture · Azure Functions + ADF + ADLS Gen2</p>
+<p class="subtitle">Bronze → Silver → Gold medallion architecture · Azure Functions + ADF + Databricks + ADLS Gen2</p>
 
 <!-- ══════════════════════════════════════════════════════════ -->
-<h2>Timer Triggers (Azure Function App)</h2>
+<h2>Function App Timers — Bronze Capture</h2>
 <div class="timer-grid">
 
   <div class="timer-card">
@@ -348,7 +348,7 @@
   <div class="timer-card">
     <div class="timer-schedule">*/5 * * * * *</div>
     <div class="timer-name">capture_cricket_inplay_snapshot</div>
-    <div class="timer-desc">Captures full snapshot for each live match — all odds, stats, lineups</div>
+    <div class="timer-desc">Captures full snapshot for each live match — all odds, stats, lineups. 8-minute wall-clock budget, 8s API timeout.</div>
     <div class="timer-writes">→ bronze: inplay_snapshot/{eid}/fi={fi}/snapshot_{ts}.json + manifest.json</div>
   </div>
 
@@ -356,7 +356,7 @@
     <div class="timer-schedule">0 */1 * * * *</div>
     <div class="timer-name">discover_cricket_upcoming</div>
     <div class="timer-desc">Fetches upcoming matches from BetsAPI, writes prematch index</div>
-    <div class="timer-writes">→ gold: prematch/latest/index.json</div>
+    <div class="timer-writes">→ bronze: upcoming control file</div>
   </div>
 
   <div class="timer-card">
@@ -369,29 +369,8 @@
   <div class="timer-card">
     <div class="timer-schedule">30 */5 * * * *</div>
     <div class="timer-name">discover_cricket_ended</div>
-    <div class="timer-desc">Checks innings_1.json staleness (&gt;1 hr, not live) → auto-promotes to ended. No API call.</div>
-    <div class="timer-writes">→ gold: innings_1_from_silver.json · ended/latest/index.json</div>
-  </div>
-
-  <div class="timer-card">
-    <div class="timer-schedule">*/10 * * * * *</div>
-    <div class="timer-name">parse_cricket_bronze_to_silver</div>
-    <div class="timer-desc">Reads bronze manifests, parses raw JSON into structured silver files</div>
-    <div class="timer-writes">→ silver: match_state · team_scores · market_odds · active_markets · innings_snapshot</div>
-  </div>
-
-  <div class="timer-card">
-    <div class="timer-schedule">*/10 * * * * *</div>
-    <div class="timer-name">build_cricket_gold_match_pages</div>
-    <div class="timer-desc">Reads silver, builds match dashboard and innings tracker accumulator</div>
-    <div class="timer-writes">→ gold: innings_1.json · match_dashboard.json · matches/latest/index.json</div>
-  </div>
-
-  <div class="timer-card">
-    <div class="timer-schedule">30 */1 * * * *</div>
-    <div class="timer-name">build_cricket_prematch_pages</div>
-    <div class="timer-desc">Builds prematch gold pages from prematch bronze snapshots</div>
-    <div class="timer-writes">→ gold: prematch/{eid}/match_dashboard.json · leagues/index.json</div>
+    <div class="timer-desc">Scans gold for innings_1_from_silver.json files not in live index → builds ended index.</div>
+    <div class="timer-writes">→ gold: ended/latest/index.json</div>
   </div>
 
 </div>
@@ -554,12 +533,12 @@
   <div class="arrow-cell">
     <div class="arrow-line"></div>
     <div class="arrow-head"></div>
-    <div class="arrow-label">parse_cricket_bronze_to_silver · every 10s</div>
+    <div class="arrow-label">ADF pl_silver_inplay → Databricks · every 30 min</div>
   </div>
   <div class="arrow-cell">
     <div class="arrow-line"></div>
     <div class="arrow-head"></div>
-    <div class="arrow-label">build_cricket_gold_match_pages · every 10s</div>
+    <div class="arrow-label">ADF pl_gold_match_pages → Databricks · every 1 hr</div>
   </div>
   <div class="arrow-cell" style="opacity:0;"></div>
 </div>
@@ -567,59 +546,26 @@
 <hr class="divider">
 
 <!-- ══════════════════════════════════════════════════════════ -->
-<h2>ADF Pipelines</h2>
+<h2>ADF Pipelines (Databricks)</h2>
 <div class="adf-grid">
 
   <div class="adf-card">
-    <div class="adf-card-title">nightly_batch_silver</div>
-    <div class="adf-card-sub">Triggered by: trigger_nightly_batch_silver · 03:00 UTC daily · Orchestrator</div>
+    <div class="adf-card-title">pl_silver_inplay</div>
+    <div class="adf-card-sub">Every 30 minutes · bronze → silver · Databricks job cluster</div>
 
     <div class="adf-step">
       <div class="adf-step-num">1</div>
       <div class="adf-step-content">
-        <strong>Lookup Activity</strong><br>
-        Reads <code>gold/cricket/innings_tracker/index.json</code><br>
-        Gets all event_ids where <code>has_outcome = false</code>
+        <strong>Runs Databricks notebook</strong> <code>/cricket-pipeline/silver</code><br>
+        Calls <code>silver_parse_bronze_to_silver()</code>
       </div>
     </div>
     <div class="adf-arrow">↓</div>
     <div class="adf-step">
       <div class="adf-step-num">2</div>
       <div class="adf-step-content">
-        <strong>ForEach Activity</strong> (5 parallel)<br>
-        Iterates over each <code>event_id</code> from Lookup result
-      </div>
-    </div>
-    <div class="adf-arrow">↓</div>
-    <div class="adf-step">
-      <div class="adf-step-num">3</div>
-      <div class="adf-step-content">
-        <strong>ExecutePipeline</strong> for each match<br>
-        Calls <code>batch_silver_reprocess</code> with <code>event_id</code> param
-      </div>
-    </div>
-  </div>
-
-  <div class="adf-card">
-    <div class="adf-card-title">batch_silver_reprocess</div>
-    <div class="adf-card-sub">Called by nightly pipeline OR triggered manually for one event · Worker unit</div>
-
-    <div class="adf-step">
-      <div class="adf-step-num">1</div>
-      <div class="adf-step-content">
-        <strong>AzureFunctionActivity</strong><br>
-        <code>POST /api/mgmt/reprocess-silver</code><br>
-        Body: <code>{"event_id": "{event_id}"}</code>
-      </div>
-    </div>
-    <div class="adf-arrow">↓</div>
-    <div class="adf-step">
-      <div class="adf-step-num">2</div>
-      <div class="adf-step-content">
-        <strong>view_admin_rebuild_innings()</strong><br>
-        Reads <code>silver/cricket/event_id={eid}/innings_accumulator/*</code><br>
-        Enriches odds from <code>market_odds.json</code> if active_markets has none<br>
-        Writes <code>gold/.../innings_1_from_silver.json</code>
+        <strong>Live events first</strong> (6-min budget, newest-first)<br>
+        Then ended-match backlog (3-min budget, oldest-first)
       </div>
     </div>
     <div class="adf-arrow">↓</div>
@@ -627,8 +573,99 @@
       <div class="adf-step-num">3</div>
       <div class="adf-step-content">
         <strong>Output</strong><br>
-        Updated innings tracker in gold — visible at<br>
-        <code>/api/matches/{event_id}/innings-tracker/view</code>
+        <code>silver/cricket/inplay/year=…/event_id={eid}/snapshot_id={sid}/match_state.json</code><br>
+        + processed marker written to prevent reprocessing
+      </div>
+    </div>
+  </div>
+
+  <div class="adf-card">
+    <div class="adf-card-title">pl_gold_match_pages</div>
+    <div class="adf-card-sub">Every 1 hour · silver → gold live pages · Databricks job cluster</div>
+
+    <div class="adf-step">
+      <div class="adf-step-num">1</div>
+      <div class="adf-step-content">
+        <strong>Runs Databricks notebook</strong> <code>/cricket-pipeline/gold_match_pages</code><br>
+        Calls <code>gold_build_match_pages()</code>
+      </div>
+    </div>
+    <div class="adf-arrow">↓</div>
+    <div class="adf-step">
+      <div class="adf-step-num">2</div>
+      <div class="adf-step-content">
+        <strong>Loops every 30 seconds for 55 minutes</strong><br>
+        Amortises cluster startup cost across ~110 gold builds per ADF run
+      </div>
+    </div>
+    <div class="adf-arrow">↓</div>
+    <div class="adf-step">
+      <div class="adf-step-num">3</div>
+      <div class="adf-step-content">
+        <strong>Output</strong><br>
+        <code>gold/cricket/matches/latest/event_id={eid}/match_dashboard.json</code><br>
+        <code>gold/cricket/innings_tracker/event_id={eid}/innings_1.json</code>
+      </div>
+    </div>
+  </div>
+
+  <div class="adf-card">
+    <div class="adf-card-title">pl_gold_auto_rebuild</div>
+    <div class="adf-card-sub">Every 15 minutes · ended match rebuild · Databricks job cluster</div>
+
+    <div class="adf-step">
+      <div class="adf-step-num">1</div>
+      <div class="adf-step-content">
+        <strong>Runs Databricks notebook</strong> <code>/cricket-pipeline/gold_auto_rebuild</code><br>
+        Calls <code>auto_rebuild_ended_innings()</code>
+      </div>
+    </div>
+    <div class="adf-arrow">↓</div>
+    <div class="adf-step">
+      <div class="adf-step-num">2</div>
+      <div class="adf-step-content">
+        <strong>Stale detection</strong><br>
+        Compares accumulator <code>last_modified</code> vs existing file timestamp<br>
+        Rebuilds only where accumulator is newer
+      </div>
+    </div>
+    <div class="adf-arrow">↓</div>
+    <div class="adf-step">
+      <div class="adf-step-num">3</div>
+      <div class="adf-step-content">
+        <strong>Output</strong><br>
+        <code>gold/cricket/innings_tracker/event_id={eid}/innings_1_from_silver.json</code><br>
+        Picked up by <code>discover_cricket_ended</code> within 5 min
+      </div>
+    </div>
+  </div>
+
+  <div class="adf-card">
+    <div class="adf-card-title">nightly_batch_silver</div>
+    <div class="adf-card-sub">03:00 UTC daily · historical backfill · Function App</div>
+
+    <div class="adf-step">
+      <div class="adf-step-num">1</div>
+      <div class="adf-step-content">
+        <strong>Lookup Activity</strong><br>
+        Reads <code>gold/cricket/innings_tracker/index.json</code><br>
+        Gets event_ids where <code>has_outcome = false</code>
+      </div>
+    </div>
+    <div class="adf-arrow">↓</div>
+    <div class="adf-step">
+      <div class="adf-step-num">2</div>
+      <div class="adf-step-content">
+        <strong>ForEach Activity</strong> (5 parallel)<br>
+        Calls <code>batch_silver_reprocess</code> per event_id
+      </div>
+    </div>
+    <div class="adf-arrow">↓</div>
+    <div class="adf-step">
+      <div class="adf-step-num">3</div>
+      <div class="adf-step-content">
+        <strong>AzureFunctionActivity</strong><br>
+        <code>POST /api/mgmt/reprocess-silver</code> per match
       </div>
     </div>
   </div>

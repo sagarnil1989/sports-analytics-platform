@@ -1,2 +1,8 @@
 In bronze ->betsapi -> inplay_snapshot ->sport_id=3. 
 I see 37th matches why I do not see them in ended match . can you give me list of these matches
+
+
+
+even thoigh the bronze_silver_counts shows 
+11658849	194477416	26431	2026-05-17	Delhi Capitals vs Rajasthan Royals - T20	1846	1772	74
+I do I see a difference between bronze and silver even though the pl_backfill ran fine for this event.

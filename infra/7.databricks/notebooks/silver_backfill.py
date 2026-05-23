@@ -1,0 +1,204 @@
+# Databricks notebook: silver backfill
+# Manual trigger via ADF pl_backfill. Pass event_id to process one match, leave empty for all quiet matches.
+# All orchestration is inline. Processes snapshots in parallel (8 threads) for fast blob I/O.
+
+# COMMAND ----------
+
+import subprocess
+subprocess.run(["pip", "install", "--quiet", "azure-storage-blob", "azure-storage-file-datalake"], check=True)
+
+# COMMAND ----------
+
+import sys, os, json, time
+from datetime import datetime, timezone, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict
+from azure.storage.blob import BlobServiceClient
+
+sys.path.insert(0, "/dbfs/FileStore/cricket-pipeline/src/")
+
+conn_str = dbutils.secrets.get("cricket-pipeline", "DATA_STORAGE_CONNECTION_STRING")
+sport_id = dbutils.secrets.get("cricket-pipeline", "SPORT_ID")
+
+svc    = BlobServiceClient.from_connection_string(conn_str)
+bronze = svc.get_container_client("bronze")
+silver = svc.get_container_client("silver")
+
+QUIET_THRESHOLD_MINUTES = 60
+PARALLEL_WORKERS        = 128  # IO-bound blob ops — threads >> cores is correct for network-bound work
+
+def _dl(container, path):
+    try:
+        return json.loads(container.get_blob_client(path).download_blob().readall())
+    except Exception:
+        return None
+
+def _dl_required(container, path):
+    data = _dl(container, path)
+    if data is None:
+        raise FileNotFoundError(f"Required blob not found: {path}")
+    return data
+
+# COMMAND ----------
+# ── STEP 0: Read event_id parameter ─────────────────────────────────────────
+
+event_id_filter = dbutils.widgets.get("event_id").strip() if dbutils.widgets.getAll().get("event_id") else ""
+print(f"event_id filter: {event_id_filter or '(all quiet matches)'}")
+
+# COMMAND ----------
+# ── STEP 1 + 2: Scan bronze manifests AND silver markers in parallel ─────────
+# Both are full container listings — running them concurrently halves the wait.
+
+from concurrent.futures import ThreadPoolExecutor as _ScanPool
+
+def _scan_bronze():
+    result = defaultdict(list)
+    for blob in bronze.list_blobs(name_starts_with=f"betsapi/inplay_snapshot/sport_id={sport_id}/"):
+        if not blob.name.endswith("/manifest.json"):
+            continue
+        parts = blob.name.split("/")
+        eid   = next((p[9:]  for p in parts if p.startswith("event_id=")),    None)
+        fi    = next((p[3:]  for p in parts if p.startswith("fi=")),          None)
+        sid   = next((p[12:] for p in parts if p.startswith("snapshot_id=")), None)
+        if not eid or not sid:
+            continue
+        if event_id_filter and eid != event_id_filter:
+            continue
+        result[eid].append((blob.name, blob.last_modified, fi or "", sid))
+    return result
+
+def _scan_silver_markers():
+    keys = set()
+    for blob in silver.list_blobs(name_starts_with="cricket/control/processed_snapshots/"):
+        fname = blob.name.rsplit("/", 1)[-1]
+        if fname.endswith(".json"):
+            keys.add(fname[:-5])
+    return keys
+
+t0 = time.monotonic()
+print("Scanning bronze + silver in parallel...")
+with _ScanPool(max_workers=2) as pool:
+    f_bronze  = pool.submit(_scan_bronze)
+    f_markers = pool.submit(_scan_silver_markers)
+    bronze_events  = f_bronze.result()
+    processed_keys = f_markers.result()
+
+total_events    = len(bronze_events)
+total_manifests = sum(len(v) for v in bronze_events.values())
+print(f"  bronze : {total_events} events | {total_manifests} snapshots")
+print(f"  silver : {len(processed_keys)} already processed")
+print(f"  listing took {time.monotonic()-t0:.1f}s")
+
+# COMMAND ----------
+# ── STEP 3: Build work list ──────────────────────────────────────────────────
+
+t0 = time.monotonic()
+print("\nBuilding work list...")
+
+now    = datetime.now(timezone.utc)
+cutoff = now - timedelta(minutes=QUIET_THRESHOLD_MINUTES)
+
+work_items = []   # (manifest_path, eid, sid, fi)
+skipped_active = skipped_processed = 0
+
+for eid, manifests in bronze_events.items():
+    # Without a specific event_id filter, skip matches that are still active.
+    if not event_id_filter:
+        latest_ts = max((lm for _, lm, _, _ in manifests if lm), default=None)
+        if latest_ts and latest_ts > cutoff:
+            skipped_active += len(manifests)
+            continue
+
+    for path, _, fi, sid in manifests:
+        key = f"{sid}_{eid}_{fi}"
+        if key in processed_keys:
+            skipped_processed += 1
+            continue
+        work_items.append((path, eid, sid, fi))
+
+# Oldest snapshot first so backlog drains from the earliest match forward.
+work_items.sort(key=lambda x: x[2])
+
+event_count = len(set(x[1] for x in work_items))
+print(f"  {len(work_items)} snapshots to process across {event_count} events")
+print(f"  {skipped_processed} already processed (skipped)")
+print(f"  {skipped_active} in active matches (skipped, quieted less than {QUIET_THRESHOLD_MINUTES} min ago)")
+print(f"  ({time.monotonic()-t0:.1f}s)")
+
+if not work_items:
+    print("\nNothing to process.")
+    dbutils.notebook.exit("done: nothing to process")
+
+# COMMAND ----------
+# ── STEP 4: Process in parallel ─────────────────────────────────────────────
+
+from silver import silver_parse_snapshot, silver_write_outputs
+
+def process_snapshot(item):
+    """Download bronze files, parse to silver, write outputs + marker."""
+    path, eid, sid, fi = item
+    base = path.removesuffix("/manifest.json")
+
+    manifest               = _dl_required(bronze, path)
+    events_inplay_payload  = (_dl(bronze, f"{base}/api_inplay_event_list.json")
+                               or _dl(bronze, f"{base}/events_inplay_full.json")
+                               or _dl_required(bronze, f"{base}/events_inplay.json"))
+    bet365_event_payload   = (_dl(bronze, f"{base}/api_live_market_odds.json")
+                               or _dl(bronze, f"{base}/bet365_event_by_fi.json")
+                               or _dl_required(bronze, f"{base}/bet365_event.json"))
+    bet365_stats_payload   = _dl(bronze, f"{base}/api_live_market_stats.json")
+    event_odds_payload     = (_dl(bronze, f"{base}/api_event_odds.json")
+                               or _dl(bronze, f"{base}/event_odds_by_event_id.json")
+                               or _dl_required(bronze, f"{base}/event_odds.json"))
+    event_view_payload     = (_dl(bronze, f"{base}/api_event_view.json")
+                               or _dl(bronze, f"{base}/event_view_by_event_id.json"))
+    event_odds_summary     = (_dl(bronze, f"{base}/api_event_odds_summary.json")
+                               or _dl(bronze, f"{base}/event_odds_summary_by_event_id.json"))
+    lineage_payload        = _dl(bronze, f"{base}/lineage.json")
+
+    parsed = silver_parse_snapshot(
+        manifest,
+        events_inplay_payload,
+        bet365_event_payload,
+        event_odds_payload,
+        event_view_payload=event_view_payload,
+        event_odds_summary_payload=event_odds_summary,
+        lineage_payload=lineage_payload,
+        bet365_event_stats_payload=bet365_stats_payload,
+    )
+    silver_write_outputs(silver, parsed)
+    return eid, sid
+
+
+print(f"\nProcessing {len(work_items)} snapshots with {PARALLEL_WORKERS} parallel workers...")
+run_start  = time.monotonic()
+done = failed = 0
+failed_items = []
+
+with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as pool:
+    futures = {pool.submit(process_snapshot, item): item for item in work_items}
+    for future in as_completed(futures):
+        item = futures[future]
+        try:
+            eid, sid = future.result()
+            done += 1
+            if done % 50 == 0 or done == len(work_items):
+                elapsed = time.monotonic() - run_start
+                rate    = done / elapsed if elapsed > 0 else 0
+                eta_s   = (len(work_items) - done) / rate if rate > 0 else 0
+                print(f"  {done}/{len(work_items)}  |  {rate:.1f}/s  |  ETA {eta_s/60:.1f} min  |  failed {failed}")
+        except Exception as ex:
+            failed += 1
+            failed_items.append((item[1], item[2], str(ex)))
+
+elapsed = time.monotonic() - run_start
+print(f"\n── Done ──")
+print(f"  processed : {done}")
+print(f"  failed    : {failed}")
+print(f"  total time: {elapsed/60:.1f} min  ({elapsed:.0f}s)")
+print(f"  avg rate  : {done/elapsed:.1f} snapshots/s" if elapsed > 0 else "")
+
+if failed_items:
+    print(f"\nFailed snapshots:")
+    for eid, sid, err in failed_items[:20]:
+        print(f"  event_id={eid}  snapshot_id={sid}  error={err}")
