@@ -2664,23 +2664,38 @@ def view_admin_reprocess_silver(req: func.HttpRequest) -> func.HttpResponse:
 
 def view_admin_leagues(req: func.HttpRequest) -> func.HttpResponse:
     try:
-        leagues = collect_known_leagues()
-        leagues.sort(key=lambda x: x.get("last_match_date") or "", reverse=True)
         allowed = load_allowed_league_ids()
+        leagues = collect_known_leagues()
+        # Two-pass stable sort: first by date desc, then by group asc — preserves date order within each group.
+        # Groups: 0 = allowed (capturing), 1 = new/upcoming-only, 2 = disabled
+        leagues.sort(key=lambda x: x.get("last_match_date") or "", reverse=True)
+        leagues.sort(key=lambda x: (
+            0 if str(x.get("league_id") or "") in allowed else (1 if x.get("sources") == ["upcoming"] else 2)
+        ))
         rows_html = ""
         for lg in leagues:
             lid = escape(str(lg.get("league_id") or ""))
             lname = escape(str(lg.get("league_name") or lid))
-            sources = ", ".join(lg.get("sources", []))
+            sources_list = lg.get("sources", [])
+            sources = ", ".join(sources_list)
             first_date = escape(str(lg.get("first_match_date") or "-"))
             last_date  = escape(str(lg.get("last_match_date") or "-"))
             is_allowed = str(lg.get("league_id") or "") in allowed
+            is_new = sources_list == ["upcoming"]  # seen only in upcoming, never captured
             checked = "checked" if is_allowed else ""
-            bg = ' style="background:#f0fff0"' if is_allowed else ""
+            if is_allowed:
+                bg = ' style="background:#f0fff0"'
+                status = "Capturing"
+            elif is_new:
+                bg = ' style="background:#fffbe6"'
+                status = "⚠️ New — not yet enabled"
+            else:
+                bg = ""
+                status = "Disabled — toggle to enable"
             rows_html += f"""
             <tr{bg}>
                 <td>{lid}</td>
-                <td><b>{lname}</b></td>
+                <td><b>{lname}</b>{'&nbsp;<span style="font-size:11px;background:#f5a623;color:white;padding:1px 5px;border-radius:3px;">NEW</span>' if is_new else ''}</td>
                 <td style="color:#666;font-size:12px;">{escape(sources)}</td>
                 <td style="font-size:12px;">{first_date}</td>
                 <td style="font-size:12px;">{last_date}</td>
@@ -2693,7 +2708,7 @@ def view_admin_leagues(req: func.HttpRequest) -> func.HttpResponse:
                     </label>
                 </td>
                 <td id="status-{lid}" style="font-size:12px;color:#888;">
-                    {'Capturing' if is_allowed else 'Disabled — toggle to enable'}
+                    {status}
                 </td>
             </tr>"""
         html = f"""<!DOCTYPE html>

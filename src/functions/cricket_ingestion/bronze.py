@@ -23,8 +23,10 @@ SNAPSHOT_HEARTBEAT_SECONDS = 300  # force-write every 5 min even if payload unch
 
 
 def _payload_hash(data: Any) -> str:
-    """MD5 hex digest of a JSON payload, key-sorted for stable comparison."""
-    return hashlib.md5(json.dumps(data, sort_keys=True).encode()).hexdigest()
+    """MD5 hex digest of the API response body only — excludes request wrapper
+    (called_at_utc, elapsed_ms) which change every call even when content is identical."""
+    body = data.get("response", {}).get("body") if isinstance(data, dict) else data
+    return hashlib.md5(json.dumps(body, sort_keys=True).encode()).hexdigest()
 
 
 def bronze_discover_cricket_inplay() -> None:

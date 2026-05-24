@@ -110,3 +110,9 @@ resource "databricks_notebook" "analysis_bronze_silver_counts" {
   path     = "/cricket-pipeline/analysis/bronze_silver_counts"
   language = "PYTHON"
 }
+
+resource "databricks_notebook" "analysis_snapshot_timeline" {
+  source   = "${path.module}/notebooks/analysis_snapshot_timeline.py"
+  path     = "/cricket-pipeline/analysis/snapshot_timeline"
+  language = "PYTHON"
+}

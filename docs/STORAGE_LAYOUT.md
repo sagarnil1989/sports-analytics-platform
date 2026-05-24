@@ -132,18 +132,13 @@ BetsAPI
   ▼  Function App — capture_cricket_inplay_snapshot (every 5s, with dedup)
 [bronze]  Raw API responses — deduplicated by stats+odds hash
   │
-  ▼  ADF pl_build_ended_match — Activity 1: silver_build_ended_match (daily 02:00 CET)
+  ▼  ADF pl_build_ended_match — Activity 1 (daily 02:00 CET)
 [silver]  Flat, typed records — only for matches quiet >1 hour (ended/inactive)
   │
-  ▼  ADF pl_build_ended_match — Activity 2: gold_build_ended_match (chained on success)
-[gold]    innings_1_from_silver.json — read by HTTP routes
-```
-
-Ended match index:
-```
-[gold]  innings_1_from_silver.json
+  ▼  ADF pl_build_ended_match — Activity 2 (chained on Activity 1 success)
+[gold]    innings_1_from_silver.json
   │
-  ▼  Function App — discover_cricket_ended (every 1 hour)
+  ▼  ADF pl_build_ended_match — Activity 3 (chained on Activity 2 success)
 [bronze]  cricket/ended/latest/index.json  →  read by /api/ended/view
 ```
 
@@ -152,6 +147,7 @@ Manual backfill:
 ADF pl_backfill [event_id=optional]
   Activity 1: silver_backfill  →  silver files + markers
   Activity 2: gold_backfill    →  innings_1_from_silver.json (on success)
+  (then trigger pl_build_ended_match to run Activity 3 and refresh ended index)
 ```
 
 ---

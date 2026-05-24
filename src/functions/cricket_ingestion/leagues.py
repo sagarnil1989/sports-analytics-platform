@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional
 
-from storage import download_json, get_named_container_client, upload_json, utc_now
+from storage import download_json, get_named_container_client, get_bronze_container_client, upload_json, utc_now
 
 
 _LEAGUE_PREFS_PATH = "cricket/config/league_preferences.json"
@@ -56,8 +56,9 @@ def block_event_ids(event_ids: set) -> None:
 
 
 def collect_known_leagues() -> List[Dict[str, Any]]:
-    """Gather all leagues seen across live, prematch, ended, league, and innings-tracker indexes."""
+    """Gather all leagues seen across live, prematch, ended, league, innings-tracker, and upcoming indexes."""
     gold = get_named_container_client("gold")
+    bronze = get_bronze_container_client()
     leagues: Dict[str, Dict[str, Any]] = {}
 
     def _date10(val: Any) -> Optional[str]:
@@ -111,6 +112,16 @@ def collect_known_leagues() -> List[Dict[str, Any]]:
         for m in (tracker_idx.get("matches") or []):
             merge(m.get("league_id"), m.get("league_name"), "innings_tracker",
                   _date10(m.get("match_date_utc") or m.get("event_time_utc")))
+    except Exception:
+        pass
+
+    # Upcoming matches from BetsAPI — leagues here may never have been captured yet.
+    # Surfacing them lets operators discover and enable new leagues before they go live.
+    try:
+        upcoming = download_json(bronze, "betsapi/control/upcoming_cricket/latest.json") or {}
+        for m in (upcoming.get("upcoming_matches") or []):
+            merge(m.get("league_id"), m.get("league_name"), "upcoming",
+                  _date10(m.get("event_time_utc")))
     except Exception:
         pass
 
