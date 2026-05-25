@@ -30,6 +30,7 @@ from views import (
     view_silver_innings_tracker_html,
     view_innings_tracker_analytics,
     view_market_heatmap_html,
+    view_detailed_analysis_html,
     view_match_live_markets,
     view_match_markets_raw,
     view_admin_rebuild_innings,
@@ -176,6 +177,11 @@ def get_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="matches/{event_id}/heatmap", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_market_heatmap_html(req: func.HttpRequest) -> func.HttpResponse:
     return view_market_heatmap_html(req)
+
+
+@app.route(route="matches/{event_id}/detailed-analysis", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
+    return view_detailed_analysis_html(req)
 
 
 @app.route(route="matches/{event_id}/markets/live", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)

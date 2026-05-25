@@ -1,8 +1,219 @@
-In bronze ->betsapi -> inplay_snapshot ->sport_id=3. 
-I see 37th matches why I do not see them in ended match . can you give me list of these matches
+section 1 - ============================================================
+SECTION 1 — GOLD TRACKER
+============================================================
 
+Match       : Lucknow Super Giants vs Punjab Kings - T20
+League      : Indian Premier League
+Home        : Lucknow Super Giants
+Away        : Punjab Kings
+Date        : 2026-05-23 14:00:00 UTC
+Venue       : None
+Actual total: 196
+Outcome     : over
+Row count   : 280 
 
+Issue : venue tracker commming as None where as in https://func-ramanuj.azurewebsites.net/api/matches/11658818/innings-tracker/view I can see the venuw. 
+Outcome     : over this data has no value as in innings tracker whre something is ober or under has value not not as a whole for the full match. 
 
-even thoigh the bronze_silver_counts shows 
-11658849	194477416	26431	2026-05-17	Delhi Capitals vs Rajasthan Royals - T20	1846	1772	74
-I do I see a difference between bronze and silver even though the pl_backfill ran fine for this event.
+In table - 0.0	2	196	6	None	None	None	2.375	1.571	row no 152 is wrong it should be 0 . 
+
+I will give you the full exampole:
+lets take:
+
+Blob containers-> bronze-> betsapi-> inplay_snapshot-> sport_id=3->event_id=11658818->fi=194912171-> snapshot_id=20260523T161241Z
+"type": "EV",
+            "C1": "858",
+            "C2": "134021829",
+            "CK": "",
+            "CL": "3",
+            "CT": "Indian Premier League",
+            "DC": "0",
+            "ED": "1",
+            "EL": "1",
+            "EX": "Punjab Kings require 178 runs from 110 balls",
+            "FE": "0",
+            "FS": "1",
+            "ID": "85851340218292C3A_1",
+            "IT": "85851340218292M3_1",
+            "LB": "0",
+            "LT": "",
+            "MD": "1",
+            "ML": "0",
+            "NA": "Lucknow Super Giants vs Punjab Kings - T20",
+            "PG": "1wd:0:0:1:4:4#2:5:4",
+            "RI": "",
+            "S1": "",
+            "S2": "",
+            "S3": "197", --> target for 2nd innings to win
+            "S4": "",
+            "S5": "20",
+            "S6": "",
+            "S7": "1",
+            "SB": "0",
+            "SS": "19/1",
+            "SV": "1",
+            "T1": "5",
+            "T2": "2",
+            "TA": "",
+            "TD": "0",
+            "TM": "0",
+            "TS": "0",
+            "TT": "0",
+            "TU": "",
+            "VC": "11206",
+            "XT": "0",
+            "XY": "" 
+
+             {
+            "type": "TE",
+            "D1": "",
+            "EX": "",
+            "ID": "1",
+            "IT": "858513402182923T1_1",
+            "K1": "Lucknow_SG_Front.svg",
+            "KC": "#002B87,#C40010,#002B87,#C40010,#0046A8,#F0F0F0,#2B72DE,#FFFFFF,#FFFF00,#FF00FF,#00FFFF",
+            "KI": "2",
+            "NA": "Lucknow Super Giants",
+            "OR": "0",
+            "PI": "0",
+            "PO": "0",
+            "S1": "0",
+            "S2": "0",
+            "S3": "9",
+            "S4": "0",
+            "S5": "",
+            "S6": "",
+            "S7": "P Yadav#2#5#3#4", -> P Yadav is the bowler. 
+            "S8": "1#M Shami#10#1", -> M Shami is the previous over or 1st over bowler. - #10#1 means 10 runs came of the over and 1 wicket was taken.
+            "SC": " 196/6",
+            "TC": "#940014",
+            "TD": "142539"
+          },
+          {
+            "type": "TE",
+            "D1": "",
+            "EX": "",
+            "ID": "2",
+            "IT": "858513402182923T2_1",
+            "K1": "Cricket_Generic_Red.svg",
+            "KC": "#D6003D,#F4F48A,#D6003D,#F4F48A,#D6003D,#D6003D,#D6003D,#FFFFFF,#FFFF00,#FF00FF,#00FFFF",
+            "KI": "2",
+            "NA": "Punjab Kings",
+            "OR": "1",
+            "PI": "1",
+            "PO": "0",
+            "S1": "16", -> run of striker batsman who is on strike at that point of time.
+            "S2": "19", -> total runs
+            "S3": "197",
+            "S4": "1",
+            "S5": "19#1",
+            "S6": "C Connolly:16:7#Prabhsimran Singh:1:2",-> C Connolly is the striker batsman who is at this point 16 runs from 7 balls so 16:7 and Prabhsimran Singh is the non striker who is 1 run from 2 balls so 1:2
+            "S7": "C Connolly###", -> C Connolly is the striker batsman and he is on strike as well so 3 # and Prabhsimran Singh is non striker so no # for him.
+            "S8": "",
+            "SC": " 19/1",
+            "TC": "#D6003D",
+            "TD": "129544"
+          },
+
+Blob containers->bronze->betsapi->inplay_snapshot->sport_id=3->event_id=11658818->fi=194912171->snapshot_id=20260523T145901Z
+         {
+            "type": "EV",
+            "C1": "858",
+            "C2": "134021829",
+            "CK": "",
+            "CL": "3",
+            "CT": "Indian Premier League",
+            "DC": "0",
+            "ED": "1",
+            "EL": "1",
+            "EX": "",
+            "FE": "0",
+            "FS": "1",
+            "ID": "85851340218292C3A_1",
+            "IT": "85851340218292M3_1",
+            "LB": "0",
+            "LT": "",
+            "MD": "1",
+            "ML": "0",
+            "NA": "Lucknow Super Giants vs Punjab Kings - T20",
+            "PG": "0:1:1:0:0:1#12:1:0",
+            "RI": "",
+            "S1": "",
+            "S2": "",
+            "S3": "",
+            "S4": "",
+            "S5": "20", - > total number of overs 
+            "S6": "",
+            "S7": "1",
+            "SB": "0",
+            "SS": "103/3",
+            "SV": "1",
+            "T1": "5",
+            "T2": "2",
+            "TA": "",
+            "TD": "0",
+            "TM": "0",
+            "TS": "0",
+            "TT": "0",
+            "TU": "",
+            "VC": "21206",
+            "XT": "0",
+            "XY": ""
+          },
+
+                   {
+            "type": "TE",
+            "D1": "",
+            "EX": "",
+            "ID": "1",
+            "IT": "858513402182923T1_1",
+            "K1": "Lucknow_SG_Front.svg",
+            "KC": "#002B87,#C40010,#002B87,#C40010,#0046A8,#F0F0F0,#2B72DE,#FFFFFF,#FFFF00,#FF00FF,#00FFFF",
+            "KI": "2",
+            "NA": "Lucknow Super Giants",
+            "OR": "0",
+            "PI": "1",
+            "PO": "0",
+            "S1": "16",
+            "S2": "34",
+            "S3": "0",
+            "S4": "38",
+            "S5": "103#3",
+            "S6": "RR Pant:16:15#JP Inglis:38:25", -> RR Pant is the striker batsman who is on strike at that point of time and he has scored 16 runs from 15 balls so 16:15 and JP Inglis is the non striker who has scored 38 runs from 25 balls so 38:25
+            "S7": "RR Pant#1#5#4", ->
+            "S8": "",
+            "SC": " 103/3",
+            "TC": "#940014",
+            "TD": "142539"
+          },
+          {
+            "type": "TE",
+            "D1": "",
+            "EX": "",
+            "ID": "2",
+            "IT": "858513402182923T2_1",
+            "K1": "Cricket_Generic_Red.svg",
+            "KC": "#D6003D,#F4F48A,#D6003D,#F4F48A,#D6003D,#D6003D,#D6003D,#FFFFFF,#FFFF00,#FF00FF,#00FFFF",
+            "KI": "2",
+            "NA": "Punjab Kings",
+            "OR": "1",
+            "PI": "0",
+            "PO": "0",
+            "S1": "2",
+            "S2": "0",
+            "S3": "20",
+            "S4": "0",
+            "S5": "",
+            "S6": "",
+            "S7": "V Vyshak####",
+            "S8": "11#YS Chahal#3#0", -> YS Chahal is the previous over  over which was 11th bowler and he has given 3 runs in that over and no wicket so 3:0
+            "SC": " ",
+            "TC": "#D6003D",
+            "TD": "129544"
+          },
+          {
+            "type": "TG",
+            "ID": "1",
+            "IT": "MLP85851340218292C3T1_1",
+            "OR": "1"
+          },

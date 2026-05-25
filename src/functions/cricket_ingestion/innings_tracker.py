@@ -81,7 +81,12 @@ def extract_innings_snapshot(
     current_wickets: Optional[int] = None
     batting_team: Optional[str] = None
 
-    for row in team_score_rows:
+    # Prefer the team with PI="1" (Bet365 batting indicator) — avoids innings-transition
+    # bug where the fielding team's 1st-innings total is mistakenly read as current score.
+    pi_batting = [r for r in team_score_rows if str(r.get("pi") or "") == "1"]
+    candidates = pi_batting if pi_batting else team_score_rows
+
+    for row in candidates:
         if row.get("runs") is not None:
             batting_team = str(row.get("name") or "")
             current_score = row.get("runs")
@@ -90,7 +95,7 @@ def extract_innings_snapshot(
             current_over = over_str
             break
     if batting_team is None:
-        for row in team_score_rows:
+        for row in candidates:
             over_str = str(row.get("pg_over") or "").strip() or None
             if not over_str:
                 continue
@@ -192,6 +197,17 @@ def extract_innings_snapshot(
         except Exception:
             pass
 
+    # Innings-break transition guard: S3 is set (innings=2 detected) but PG has reset to 0.0
+    # while the score still shows the 1st innings total. A real 2nd innings snapshot at over=0.0
+    # must have score=0. Skip this ghost snapshot entirely.
+    if innings_no == 2 and (current_score or 0) > 0 and current_over is not None:
+        try:
+            over_parts = str(current_over).split(".")
+            if int(over_parts[0]) == 0 and (int(over_parts[1]) if len(over_parts) > 1 else 0) == 0:
+                return None
+        except Exception:
+            pass
+
     return {
         "over": current_over,
         "over_float": current_over,
@@ -251,12 +267,14 @@ def gold_write_innings_tracker_from_silver(
 
     match_name = acc.get("match_name") or header.get("match_name")
     venue = acc.get("venue") or header.get("venue")
+    stadium_data = acc.get("stadium_data") or header.get("stadium_data")
     score_obj = match_page.get("score") or {}
     score_summary = score_obj.get("summary_from_events") or score_obj.get("summary_from_bet365") or ""
     tracker = {
         "event_id": event_id,
         "match_name": match_name,
         "venue": venue,
+        "stadium_data": stadium_data,
         "match_date_utc": acc.get("match_date_utc") or header.get("event_time_utc"),
         "league_id": acc.get("league_id") or header.get("league_id"),
         "league_name": acc.get("league_name") or header.get("league_name"),
@@ -363,6 +381,7 @@ def update_innings_tracker(
         "event_id": event_id,
         "match_name": header.get("match_name"),
         "venue": header.get("venue"),
+        "stadium_data": header.get("stadium_data"),
         "match_date_utc": header.get("event_time_utc"),
         "league_id": header.get("league_id"),
         "league_name": header.get("league_name"),

@@ -394,8 +394,11 @@ def silver_parse_snapshot(
         "time_status": matching_event.get("time_status") or match_from_filter.get("time_status"),
         "score_summary_events": matching_event.get("ss") or event_view_item.get("ss") or match_from_filter.get("raw_item", {}).get("ss"),
         "score_summary_bet365": ev.get("SS"),
-        "venue": event_view_item.get("venue") or event_view_item.get("ve") or matching_event.get("venue") or None,
         "stadium_data": (event_view_item.get("extra") or {}).get("stadium_data"),
+        "venue": (event_view_item.get("venue") or event_view_item.get("ve")
+                  or matching_event.get("venue")
+                  or ((event_view_item.get("extra") or {}).get("stadium_data") or {}).get("name")
+                  or None),
         "home_team_image_id": home.get("image_id"),
         "away_team_image_id": away.get("image_id"),
         "event_time_unix": matching_event.get("time") or match_from_filter.get("event_time_unix"),
@@ -423,6 +426,47 @@ def silver_parse_snapshot(
         r_type = r.get("type")
         if r_type == "TE" and r.get("NA") and (r.get("SC") or r.get("S5")):
             parsed = parse_runs_wickets(r.get("S5"))
+            # Parse batsmen details from S6: "striker_name:runs:balls#non_striker_name:runs:balls"
+            batsmen = []
+            s6 = str(r.get("S6") or "").strip()
+            if s6:
+                for part in s6.split("#"):
+                    bits = part.split(":")
+                    if len(bits) >= 3:
+                        try:
+                            batsmen.append({"name": bits[0], "runs": int(bits[1]), "balls": int(bits[2])})
+                        except (ValueError, IndexError):
+                            pass
+            # Parse current bowler from S7: "Name#over_num#balls#runs#wickets" (bowling team, PI=0)
+            # For batting team (PI=1): "striker_name###" — just the name matters
+            current_bowler = None
+            s7 = str(r.get("S7") or "").strip()
+            pi_val = str(r.get("PI") or "0")
+            if pi_val == "0" and s7:
+                parts_s7 = s7.split("#")
+                if parts_s7[0]:
+                    current_bowler = {
+                        "name": parts_s7[0],
+                        "over_num": parts_s7[1] if len(parts_s7) > 1 else None,
+                        "balls": parts_s7[2] if len(parts_s7) > 2 else None,
+                        "runs": parts_s7[3] if len(parts_s7) > 3 else None,
+                        "wickets": parts_s7[4] if len(parts_s7) > 4 else None,
+                    }
+            # Parse previous over from S8: "over_num#bowler_name#runs#wickets"
+            prev_over = None
+            s8 = str(r.get("S8") or "").strip()
+            if s8:
+                parts_s8 = s8.split("#")
+                if len(parts_s8) >= 4:
+                    try:
+                        prev_over = {
+                            "over_num": int(parts_s8[0]),
+                            "bowler_name": parts_s8[1],
+                            "runs": int(parts_s8[2]),
+                            "wickets": int(parts_s8[3]),
+                        }
+                    except (ValueError, IndexError):
+                        pass
             team_scores.append({
                 "snapshot_id": snapshot_id,
                 "snapshot_time_utc": snapshot_time_utc,
@@ -430,10 +474,14 @@ def silver_parse_snapshot(
                 "fi": fi,
                 "team_or_player_id": str(r.get("ID")) if r.get("ID") is not None else None,
                 "name": r.get("NA"),
+                "pi": pi_val,  # "1"=batting, "0"=fielding
                 "raw_score_text": r.get("SC"),
                 "runs_wickets_raw": r.get("S5"),
                 "runs": parsed["runs"],
                 "wickets": parsed["wickets"],
+                "batsmen": batsmen,          # decoded from S6
+                "current_bowler": current_bowler,  # decoded from S7 (bowling team only)
+                "prev_over": prev_over,      # decoded from S8
                 "s1": r.get("S1"),
                 "s2": r.get("S2"),
                 "s3": r.get("S3"),

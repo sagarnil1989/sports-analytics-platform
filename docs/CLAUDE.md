@@ -28,6 +28,16 @@ All parsing logic below was derived empirically by cross-referencing JSON snapsh
 - **1st innings**: `S3` is empty string `""`
 - **2nd innings**: `S3` has a number value (the target set by 1st innings team)
 
+### Innings-Break Transition Snapshot (known edge case)
+At the moment the 1st innings ends, the feed emits one or more snapshots where:
+- `S3` is now set (target announced) → naive detection assigns `innings=2`
+- `PG` resets to `N=1, B=0` (over=0.0, new innings about to start)
+- But `SS` / team score still shows the **1st innings batting team's total** (e.g. `196/6`)
+
+These are ghost transition snapshots — the 2nd innings has not actually started yet. A genuine 2nd innings snapshot at `over=0.0` **must** have `score=0`.
+
+**Guard:** skip any snapshot where `innings=2 AND over=0.0 AND score>0`. Applied in both `innings_tracker.py → extract_innings_snapshot` and in the explorer notebook.
+
 ---
 
 ## PG Field — Full Parsing Rule
@@ -137,7 +147,48 @@ These fields have never carried meaningful data in observed IPL T20 samples:
 | `EL` | Always `"1"` | Event live flag |
 | `MD` | Always `"1"` | Match day |
 | `SV` | Always `"1"` | Data stream version |
-| `VC` | `"1247"`, `"11206"`, `"21206"` | Changes across matches — possibly volatility or counter, meaning unknown |
+| `VC` | `"1247"`, `"11206"`, `"21206"` | **Venue code** (numeric ID). Not the venue name — name comes from `event_view.extra.stadium_data.name` |
+
+---
+
+## TE Records — Team & Player State
+
+`TE`-type records appear in `api_live_market_stats.json` (the `?stats=1` call). There are two TE records per snapshot — one per team. Confirmed from match `11658818` (LSG vs PBKS, 2026-05-23).
+
+### Key discriminator fields
+| Field | Meaning |
+|---|---|
+| `PI` | `"1"` = this team is currently **batting**, `"0"` = fielding |
+| `OR` | `"0"` = home team, `"1"` = away team |
+| `NA` | Team name |
+| `SC` | Team score string e.g. `" 196/6"` (1st innings batting team) |
+
+### Batting team (PI="1") fields
+| Field | Meaning | Example |
+|---|---|---|
+| `S1` | Striker batsman's runs | `"16"` |
+| `S4` | Non-striker batsman's runs | `"38"` |
+| `S5` | `"runs#wickets"` team score | `"103#3"` |
+| `S6` | `"striker:runs:balls#non_striker:runs:balls"` | `"RR Pant:16:15#JP Inglis:38:25"` |
+| `S7` | `"striker_name###"` — 3 `#` = on-strike marker | `"RR Pant###"` |
+| `S3` | 2nd innings target (mirrors EV.S3) | `"197"` or `"0"` in 1st innings |
+
+### Bowling/fielding team (PI="0") fields
+| Field | Meaning | Example |
+|---|---|---|
+| `S7` | Current bowler: `"Name#over_num#balls#runs#wickets"` | `"P Yadav#2#5#3#4"` |
+| `S8` | Previous over: `"over_num#bowler_name#runs#wickets"` | `"1#M Shami#10#1"` → over 1, Shami, 10 runs, 1 wicket |
+
+### S8 format (previous over) — confirmed
+```
+"1#M Shami#10#1"   → over 1, M Shami bowled it, 10 runs, 1 wicket
+"11#YS Chahal#3#0" → over 11, Chahal bowled it, 3 runs, 0 wickets
+```
+
+### Venue
+The `VC` field in the EV record is a numeric venue code, not the name.
+The actual venue name is in `api_event_view.json` → `results[0].extra.stadium_data.name`.
+Silver now falls back to `stadium_data.name` if `venue`/`ve` fields are absent.
 
 ---
 

@@ -128,6 +128,31 @@ After `pl_backfill` completes, trigger `pl_build_ended_match` manually to run Ac
 | `/cricket-pipeline/discover_cricket_ended` | `infra/7.databricks/notebooks/discover_cricket_ended.py` | `pl_build_ended_match` Activity 3 |
 | `/cricket-pipeline/silver_backfill` | `infra/7.databricks/notebooks/silver_backfill.py` | `pl_backfill` Activity 1 |
 | `/cricket-pipeline/gold_backfill` | `infra/7.databricks/notebooks/gold_backfill.py` | `pl_backfill` Activity 2 |
+| `/cricket-pipeline/ops/bronze_dedup_cleanup` | `infra/7.databricks/notebooks/bronze_dedup_cleanup.py` | Manual (one-time cleanup) |
+| `/cricket-pipeline/analysis/snapshot_timeline` | `infra/7.databricks/notebooks/analysis_snapshot_timeline.py` | Manual (analysis) |
+| `/cricket-pipeline/analysis/bronze_silver_counts` | `infra/7.databricks/notebooks/analysis_bronze_silver_counts.py` | Manual (analysis) |
+| `/cricket-pipeline/analysis/match_data_explorer` | `infra/7.databricks/notebooks/analysis_match_data_explorer.py` | Manual (full match decode: batting/bowling scorecards, line movement, chase analysis, phase breakdown) |
+
+---
+
+## One-Time Operations
+
+### bronze_dedup_cleanup
+
+**Purpose:** Retroactively removes duplicate bronze inplay snapshots caused by a bug in `_payload_hash()` that was hashing the full JSON wrapper (including `called_at_utc`) instead of just the response body. As a result, dedup never fired and every 5-second poll was written to storage.
+
+**Run:** Manually in Databricks. Always run with `dry_run=true` first.
+
+**Widgets:**
+| Widget | Default | Description |
+|---|---|---|
+| `event_id` | *(blank)* | Specific match to clean; blank = all ended matches |
+| `dry_run` | `true` | `true` = report only, no deletes |
+| `max_workers` | `32` | Parallel download/delete threads |
+
+**What it keeps:** First snapshot of each identical hash sequence, plus one snapshot per 5-minute heartbeat window — matching exactly what the fixed live capture would have written.
+
+**Expected reduction:** ~50–70% of existing bronze inplay snapshots for matches captured before the dedup fix.
 
 Python source files shared by notebooks live at `src/functions/cricket_ingestion/` and are uploaded to DBFS at `dbfs:/FileStore/cricket-pipeline/src/` via Terraform (`infra/7.databricks/main.tf`).
 

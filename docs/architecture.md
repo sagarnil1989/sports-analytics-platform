@@ -61,6 +61,18 @@ Cluster startup adds ~2–3 minutes per pipeline run.
 | `gold.py` | `gold_*` index build functions | Databricks via ADF |
 | `views.py` | `view_*` HTTP handlers + `gold_rebuild_ended_matches()` | Function App (HTTP) / Databricks (rebuild) |
 | `function_app.py` | Entry point: 4 bronze timers + HTTP routes | Function App |
+
+### Per-match HTTP routes
+
+| Route | Handler | What it shows |
+|---|---|---|
+| `/api/matches/{event_id}/view` | `view_match_page_html` | Live match state, current markets, odds timeline |
+| `/api/matches/{event_id}/innings-tracker/view` | `view_silver_innings_tracker_html` | Ball-by-ball innings rows from gold tracker |
+| `/api/matches/{event_id}/heatmap` | `view_market_heatmap_html` | Betting market availability heatmap by delivery |
+| `/api/matches/{event_id}/detailed-analysis` | `view_detailed_analysis_html` | Batting/bowling scorecards, over-by-over, phase breakdown (Powerplay/Middle/Death), chase analysis — reads gold tracker + silver team_scores in parallel |
+| `/api/matches/{event_id}/lineage/view` | `view_match_lineage_html` | Data lineage and API call log |
+
+The **Detailed Analysis** page (`view_detailed_analysis_html` in `views.py`) loads the gold tracker (single blob) then fetches silver `team_scores.json` for every snapshot in parallel (64 workers) to decode S6/S7/S8. It runs the same scorecard and phase logic as `analysis_match_data_explorer.py`.
 | `cricwebsite_db.py` | PostgreSQL writer | Function App |
 
 ---

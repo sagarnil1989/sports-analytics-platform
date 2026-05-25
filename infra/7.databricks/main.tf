@@ -116,3 +116,15 @@ resource "databricks_notebook" "analysis_snapshot_timeline" {
   path     = "/cricket-pipeline/analysis/snapshot_timeline"
   language = "PYTHON"
 }
+
+resource "databricks_notebook" "bronze_dedup_cleanup" {
+  source   = "${path.module}/notebooks/bronze_dedup_cleanup.py"
+  path     = "/cricket-pipeline/ops/bronze_dedup_cleanup"
+  language = "PYTHON"
+}
+
+resource "databricks_notebook" "analysis_match_data_explorer" {
+  source   = "${path.module}/notebooks/analysis_match_data_explorer.py"
+  path     = "/cricket-pipeline/analysis/match_data_explorer"
+  language = "PYTHON"
+}
