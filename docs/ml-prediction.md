@@ -185,13 +185,11 @@ Silver now decodes these into structured fields `batsmen[]`, `current_bowler{}`,
 
 ## Build Order
 
-1. **Inspect silver `player_entries.json`** — confirm S-field meanings from a real file
-2. **Extend silver parsing** — decode player stats, write `player_stats.json`
-3. **Extend gold build** — add batsmen/bowler/partnership to `rows[]`
-4. **Feature extraction notebook** — flatten gold `rows[]` into training DataFrame (T20 only)
-5. **Score predictor** — regression, simplest to validate
-6. **Win probability** — uses both innings
-7. **Over/under vs market** — most commercially interesting
+1. ~~**Feature extraction notebook**~~ ✅ `infra/9.ml/notebooks/ml_feature_extraction.py` — deployed, runs as Activity 1 in `pl_ml_retrain`
+2. ~~**Score predictor + Over/Under classifier**~~ ✅ `infra/9.ml/notebooks/ml_model_training.py` — XGBoost, Group K-Fold CV, MLflow, deployed as Activity 2
+3. **Win probability model** — uses both innings; separate model to add next
+4. **Extend gold build** — promote decoded batsmen/bowler fields from silver into gold `rows[]` for richer ML features
+5. **Inference in web page** — load registered MLflow model, score current match state, surface predictions in Detailed Analysis page
 
 ---
 

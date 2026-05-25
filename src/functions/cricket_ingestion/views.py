@@ -506,30 +506,62 @@ def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
         bronze = get_bronze_container_client()
         index = download_required_json(bronze, "cricket/ended/latest/index.json")
         matches = index.get("matches", []) if isinstance(index, dict) else []
-        matches_sorted = sorted(matches, key=lambda m: m.get("event_time_utc") or m.get("event_time_unix") or "", reverse=True)
+
+        # Attach format — index may not have it yet for older entries; fall back to T20
+        for m in matches:
+            if not m.get("format"):
+                m["format"] = "T20"  # all captured so far are IPL T20; update after next pipeline run
+
+        t20_matches  = [m for m in matches if m.get("format") == "T20"]
+        odi_matches  = [m for m in matches if m.get("format") != "T20"]
+
+        def _sort(lst):
+            return sorted(lst, key=lambda m: m.get("event_time_utc") or "", reverse=True)
+
         league_names = sorted({str(m.get("league_name") or "Unknown") for m in matches})
         league_options = '<option value="ALL">All Leagues</option>'
         for ln in league_names:
             league_options += f'<option value="{escape(ln)}">{escape(ln)}</option>'
-        rows = ""
-        for m in matches_sorted:
-            league_name = str(m.get("league_name") or "Unknown")
-            event_id = escape(str(m.get("event_id") or "-"))
-            league_esc = escape(league_name)
-            rows += f"""
-            <tr data-league="{league_esc}">
-                <td>{event_id}</td>
-                <td>{escape(str(m.get("fi") or "-"))}</td>
-                <td>{escape(str(m.get("match_name") or "-"))}</td>
-                <td>{league_esc}</td>
-                <td>{escape(str(m.get("score") or "-"))}</td>
-                <td>{escape(str(m.get("event_time_utc") or "-"))}</td>
-                <td><a href="/api/matches/{event_id}/heatmap">Heatmap</a></td>
-                <td><a href="/api/prematch/{event_id}/view">Open</a></td>
-                <td><a href="/api/matches/{event_id}/innings-tracker/view">Tracker</a></td>
-                <td><a href="/api/matches/{event_id}/detailed-analysis">Analysis</a></td>
-            </tr>
-            """
+
+        def _rows_html(match_list, fmt):
+            html = ""
+            for m in match_list:
+                league_name = str(m.get("league_name") or "Unknown")
+                event_id    = escape(str(m.get("event_id") or "-"))
+                league_esc  = escape(league_name)
+                fmt_esc     = escape(fmt)
+                badge_cls   = "badge-t20" if fmt == "T20" else "badge-odi"
+                html += f"""
+                <tr data-league="{league_esc}" data-format="{fmt_esc}">
+                    <td>{event_id}</td>
+                    <td>{escape(str(m.get("fi") or "-"))}</td>
+                    <td>{escape(str(m.get("match_name") or "-"))}</td>
+                    <td>{league_esc}</td>
+                    <td><span class="{badge_cls}">{fmt_esc}</span></td>
+                    <td>{escape(str(m.get("score") or "-"))}</td>
+                    <td>{escape(str(m.get("event_time_utc") or "-"))}</td>
+                    <td><a href="/api/matches/{event_id}/heatmap">Heatmap</a></td>
+                    <td><a href="/api/prematch/{event_id}/view">Open</a></td>
+                    <td><a href="/api/matches/{event_id}/innings-tracker/view">Tracker</a></td>
+                    <td><a href="/api/matches/{event_id}/detailed-analysis">Analysis</a></td>
+                </tr>
+                """
+            return html
+
+        t20_count = len(t20_matches)
+        odi_count = len(odi_matches)
+        total     = len(matches)
+        odi_tab_btn = (f'<button class="tab" onclick="filterFormat(\'ODI\', this)">ODI ({odi_count})</button>'
+                       if odi_count else "")
+
+        rows_html = ""
+        if t20_matches:
+            rows_html += f'<tr class="format-header" data-format-header="T20"><td colspan="11">T20 — {t20_count} matches</td></tr>'
+            rows_html += _rows_html(_sort(t20_matches), "T20")
+        if odi_matches:
+            rows_html += f'<tr class="format-header" data-format-header="ODI"><td colspan="11">ODI — {odi_count} matches</td></tr>'
+            rows_html += _rows_html(_sort(odi_matches), "ODI")
+
         html = f"""
         <!DOCTYPE html>
         <html>
@@ -537,31 +569,76 @@ def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
             <title>Ended Cricket Matches</title>
             <style>
                 body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
-                .hint {{ color: #666; margin-bottom: 16px; }}
-                .filter-bar {{ margin-bottom: 16px; display: flex; align-items: center; gap: 12px; }}
+                .hint {{ color: #666; margin-bottom: 16px; font-size: 13px; }}
+                .filter-bar {{ margin-bottom: 16px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }}
                 select {{ padding: 8px 12px; font-size: 14px; border: 1px solid #ccc; border-radius: 6px; }}
+                .tab-bar {{ display: flex; gap: 8px; margin-bottom: 16px; }}
+                .tab {{ padding: 7px 18px; border-radius: 20px; border: 1px solid #ccc; background: #fff;
+                        cursor: pointer; font-size: 14px; font-weight: 600; color: #444; }}
+                .tab.active {{ background: #1e293b; color: #fff; border-color: #1e293b; }}
                 table {{ width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 8px #ddd; }}
-                th, td {{ padding: 10px; border-bottom: 1px solid #ddd; text-align: left; font-size: 14px; }}
-                th {{ background: #222; color: white; position: sticky; top: 0; }}
-                a {{ color: #0066cc; font-weight: bold; text-decoration: none; }}
+                th, td {{ padding: 9px 10px; border-bottom: 1px solid #eee; text-align: left; font-size: 13px; }}
+                th {{ background: #1e293b; color: white; position: sticky; top: 0; font-size: 12px; }}
+                tr:hover td {{ background: #f8faff; }}
+                .format-header td {{ background: #f0f4ff; color: #1e3a8a; font-weight: 700;
+                                     font-size: 13px; padding: 8px 10px; border-top: 2px solid #c7d7f5; }}
+                .badge-t20 {{ background: #dbeafe; color: #1d4ed8; padding: 2px 8px;
+                              border-radius: 10px; font-size: 11px; font-weight: 700; }}
+                .badge-odi {{ background: #dcfce7; color: #15803d; padding: 2px 8px;
+                              border-radius: 10px; font-size: 11px; font-weight: 700; }}
+                a {{ color: #2563eb; font-weight: 600; text-decoration: none; }}
+                a:hover {{ text-decoration: underline; }}
             </style>
         </head>
         <body>
-            <h1>Ended Cricket Matches ({index.get('ended_match_count', len(matches))})</h1>
-            <p class="hint">This page reads a small pre-built gold index file, so it should load quickly.</p>
+            <h1>Ended Cricket Matches</h1>
+            <p class="hint">
+                {total} total &nbsp;·&nbsp;
+                <b>{t20_count} T20</b> &nbsp;·&nbsp;
+                <b>{odi_count} ODI</b>
+            </p>
+
+            <div class="tab-bar">
+                <button class="tab active" onclick="filterFormat('ALL', this)">All ({total})</button>
+                <button class="tab" onclick="filterFormat('T20', this)">T20 ({t20_count})</button>
+                {odi_tab_btn}
+            </div>
+
             <div class="filter-bar">
                 <label><b>League:</b></label>
-                <select id="leagueFilter" onchange="filterLeague()">{league_options}</select>
+                <select id="leagueFilter" onchange="applyFilters()">{league_options}</select>
             </div>
+
             <table>
-                <thead><tr><th>Event ID</th><th>Bet365 FI</th><th>Match</th><th>League</th><th>Final Score</th><th>Start Time</th><th>Heatmap</th><th>Prematch Odds</th><th>Innings Tracker</th><th>Analysis</th></tr></thead>
-                <tbody>{rows}</tbody>
+                <thead><tr>
+                    <th>Event ID</th><th>Bet365 FI</th><th>Match</th><th>League</th>
+                    <th>Format</th><th>Final Score</th><th>Date</th>
+                    <th>Heatmap</th><th>Prematch</th><th>Tracker</th><th>Analysis</th>
+                </tr></thead>
+                <tbody id="matchTable">{rows_html}</tbody>
             </table>
+
             <script>
-                function filterLeague() {{
-                    const sel = document.getElementById("leagueFilter").value;
-                    document.querySelectorAll("tr[data-league]").forEach(r => {{
-                        r.style.display = sel === "ALL" || r.dataset.league === sel ? "" : "none";
+                var activeFormat = 'ALL';
+                function filterFormat(fmt, btn) {{
+                    activeFormat = fmt;
+                    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                    btn.classList.add('active');
+                    applyFilters();
+                }}
+                function applyFilters() {{
+                    var league = document.getElementById('leagueFilter').value;
+                    document.querySelectorAll('tr[data-format]').forEach(function(r) {{
+                        var fmtOk    = activeFormat === 'ALL' || r.dataset.format === activeFormat;
+                        var leagueOk = league === 'ALL' || r.dataset.league === league;
+                        r.style.display = (fmtOk && leagueOk) ? '' : 'none';
+                    }});
+                    // Show/hide format-header rows based on whether any visible rows follow
+                    document.querySelectorAll('tr[data-format-header]').forEach(function(hdr) {{
+                        var fmt = hdr.dataset.formatHeader;
+                        var hasSibling = Array.from(document.querySelectorAll('tr[data-format="' + fmt + '"]'))
+                                              .some(r => r.style.display !== 'none');
+                        hdr.style.display = hasSibling ? '' : 'none';
                     }});
                 }}
             </script>
@@ -3367,8 +3444,214 @@ def view_home(req: func.HttpRequest) -> func.HttpResponse:
         <div class="card"><a href="/api/prematch/leagues/view">Prematch Leagues</a><p>Upcoming matches grouped by leagues</p></div>
         <div class="card"><a href="/api/ended/view">Ended Matches</a><p>Recently finished matches with final results</p></div>
         <div class="card"><a href="/api/innings-tracker">Innings Tracker Analytics</a><p>Over/Under prediction accuracy by over stage, team, venue and odds</p></div>
+        <div class="card"><a href="/api/ml/win-predictor">ML Win Predictor</a><p>Machine learning model performance, feature importances and algorithm comparison</p></div>
         <div class="card"><a href="/api/mgmt/leagues/view">League Filter</a><p>Select which leagues to capture — excluded leagues skip bronze, silver and gold entirely</p></div>
     </body>
     </html>
     """
+    return func.HttpResponse(html, mimetype="text/html")
+
+
+def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
+    conn_str = os.environ["DATA_STORAGE_CONNECTION_STRING"]
+    from azure.storage.blob import BlobServiceClient
+    gold = BlobServiceClient.from_connection_string(conn_str).get_container_client("gold")
+
+    try:
+        raw = gold.get_blob_client("cricket/ml_features/t20/win_predictor_summary.json").download_blob().readall()
+        summary = json.loads(raw)
+    except Exception:
+        summary = None
+
+    def _pct_bar(pct):
+        w = min(int(pct * 3), 100)
+        return f'<div style="background:#0066cc;height:10px;width:{w}px;border-radius:3px;display:inline-block;vertical-align:middle;margin-left:8px"></div>'
+
+    def _acc_color(v):
+        if v is None: return "#999"
+        if v >= 0.70: return "#2d7a2d"
+        if v >= 0.60: return "#cc7700"
+        return "#cc2200"
+
+    if summary is None:
+        body = "<p style='color:#c00'>No model results found. Run the win predictor notebook in Databricks first.</p>"
+    else:
+        trained_at  = summary.get("generated_at_utc", "unknown")
+        train_n     = summary.get("train_matches", "?")
+        test_n      = summary.get("test_matches",  "?")
+        cutoff      = summary.get("train_cutoff",  "?")
+        algos_now   = ", ".join(summary.get("algorithms", {}).get("current", []))
+        algos_future= summary.get("algorithms", {}).get("future", [""])[0]
+
+        # ── header stats ──────────────────────────────────────────
+        body = f"""
+        <div class="meta-grid">
+            <div class="meta-box"><div class="meta-label">Last trained</div><div class="meta-val">{escape(trained_at)}</div></div>
+            <div class="meta-box"><div class="meta-label">Training matches</div><div class="meta-val">{train_n}</div></div>
+            <div class="meta-box"><div class="meta-label">Test matches</div><div class="meta-val">{test_n}</div></div>
+            <div class="meta-box"><div class="meta-label">Train / test split date</div><div class="meta-val">{escape(cutoff)}</div></div>
+        </div>
+        <div class="algo-note">
+            <strong>Current algorithms:</strong> {escape(algos_now)}<br>
+            <strong>Future (≥500 matches):</strong> {escape(algos_future)}
+        </div>
+        """
+
+        # ── model comparison table ────────────────────────────────
+        body += """
+        <h2>Model Comparison</h2>
+        <table class="cmp-table">
+            <thead><tr>
+                <th>Model</th>
+                <th>What it knows</th>
+                <th>XGB Accuracy</th>
+                <th>XGB ROC-AUC</th>
+                <th>RF Accuracy</th>
+                <th>RF ROC-AUC</th>
+                <th>Features used</th>
+            </tr></thead>
+            <tbody>
+        """
+        descriptions = {
+            "innings1-only":  "Full innings 1 complete — chase not yet started",
+            "innings2-2over": "Innings 1 + first 2 overs of chase",
+            "innings2-6over": "Innings 1 + full powerplay of chase (6 overs)",
+        }
+        for m in summary.get("models", []):
+            name  = m.get("name", "")
+            desc  = descriptions.get(name, "")
+            xgb   = m.get("xgb", {})
+            rf    = m.get("rf",  {})
+            xacc  = xgb.get("accuracy"); xauc = xgb.get("roc_auc")
+            racc  = rf.get("accuracy");  rauc = rf.get("roc_auc")
+            nfeat = m.get("feature_count", "?")
+            body += f"""
+            <tr>
+                <td><strong>{escape(name)}</strong></td>
+                <td style="color:#555;font-size:13px">{escape(desc)}</td>
+                <td style="color:{_acc_color(xacc)};font-weight:bold">{f"{xacc:.1%}" if xacc else "—"}</td>
+                <td>{f"{xauc:.3f}" if xauc else "—"}</td>
+                <td style="color:{_acc_color(racc)};font-weight:bold">{f"{racc:.1%}" if racc else "—"}</td>
+                <td>{f"{rauc:.3f}" if rauc else "—"}</td>
+                <td style="text-align:center">{nfeat}</td>
+            </tr>"""
+        body += "</tbody></table>"
+        body += """
+        <p class="hint">Accuracy colour: <span style="color:#2d7a2d">■ ≥70%</span>
+        &nbsp;<span style="color:#cc7700">■ 60–70%</span>
+        &nbsp;<span style="color:#cc2200">■ &lt;60%</span>
+        &nbsp;— with small datasets near-random is expected; improves with more matches.</p>
+        """
+
+        # ── feature importance per model ──────────────────────────
+        body += "<h2>Feature Importances (XGBoost)</h2>"
+        body += "<p style='color:#555;margin-bottom:20px'>Only features the model actually used after pruning are shown. Features with zero importance were automatically dropped before retraining.</p>"
+
+        for m in summary.get("models", []):
+            name = m.get("name", "")
+            fi   = m.get("feature_importance", [])
+            if not fi:
+                body += f"<h3>{escape(name)}</h3><p style='color:#999'>No importance data yet.</p>"
+                continue
+
+            body += f"<h3>{escape(name)} <span style='font-weight:normal;color:#888;font-size:14px'>({len(fi)} features)</span></h3>"
+            body += """<table class="fi-table"><thead>
+                <tr><th>Rank</th><th>Feature</th><th>% of total</th><th></th></tr>
+            </thead><tbody>"""
+            for row in fi:
+                rank = row.get("rank", "")
+                feat = row.get("feature", "")
+                pct  = row.get("pct_of_total", 0)
+                bar  = _pct_bar(pct)
+
+                # colour-code feature groups
+                if "_bat_odds" in feat or "_bowl_odds" in feat or "odds_swing" in feat:
+                    fc = "#0055aa"   # odds — blue
+                elif "_rp_wkt" in feat or "_pressure" in feat:
+                    fc = "#6600aa"   # composite — purple
+                elif "bat_team" in feat or "bowl_team" in feat or "venue" in feat:
+                    fc = "#007755"   # categorical — green
+                else:
+                    fc = "#333"      # raw runs/wickets — default
+
+                body += f"""<tr>
+                    <td style="color:#999;text-align:center">{rank}</td>
+                    <td style="font-family:monospace;color:{fc}">{escape(str(feat))}</td>
+                    <td style="text-align:right;font-weight:bold">{pct:.2f}%</td>
+                    <td>{bar}</td>
+                </tr>"""
+            body += "</tbody></table><br>"
+
+        # ── LSTM status ───────────────────────────────────────────
+        lstm_threshold = 500
+        lstm_ready = train_n != "?" and int(train_n) >= lstm_threshold
+        lstm_color = "#2d7a2d" if lstm_ready else "#cc7700"
+        lstm_icon  = "✓" if lstm_ready else "✗"
+        lstm_msg   = (
+            "LSTM threshold reached — uncomment Step 12 in the win predictor notebook."
+            if lstm_ready else
+            f"LSTM not yet active. Have {train_n} training matches, need {lstm_threshold}. "
+            f"Continue collecting data — XGBoost and Random Forest are the right tools for now."
+        )
+        body += f"""
+        <h2>LSTM Status</h2>
+        <div class="lstm-box" style="border-left:4px solid {lstm_color}">
+            <span style="color:{lstm_color};font-size:20px;font-weight:bold">{lstm_icon}</span>
+            &nbsp; {escape(lstm_msg)}
+        </div>
+        """
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>ML Win Predictor</title>
+    <meta charset="utf-8">
+    <style>
+        body {{ font-family: Arial, sans-serif; background:#f5f5f5; margin:0; padding:30px; }}
+        h1 {{ margin-bottom:6px; }}
+        h2 {{ margin-top:36px; margin-bottom:12px; border-bottom:2px solid #ddd; padding-bottom:6px; }}
+        h3 {{ margin-top:24px; margin-bottom:8px; color:#333; }}
+        .meta-grid {{ display:flex; gap:16px; flex-wrap:wrap; margin:20px 0; }}
+        .meta-box {{ background:white; padding:16px 20px; border-radius:8px;
+                     box-shadow:0 1px 4px #ccc; min-width:160px; }}
+        .meta-label {{ font-size:12px; color:#888; margin-bottom:4px; }}
+        .meta-val {{ font-size:16px; font-weight:bold; color:#222; }}
+        .algo-note {{ background:#fff8e1; border-left:4px solid #f0a000;
+                      padding:12px 16px; border-radius:4px; margin-bottom:24px;
+                      font-size:14px; color:#555; }}
+        .cmp-table {{ border-collapse:collapse; width:100%; background:white;
+                      border-radius:8px; overflow:hidden; box-shadow:0 1px 4px #ccc;
+                      margin-bottom:12px; }}
+        .cmp-table th {{ background:#333; color:white; padding:10px 14px;
+                         text-align:left; font-size:13px; }}
+        .cmp-table td {{ padding:10px 14px; border-bottom:1px solid #eee; font-size:14px; }}
+        .cmp-table tr:last-child td {{ border-bottom:none; }}
+        .cmp-table tr:hover td {{ background:#f9f9f9; }}
+        .hint {{ color:#777; font-size:13px; margin-top:6px; }}
+        .fi-table {{ border-collapse:collapse; width:100%; background:white;
+                     border-radius:8px; overflow:hidden; box-shadow:0 1px 4px #ccc; }}
+        .fi-table th {{ background:#f0f0f0; color:#444; padding:8px 12px;
+                        text-align:left; font-size:12px; font-weight:600; }}
+        .fi-table td {{ padding:7px 12px; border-bottom:1px solid #f3f3f3; font-size:13px; }}
+        .fi-table tr:last-child td {{ border-bottom:none; }}
+        .fi-table tr:hover td {{ background:#fafafa; }}
+        .lstm-box {{ background:white; padding:16px 20px; border-radius:8px;
+                     box-shadow:0 1px 4px #ccc; font-size:14px; color:#444; }}
+        nav {{ margin-bottom:24px; font-size:14px; }}
+        nav a {{ color:#0066cc; text-decoration:none; margin-right:16px; }}
+        nav a:hover {{ text-decoration:underline; }}
+    </style>
+</head>
+<body>
+    <nav>
+        <a href="/api/home">Home</a>
+        <a href="/api/ended/view">Ended Matches</a>
+        <a href="/api/innings-tracker">Innings Tracker</a>
+        <a href="/api/ml/win-predictor">ML Win Predictor</a>
+    </nav>
+    <h1>ML Win Predictor</h1>
+    <p style="color:#666">T20 match outcome prediction — three models trained with progressively more match information</p>
+    {body}
+</body>
+</html>"""
     return func.HttpResponse(html, mimetype="text/html")

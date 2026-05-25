@@ -158,9 +158,36 @@ Python source files shared by notebooks live at `src/functions/cricket_ingestion
 
 ---
 
+## ML Pipeline — pl_ml_retrain
+
+**Schedule:** Weekly Sunday 03:00 UTC via `trigger_ml_retrain`.
+
+Two sequential activities — each depends on the previous succeeding.
+
+#### Activity 1 — RunMLFeatureExtraction
+
+Reads all ended-match `innings_1_from_silver.json` files from gold in parallel. Filters to T20 (max over 15–20). Flattens `rows[]` into one row per snapshot with engineered features. Excludes "push" outcomes.
+
+**Writes:** `gold/cricket/ml_features/t20/features.parquet`
+
+#### Activity 2 — RunMLModelTraining
+*(only runs if Activity 1 succeeds)*
+
+Loads the Parquet. Trains two XGBoost models using Group K-Fold CV (grouped by `event_id` to prevent data leakage):
+- **Score predictor** (XGBoostRegressor) — predicts 1st innings final score from state at any over
+- **Over/Under classifier** (XGBoostClassifier) — predicts whether actual score exceeds bookmaker's line
+
+Logs experiments and registers both models in MLflow Model Registry.
+
+**Reads:** `gold/cricket/ml_features/t20/features.parquet`  
+**Writes:** `gold/cricket/ml_features/t20/model_accuracy.json` + MLflow Model Registry entries
+
+---
+
 ## Terraform Modules
 
 | Module | What it manages |
 |---|---|
 | `infra/7.databricks/` | Databricks workspace, secret scope, DBFS source files, notebook resources |
 | `infra/8.adf-config/` | ADF Key Vault linked service, Databricks linked service, pipelines, schedule triggers |
+| `infra/9.ml/` | ML notebooks in Databricks (`/cricket-pipeline/ml/`), ADF `pl_ml_retrain` pipeline, weekly trigger |

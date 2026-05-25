@@ -38,6 +38,7 @@ from views import (
     view_admin_leagues,
     view_admin_league_toggle,
     view_home,
+    view_ml_win_predictor_html,
 )
 
 app = func.FunctionApp()
@@ -265,3 +266,8 @@ def get_home(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def root(req: func.HttpRequest) -> func.HttpResponse:
     return view_home(req)
+
+
+@app.route(route="ml/win-predictor", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
+    return view_ml_win_predictor_html(req)

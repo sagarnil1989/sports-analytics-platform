@@ -141,6 +141,15 @@ for eid, tracker_blob_name in silver_eids.items():
             score = f"{p[1].strip()},{p[0].strip()}"
         match_name = f"{away_name} vs {home_name}"
 
+    # Detect format from the highest over seen across all rows
+    max_over = 0
+    for r in rows:
+        try:
+            max_over = max(max_over, int(str(r.get("over") or "0").split(".")[0]))
+        except Exception:
+            pass
+    match_format = "T20" if max_over <= 20 else "ODI"
+
     matches.append({
         "event_id":       eid,
         "fi":             fi,
@@ -152,6 +161,7 @@ for eid, tracker_blob_name in silver_eids.items():
         "score":          score,
         "event_time_utc": tracker.get("match_date_utc"),
         "time_status":    "3",
+        "format":         match_format,
     })
 
 matches.sort(key=lambda m: str(m.get("event_time_utc") or ""), reverse=True)
