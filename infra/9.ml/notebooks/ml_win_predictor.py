@@ -185,7 +185,44 @@ def chase_aggregate(inn_rows, inn1_score, over_target):
         "runs_needed": runs_needed,
     }
 
-def match_label(rows):
+def parse_score_summary(tracker, inn1_bat_team):
+    """
+    Parse the authoritative final scores from the tracker's score_summary field.
+    This is the same source used by the ended/view page — set from the Bet365
+    events API, not from snapshot rows. Format after normalisation: "inn1,inn2"
+    where each part is "runs/wickets" e.g. "196/4,87/10".
+
+    Returns (inn1_runs, inn2_runs) or (None, None) if unparseable.
+    """
+    raw = (tracker.get("score_summary_events")
+           or tracker.get("score_summary_bet365")
+           or tracker.get("score_summary") or "")
+    raw = raw.replace("-", ",").strip()
+    if not raw or "," not in raw:
+        return None, None
+    parts = raw.split(",", 1)
+    # discover_cricket_ended swaps parts when away team batted first —
+    # replicate that logic so inn1 always means the team that batted first
+    home = str(tracker.get("home_team_name") or "").strip()
+    away = str(tracker.get("away_team_name") or "").strip()
+    if inn1_bat_team and away and inn1_bat_team == away:
+        parts = [parts[1].strip(), parts[0].strip()]
+    try:
+        inn1_runs = int(parts[0].split("/")[0].strip())
+        inn2_runs = int(parts[1].split("/")[0].strip())
+        return inn1_runs, inn2_runs
+    except Exception:
+        return None, None
+
+def match_label(tracker, inn1_bat_team, rows):
+    """
+    Authoritative win label derived from score_summary (same source as ended/view).
+    Falls back to rows[-1] comparison only if score_summary is absent.
+    """
+    inn1_runs, inn2_runs = parse_score_summary(tracker, inn1_bat_team)
+    if inn1_runs is not None and inn2_runs is not None:
+        return 1 if inn2_runs > inn1_runs else 0
+    # fallback: last snapshot row
     inn1 = [r for r in rows if r.get("innings") == 1]
     inn2 = [r for r in rows if r.get("innings") == 2]
     if not inn1 or not inn2:
@@ -208,10 +245,6 @@ for t in t20_trackers:
     league     = str(t.get("league_name") or "")
     venue      = str(t.get("venue") or t.get("stadium") or league or "unknown").strip() or "unknown"
 
-    label = match_label(rows)
-    if label is None:
-        skipped += 1; continue
-
     inn1_rows = [r for r in rows if r.get("innings") == 1]
     inn2_rows = [r for r in rows if r.get("innings") == 2]
     if not inn1_rows or not inn2_rows:
@@ -221,13 +254,19 @@ for t in t20_trackers:
     for r in inn1_rows:
         if r.get("batting_team"):
             inn1_bat_team = str(r["batting_team"]).strip(); break
+
+    label = match_label(t, inn1_bat_team, rows)
+    if label is None:
+        skipped += 1; continue
     home = str(t.get("home_team_name") or "").strip()
     away = str(t.get("away_team_name") or "").strip()
     inn1_bowl_team = away if inn1_bat_team == home else home
 
-    # Final innings 1 state
+    # Authoritative final scores from score_summary (same source as ended/view page)
+    # Falls back to last snapshot row if summary is missing
+    auth_inn1, auth_inn2 = parse_score_summary(t, inn1_bat_team)
     inn1_final         = inn1_rows[-1]
-    inn1_total_score   = inn1_final.get("score")   or 0
+    inn1_total_score   = auth_inn1 if auth_inn1 is not None else (inn1_final.get("score") or 0)
     inn1_total_wickets = inn1_final.get("wickets") or 0
 
     # Phase state snapshots for composite features

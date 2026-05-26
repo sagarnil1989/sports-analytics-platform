@@ -126,6 +126,21 @@ hard date split:
 This means the test set is genuinely unseen future matches — a stricter test than
 cross-validation.
 
+### Authoritative final score source
+
+The win predictor reads final scores from the tracker's `score_summary_events` /
+`score_summary_bet365` / `score_summary` field — the same source the ended/view
+page uses. This comes from the Bet365 events API and reflects the actual final score,
+not the last snapshot captured by the pipeline.
+
+If that field is missing, it falls back to the last snapshot row. This means:
+- A match that finished 203 will always be recorded as 203, even if the last
+  snapshot fired at 201
+- The win/loss label is derived from the same authoritative scores, not snapshot rows
+
+If a match shows `inn1_total_score = 0`, the gold tracker for that match has
+incomplete data and `pl_build_ended_match` should be re-run for that event ID.
+
 ### Features used
 
 Every model uses:
