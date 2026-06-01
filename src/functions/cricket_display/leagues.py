@@ -1,0 +1,128 @@
+from typing import Any, Dict, List, Optional
+
+from storage import download_json, get_named_container_client, get_bronze_container_client, upload_json, utc_now
+
+
+_LEAGUE_PREFS_PATH = "cricket/config/league_preferences.json"
+_BLOCKED_EVENTS_PATH = "cricket/config/blocked_event_ids.json"
+
+
+def load_allowed_league_ids() -> set:
+    """Return set of league_id strings explicitly allowed for capture.
+
+    Opt-in model: any league NOT in this set is skipped at bronze capture time.
+    An empty set means no leagues are allowed yet.
+    """
+    gold = get_named_container_client("gold")
+    prefs = download_json(gold, _LEAGUE_PREFS_PATH) or {}
+    return set(str(lid) for lid in prefs.get("allowed_league_ids", []))
+
+
+def load_excluded_league_ids() -> set:
+    """Legacy — kept so ended/prematch index builders can still use it.
+    Returns an empty set (nothing explicitly excluded; opt-in now controls capture).
+    """
+    return set()
+
+
+def save_league_preferences(allowed_ids: set) -> None:
+    gold = get_named_container_client("gold")
+    upload_json(
+        gold,
+        _LEAGUE_PREFS_PATH,
+        {"allowed_league_ids": sorted(allowed_ids), "updated_at_utc": utc_now().isoformat()},
+        overwrite=True,
+    )
+
+
+def load_blocked_event_ids() -> set:
+    """Return a set of event_id strings permanently blocked from the ended index."""
+    gold = get_named_container_client("gold")
+    data = download_json(gold, _BLOCKED_EVENTS_PATH) or {}
+    return set(str(eid) for eid in data.get("blocked_event_ids", []))
+
+
+def block_event_ids(event_ids: set) -> None:
+    """Add event_ids to the permanent block list."""
+    gold = get_named_container_client("gold")
+    existing = load_blocked_event_ids()
+    merged = existing | {str(e) for e in event_ids}
+    upload_json(
+        gold,
+        _BLOCKED_EVENTS_PATH,
+        {"blocked_event_ids": sorted(merged), "updated_at_utc": utc_now().isoformat()},
+        overwrite=True,
+    )
+
+
+def collect_known_leagues() -> List[Dict[str, Any]]:
+    """Gather all leagues seen across live, prematch, ended, league, innings-tracker, and upcoming indexes."""
+    gold = get_named_container_client("gold")
+    bronze = get_bronze_container_client()
+    leagues: Dict[str, Dict[str, Any]] = {}
+
+    def _date10(val: Any) -> Optional[str]:
+        """Extract YYYY-MM-DD from an ISO datetime string, or return None."""
+        s = str(val or "").strip()
+        return s[:10] if len(s) >= 10 and s[4] == "-" else None
+
+    def merge(lid: Optional[str], lname: Optional[str], source: str, event_date: Optional[str] = None) -> None:
+        lid = str(lid or "").strip()
+        if not lid:
+            return
+        if lid not in leagues:
+            leagues[lid] = {"league_id": lid, "league_name": lname or lid, "sources": [], "first_match_date": None, "last_match_date": None}
+        if source not in leagues[lid]["sources"]:
+            leagues[lid]["sources"].append(source)
+        if lname and lname != lid and not leagues[lid].get("league_name"):
+            leagues[lid]["league_name"] = lname
+        if event_date:
+            cur_first = leagues[lid]["first_match_date"]
+            cur_last  = leagues[lid]["last_match_date"]
+            if cur_first is None or event_date < cur_first:
+                leagues[lid]["first_match_date"] = event_date
+            if cur_last is None or event_date > cur_last:
+                leagues[lid]["last_match_date"] = event_date
+
+    for idx_path, source in [
+        ("cricket/matches/latest/index.json", "live"),
+        ("cricket/prematch/latest/index.json", "prematch"),
+        ("cricket/ended/latest/index.json", "ended"),
+    ]:
+        try:
+            idx = download_json(gold, idx_path) or {}
+            for m in (idx.get("matches") or []):
+                merge(m.get("league_id"), m.get("league_name"), source, _date10(m.get("event_time_utc")))
+        except Exception:
+            pass
+
+    for idx_path, source in [
+        ("cricket/leagues/index.json", "live_leagues"),
+        ("cricket/prematch/leagues/index.json", "prematch_leagues"),
+    ]:
+        try:
+            idx = download_json(gold, idx_path) or {}
+            for lg in (idx.get("leagues") or []):
+                merge(lg.get("league_id"), lg.get("league_name"), source)
+        except Exception:
+            pass
+
+    try:
+        tracker_idx = download_json(gold, "cricket/innings_tracker/index.json") or {}
+        for m in (tracker_idx.get("matches") or []):
+            merge(m.get("league_id"), m.get("league_name"), "innings_tracker",
+                  _date10(m.get("match_date_utc") or m.get("event_time_utc")))
+    except Exception:
+        pass
+
+    # Upcoming matches from BetsAPI — leagues here may never have been captured yet.
+    # Surfacing them lets operators discover and enable new leagues before they go live.
+    try:
+        upcoming = download_json(bronze, "betsapi/control/upcoming_cricket/latest.json") or {}
+        for m in (upcoming.get("upcoming_matches") or []):
+            merge(m.get("league_id"), m.get("league_name"), "upcoming",
+                  _date10(m.get("event_time_utc")))
+    except Exception:
+        pass
+
+    return sorted(leagues.values(), key=lambda x: x.get("league_name") or "")

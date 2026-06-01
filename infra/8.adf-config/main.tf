@@ -75,6 +75,11 @@ resource "azurerm_data_factory_linked_service_azure_databricks" "main" {
 #   Rebuilds innings_1_from_silver.json from silver. No bronze access.
 # Activity 3: discover_cricket_ended notebook (depends on Activity 2 success)
 #   Scans gold tracker files and writes the ended index to bronze.
+# Activity 4a: hypothesis_inn2_over6 notebook (depends on Activity 3 success)
+#   Scans silver for inn2 over-6 odds favourites, writes gold hypothesis JSON.
+# Activity 4b: hypothesis_timeout_wicket notebook (depends on Activity 3 success)
+#   Detects strategic timeouts and checks for wickets, writes gold hypothesis JSON.
+#   Runs in parallel with 4a.
 #
 # Schedule: daily at 02:00 CET (01:00 UTC)
 # ---------------------------------------------------------------------------
@@ -137,6 +142,46 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
       }
       typeProperties = {
         notebookPath = "/cricket-pipeline/discover_cricket_ended"
+      }
+    },
+    {
+      name = "RunHypothesisInn2Over6"
+      type = "DatabricksNotebook"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      dependsOn = [
+        {
+          activity             = "RunDiscoverCricketEnded"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/hypothesis/inn2_over6"
+      }
+    },
+    {
+      name = "RunHypothesisTimeoutWicket"
+      type = "DatabricksNotebook"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      dependsOn = [
+        {
+          activity             = "RunDiscoverCricketEnded"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/hypothesis/timeout_wicket"
       }
     }
   ])

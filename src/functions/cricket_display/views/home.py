@@ -1,0 +1,51 @@
+from ._common import (
+    json, logging, os, escape, Any, Dict, List, Optional,
+    func, ResourceNotFoundError,
+    call_betsapi, download_json, download_required_json, format_unix_ts,
+    get_bronze_container_client, get_named_container_client, safe_float, upload_json, utc_now,
+    extract_bet365_current_markets,
+    collect_known_leagues, load_allowed_league_ids, save_league_preferences,
+    extract_innings_snapshot,
+    build_simple_table_page,
+)
+
+
+def view_home(req: func.HttpRequest) -> func.HttpResponse:
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Cricket Data Platform</title>
+        <style>
+            body { font-family: Arial; background:#f7f7f7; padding:40px; }
+            h1 { margin-bottom:10px; }
+            .card { background:white; padding:20px; margin:15px 0; border-radius:10px; box-shadow:0 2px 8px #ddd; }
+            a { font-size:18px; font-weight:bold; color:#0066cc; text-decoration:none; }
+            p { margin:8px 0 0; color:#555; }
+        </style>
+    </head>
+    <body>
+        <h1>🏏 Cricket Analytics Platform</h1>
+        <p>Browse live, upcoming and historical betting data</p>
+        <div class="card"><a href="/api/matches/view">Live Matches</a><p>Real-time matches with live odds and Bet365 markets</p></div>
+        <div class="card"><a href="/api/prematch/view">Upcoming Matches</a><p>Prematch odds and markets before the game starts</p></div>
+        <div class="card"><a href="/api/leagues/view">Leagues</a><p>Browse matches grouped by leagues</p></div>
+        <div class="card"><a href="/api/prematch/leagues/view">Prematch Leagues</a><p>Upcoming matches grouped by leagues</p></div>
+        <div class="card"><a href="/api/ended/view">Ended Matches</a><p>Recently finished matches with final results</p></div>
+        <div class="card"><a href="/api/innings-tracker">Innings Tracker Analytics</a><p>Over/Under prediction accuracy by over stage, team, venue and odds</p></div>
+        <h2 style="margin:24px 0 4px; color:#333;">T20</h2>
+        <h3 style="margin:16px 0 4px; color:#555; font-size:15px; text-transform:uppercase; letter-spacing:1px;">Model</h3>
+        <div class="card"><a href="/api/ml/win-predictor">ML Win Predictor</a><p>Model performance, feature importances and algorithm comparison across all three prediction windows</p></div>
+        <div class="card"><a href="/api/ml/feature-matrix">ML Feature Matrix</a><p>All matches × all features in one table — train/test split highlighted, selected features marked per model</p></div>
+        <div class="card"><a href="/api/ml/score-predictor">Inn1 Score Predictor</a><p>Predicts final innings-1 score at over 6, 10 and 16 — MAE, RMSE, R² and per-match test predictions</p></div>
+        <div class="card"><a href="/api/ml/score-matrix">Score Feature Matrix</a><p>All matches × score-predictor features — three cutoff tabs (over 6 / 10 / 16), train/test highlighted</p></div>
+        <div class="card"><a href="/api/mgmt/leagues/view">League Filter</a><p>Select which leagues to capture — excluded leagues skip bronze, silver and gold entirely</p></div>
+        <h3 style="margin:20px 0 4px; color:#555; font-size:15px; text-transform:uppercase; letter-spacing:1px;">Hypothesis</h3>
+        <div class="card"><a href="/api/hypothesis/inn2-over6">Inn2 Over-6 Favourite Wins</a><p>Does the match-winner odds favourite after 6 overs of the chase always win? T20 only — with score, odds and actual result.</p></div>
+        <div class="card"><a href="/api/hypothesis/timeout-wicket">Wicket After Strategic Timeout</a><p>After a strategic timeout (game paused &gt;2 min), does a wicket always fall in the very next over? T20 only — timeout detected from gaps in game state.</p></div>
+        <h2 style="margin:24px 0 4px; color:#333;">Reference</h2>
+        <div class="card"><a href="/api/ml/glossary">Glossary</a><p>Plain-English explanations of all ML metrics (MAE, RMSE, R², Accuracy, ROC-AUC), algorithms (XGBoost, Random Forest), and cricket analytics terms (CRR, RRR, bat dominance, chase difficulty, odds)</p></div>
+    </body>
+    </html>
+    """
+    return func.HttpResponse(html, mimetype="text/html")

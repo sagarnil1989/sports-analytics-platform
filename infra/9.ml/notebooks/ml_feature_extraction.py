@@ -106,12 +106,13 @@ for t in trackers:
         stats["skipped_no_label"] += 1
         continue
 
-    event_id    = str(t.get("event_id") or "")
-    match_name  = str(t.get("match_name") or "")
-    league      = str(t.get("league_name") or "")
-    home_team   = str(t.get("home_team_name") or "")
-    away_team   = str(t.get("away_team_name") or "")
-    outcome_bin = 1 if outcome == "over" else 0
+    event_id      = str(t.get("event_id") or "")
+    match_name    = str(t.get("match_name") or "")
+    league        = str(t.get("league_name") or "")
+    home_team     = str(t.get("home_team_name") or "")
+    away_team     = str(t.get("away_team_name") or "")
+    outcome_bin   = 1 if outcome == "over" else 0
+    is_womens     = 1 if ("women" in match_name.lower() or "(w)" in match_name.lower()) else 0
     stats["matches_used"] += 1
 
     for r in rows:
@@ -153,6 +154,8 @@ for t in trackers:
             "home_team":         home_team,
             "away_team":         away_team,
             "batting_team":      str(r.get("batting_team") or ""),
+            # match-level flags
+            "is_womens_match":   is_womens,
             # snapshot position
             "innings":           innings,
             "over":              over_str,

@@ -43,7 +43,7 @@ def bronze_discover_cricket_inplay() -> None:
         f"year={now.year}/month={now.month:02d}/day={now.day:02d}/hour={now.hour:02d}/"
         f"events_inplay_{ts_compact(now)}.json"
     )
-    upload_json(container, raw_path, api_payload)
+    upload_json(container, raw_path, api_payload, overwrite=True)
 
     active_matches = summarize_inplay_items(extract_results(api_payload), max_live_matches)
     control_payload = {
@@ -126,10 +126,11 @@ def bronze_capture_cricket_inplay_snapshot() -> None:
         bet365_event_raw_payload = call_betsapi(path="/v1/bet365/event", params={"FI": fi, "raw": 1})
 
         # ── Dedup check ────────────────────────────────────────────────────────
-        # Hash the two most volatile payloads (score/PG field + market odds).
-        # Skip writing if both are unchanged AND a heartbeat was written recently.
+        # Hash only the stats payload (score/PG/team data).
+        # Skip writing if stats are unchanged AND a heartbeat was written recently.
+        # Odds (bet365_event) are intentionally excluded — they move every 5s even
+        # when the game state is static, which would cause every poll to write.
         new_stats_hash = _payload_hash(bet365_event_stats_payload)
-        new_odds_hash  = _payload_hash(bet365_event_payload)
 
         hash_control_path = f"betsapi/control/snapshot_hash/event_id={event_id}.json"
         stored = download_json(container, hash_control_path) or {}
@@ -145,7 +146,6 @@ def bronze_capture_cricket_inplay_snapshot() -> None:
 
         if (
             new_stats_hash == stored.get("stats_hash")
-            and new_odds_hash  == stored.get("odds_hash")
             and seconds_since_write < SNAPSHOT_HEARTBEAT_SECONDS
         ):
             logging.info(json.dumps({
@@ -231,7 +231,6 @@ def bronze_capture_cricket_inplay_snapshot() -> None:
 
         upload_json(container, hash_control_path, {
             "stats_hash":       new_stats_hash,
-            "odds_hash":        new_odds_hash,
             "last_written_utc": snapshot_time.isoformat(),
             "last_snapshot_id": snapshot_id,
         }, overwrite=True)

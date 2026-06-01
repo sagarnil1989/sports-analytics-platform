@@ -6,16 +6,18 @@
 # COMMAND ----------
 
 import subprocess
-subprocess.run(["pip", "install", "--quiet", "azure-storage-blob"], check=True)
+subprocess.run(["pip", "install", "--quiet", "azure-storage-blob", "requests"], check=True)
 
 # COMMAND ----------
 
 import json, sys
+import requests as _requests
 from datetime import datetime, timezone
 from azure.storage.blob import BlobServiceClient
 
-conn_str = dbutils.secrets.get("cricket-pipeline", "DATA_STORAGE_CONNECTION_STRING")
-sport_id = dbutils.secrets.get("cricket-pipeline", "SPORT_ID")
+conn_str      = dbutils.secrets.get("cricket-pipeline", "DATA_STORAGE_CONNECTION_STRING")
+sport_id      = dbutils.secrets.get("cricket-pipeline", "SPORT_ID")
+betsapi_token = dbutils.secrets.get("cricket-pipeline", "BETS_API_TOKEN")
 
 svc    = BlobServiceClient.from_connection_string(conn_str)
 bronze = svc.get_container_client("bronze")
@@ -34,6 +36,25 @@ def _ul(container, path, data):
         json.dumps(data, ensure_ascii=False, indent=2).encode(),
         overwrite=True,
     )
+
+def _fetch_final_score(event_id):
+    """
+    Call /v1/event/view for a completed event to get the authoritative final score.
+    Returns the raw ss string (e.g. "158/6(15.5)-155/10(19.2)") or None.
+    Works for completed events — BetsAPI keeps event/view data after the match ends.
+    """
+    try:
+        r = _requests.get(
+            "https://api.b365api.com/v1/event/view",
+            params={"event_id": event_id, "token": betsapi_token},
+            timeout=8,
+        )
+        results = r.json().get("results") or []
+        if results:
+            return results[0].get("ss") or None
+    except Exception:
+        pass
+    return None
 
 # COMMAND ----------
 # ── 1. Blocked events ────────────────────────────────────────────────────────
@@ -91,7 +112,7 @@ print(f"FI resolved: {len(fi_lookup)} / {len(silver_eids)}")
 # ── 5. Build ended index ──────────────────────────────────────────────────────
 
 matches = []
-skipped_live = skipped_blocked = skipped_no_fi = skipped_no_name = 0
+skipped_live = skipped_blocked = skipped_no_fi = skipped_no_name = score_patched = 0
 
 for eid, tracker_blob_name in silver_eids.items():
     if eid in blocked_events:
@@ -126,6 +147,20 @@ for eid, tracker_blob_name in silver_eids.items():
         or tracker.get("score_summary")
         or ""
     )
+
+    # If score is missing from all snapshot sources, fetch from /v1/event/view.
+    # This covers matches where the event dropped off the live feed before the
+    # final snapshot captured the last ball's score.
+    # We patch the gold tracker so subsequent runs don't need to call the API again.
+    if not score:
+        fetched = _fetch_final_score(eid)
+        if fetched:
+            print(f"  Patched score via event/view: event_id={eid}  ss={fetched}")
+            tracker["score_summary_events"] = fetched
+            _ul(gold, tracker_blob_name, tracker)
+            score = fetched
+            score_patched += 1
+
     score = score.replace("-", ",") if score else score
 
     # Order by 1st-innings batting team
@@ -176,6 +211,7 @@ _ul(bronze, "cricket/ended/latest/index.json", ended_index)
 
 print(f"\n── Done ──")
 print(f"  Ended matches written : {len(matches)}")
+print(f"  Scores patched (API)  : {score_patched}")
 print(f"  Skipped (live)        : {skipped_live}")
 print(f"  Skipped (blocked)     : {skipped_blocked}")
 print(f"  Skipped (no fi)       : {skipped_no_fi}")

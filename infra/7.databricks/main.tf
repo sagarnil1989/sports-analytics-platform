@@ -8,6 +8,20 @@ resource "azurerm_databricks_workspace" "main" {
   location            = data.azurerm_resource_group.main.location
   sku                 = "premium"
 
+  custom_parameters {
+    # no_public_ip = false → cluster nodes keep their own public IPs for outbound
+    # traffic, so no NAT gateway is required. Azure will NOT provision one.
+    no_public_ip = false
+
+    virtual_network_id = azurerm_virtual_network.databricks.id
+
+    public_subnet_name                                  = azurerm_subnet.databricks_public.name
+    public_subnet_network_security_group_association_id = azurerm_subnet_network_security_group_association.databricks_public.id
+
+    private_subnet_name                                  = azurerm_subnet.databricks_private.name
+    private_subnet_network_security_group_association_id = azurerm_subnet_network_security_group_association.databricks_private.id
+  }
+
   tags = local.config.tags
 }
 
@@ -32,6 +46,12 @@ resource "databricks_secret" "sport_id" {
   scope        = databricks_secret_scope.cricket.name
   key          = "SPORT_ID"
   string_value = tostring(local.config.sport_id)
+}
+
+resource "databricks_secret" "bets_api_token" {
+  scope        = databricks_secret_scope.cricket.name
+  key          = "BETS_API_TOKEN"
+  string_value = data.azurerm_key_vault_secret.bet365_api_token.value
 }
 
 # ---------------------------------------------------------------------------
@@ -70,6 +90,7 @@ resource "databricks_dbfs_file" "views_py" {
   source = "${local.src_path}/views.py"
   path   = "${local.dbfs_src_path}/views.py"
 }
+
 
 # ---------------------------------------------------------------------------
 # Databricks notebooks
@@ -126,5 +147,22 @@ resource "databricks_notebook" "bronze_dedup_cleanup" {
 resource "databricks_notebook" "analysis_match_data_explorer" {
   source   = "${path.module}/notebooks/analysis_match_data_explorer.py"
   path     = "/cricket-pipeline/analysis/match_data_explorer"
+  language = "PYTHON"
+}
+
+resource "databricks_dbfs_file" "cricket_hypothesis_py" {
+  source = "${local.src_path}/cricket_hypothesis.py"
+  path   = "${local.dbfs_src_path}/cricket_hypothesis.py"
+}
+
+resource "databricks_notebook" "hypothesis_inn2_over6" {
+  source   = "${path.module}/notebooks/hypothesis_inn2_over6.py"
+  path     = "/cricket-pipeline/hypothesis/inn2_over6"
+  language = "PYTHON"
+}
+
+resource "databricks_notebook" "hypothesis_timeout_wicket" {
+  source   = "${path.module}/notebooks/hypothesis_timeout_wicket.py"
+  path     = "/cricket-pipeline/hypothesis/timeout_wicket"
   language = "PYTHON"
 }

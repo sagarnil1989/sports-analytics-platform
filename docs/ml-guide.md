@@ -172,6 +172,7 @@ would otherwise have to discover on its own:
 - Per-over runs, wickets, batting odds, bowling odds through the model's horizon
 - `inn2_ov{N}_rp_wkt` — chase runs per wicket in hand at over N
 - `inn2_ov{N}_odds_swing` — how far the market shifted from end of innings 1 to over N
+- `inn2_ov{N}_chase_difficulty` — `RRR × (wickets_fallen + 1)`. Encodes the joint severity of a chase: 51/5 chasing 254 at over 6 gives ~87 (near-impossible); 120/2 chasing 180 at over 10 gives ~9 (comfortable). Avoids over-relying on collinear `rrr`, `crr`, `rr_diff`, `runs_needed` individually.
 - Cumulative chase state: CRR, RRR, run-rate differential, runs needed
 
 ### Why odds at every over matter

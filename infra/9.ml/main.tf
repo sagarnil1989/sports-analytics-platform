@@ -21,6 +21,12 @@ resource "databricks_notebook" "ml_win_predictor" {
   language = "PYTHON"
 }
 
+resource "databricks_notebook" "inn1_score_predictor" {
+  source   = "${path.module}/notebooks/inn1_score_predictor.py"
+  path     = "/cricket-pipeline/ml/inn1_score_predictor"
+  language = "PYTHON"
+}
+
 # ---------------------------------------------------------------------------
 # ADF — pipeline: ml_retrain (weekly)
 #
@@ -91,6 +97,66 @@ resource "azurerm_data_factory_pipeline" "ml_retrain" {
       }
       typeProperties = {
         notebookPath = "/cricket-pipeline/ml/ml_win_predictor"
+      }
+    },
+    {
+      name = "RunInn1ScorePredictor"
+      type = "DatabricksNotebook"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      dependsOn = [
+        {
+          activity             = "RunMLFeatureExtraction"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      linkedServiceName = {
+        referenceName = "ls_databricks"
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/ml/inn1_score_predictor"
+      }
+    },
+    {
+      name = "RunHypothesisInn2Over6"
+      type = "DatabricksNotebook"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      dependsOn = [
+        {
+          activity             = "RunMLFeatureExtraction"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      linkedServiceName = {
+        referenceName = "ls_databricks"
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/hypothesis/inn2_over6"
+      }
+    },
+    {
+      name = "RunHypothesisTimeoutWicket"
+      type = "DatabricksNotebook"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      dependsOn = [
+        {
+          activity             = "RunMLFeatureExtraction"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      linkedServiceName = {
+        referenceName = "ls_databricks"
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/hypothesis/timeout_wicket"
       }
     }
   ])

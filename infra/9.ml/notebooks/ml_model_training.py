@@ -61,6 +61,8 @@ FEATURES = [
     "predicted_total", "score_vs_line",
     "batting_team_odds", "bowling_team_odds", "implied_prob_bat",
     "over_odds", "under_odds",
+    # match-level flags
+    "is_womens_match",
 ]
 
 def prepare(subset_df):

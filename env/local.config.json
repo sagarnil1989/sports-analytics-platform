@@ -18,6 +18,8 @@
   "sql_admin_password": "Shlok_2025",
   "function_app_plan_name": "plan-ramanuj-func",
   "function_app_name": "func-ramanuj",
+  "display_function_app_name": "func-ramanuj-display",
+  "display_storage_account_name": "stramanujdispweu",
   "azure_functions_worker_process_terminate_timeout": "1800",
   "azure_functions_job_host__function_timeout": "00:10:00",
   "static_web_app_name": "swa-ramanuj",

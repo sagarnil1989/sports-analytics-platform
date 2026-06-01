@@ -27,6 +27,6 @@ provider "azurerm" {
 }
 
 provider "databricks" {
-  host                        = "https://adb-7405605422070068.8.azuredatabricks.net"
+  host                        = "https://adb-7405619046702431.11.azuredatabricks.net"
   azure_workspace_resource_id = "/subscriptions/${local.config.subscription_id}/resourceGroups/${local.config.resource_group_name}/providers/Microsoft.Databricks/workspaces/dbw-${local.config.project}"
 }
