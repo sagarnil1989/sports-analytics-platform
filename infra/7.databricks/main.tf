@@ -61,34 +61,34 @@ resource "databricks_secret" "bets_api_token" {
 # Terraform re-uploads whenever the local file changes (hash-based detection).
 # ---------------------------------------------------------------------------
 
-resource "databricks_dbfs_file" "storage_py" {
-  source = "${local.src_path}/storage.py"
-  path   = "${local.dbfs_src_path}/storage.py"
+resource "databricks_dbfs_file" "api_and_blob_py" {
+  source = "${local.src_path}/api_and_blob.py"
+  path   = "${local.dbfs_src_path}/api_and_blob.py"
 }
 
-resource "databricks_dbfs_file" "silver_py" {
-  source = "${local.src_path}/silver.py"
-  path   = "${local.dbfs_src_path}/silver.py"
+resource "databricks_dbfs_file" "snapshot_parser_py" {
+  source = "${path.module}/lib/snapshot_parser.py"
+  path   = "${local.dbfs_src_path}/snapshot_parser.py"
 }
 
-resource "databricks_dbfs_file" "gold_py" {
-  source = "${local.src_path}/gold.py"
-  path   = "${local.dbfs_src_path}/gold.py"
+resource "databricks_dbfs_file" "match_page_builder_py" {
+  source = "${path.module}/lib/match_page_builder.py"
+  path   = "${local.dbfs_src_path}/match_page_builder.py"
 }
 
-resource "databricks_dbfs_file" "innings_tracker_py" {
-  source = "${local.src_path}/innings_tracker.py"
-  path   = "${local.dbfs_src_path}/innings_tracker.py"
+resource "databricks_dbfs_file" "tracker_writer_py" {
+  source = "${path.module}/lib/tracker_writer.py"
+  path   = "${local.dbfs_src_path}/tracker_writer.py"
 }
 
-resource "databricks_dbfs_file" "leagues_py" {
-  source = "${local.src_path}/leagues.py"
-  path   = "${local.dbfs_src_path}/leagues.py"
+resource "databricks_dbfs_file" "league_config_py" {
+  source = "${local.src_path}/league_config.py"
+  path   = "${local.dbfs_src_path}/league_config.py"
 }
 
-resource "databricks_dbfs_file" "views_py" {
-  source = "${local.src_path}/views.py"
-  path   = "${local.dbfs_src_path}/views.py"
+resource "databricks_dbfs_file" "gold_rebuild_py" {
+  source = "${path.module}/lib/gold_rebuild.py"
+  path   = "${local.dbfs_src_path}/gold_rebuild.py"
 }
 
 
@@ -150,9 +150,9 @@ resource "databricks_notebook" "analysis_match_data_explorer" {
   language = "PYTHON"
 }
 
-resource "databricks_dbfs_file" "cricket_hypothesis_py" {
-  source = "${local.src_path}/cricket_hypothesis.py"
-  path   = "${local.dbfs_src_path}/cricket_hypothesis.py"
+resource "databricks_dbfs_file" "hypothesis_py" {
+  source = "${path.module}/lib/hypothesis.py"
+  path   = "${local.dbfs_src_path}/hypothesis.py"
 }
 
 resource "databricks_notebook" "hypothesis_inn2_over6" {

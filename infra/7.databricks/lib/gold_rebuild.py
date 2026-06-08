@@ -14,9 +14,9 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from storage import download_json, get_named_container_client, upload_json
-from innings_tracker import extract_innings_snapshot
-from leagues import load_allowed_league_ids
+from api_and_blob import call_betsapi, download_json, get_named_container_client, upload_json
+from tracker_writer import extract_innings_snapshot
+from league_config import load_allowed_league_ids
 
 
 def _utc_now():
@@ -142,6 +142,32 @@ def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = N
         seen[key] = p
     deduped = sorted(seen.values(), key=lambda p: str(p.get("snapshot_time_utc") or ""))
 
+    # Fetch authoritative final score with overs from BetsAPI event/view.
+    # This is the single source of truth — stored in score_summary_events so all
+    # consumers (ended/view, ML, hypothesis) read from one place.
+    # Falls back to silver/gold score if BetsAPI no longer has the match.
+    try:
+        ev_payload = call_betsapi("/v1/event/view", {"event_id": event_id})
+        ev_result  = (ev_payload.get("results") or [{}])[0]
+        ev_ss      = str(ev_result.get("ss") or "").strip()
+        if ev_ss:
+            ev_ss = ev_ss.replace("-", ",")
+            # Reorder to innings sequence: score_summary is home-first, but we
+            # want batting-first team first.
+            first_bat  = next(
+                (r.get("batting_team") for r in deduped if r.get("innings") == 1 and r.get("batting_team")),
+                None,
+            )
+            ev_home = (
+                (existing_gold.get("home_team_name") or silver_home_team or "").strip()
+            )
+            if first_bat and ev_home and first_bat != ev_home and "," in ev_ss:
+                p0, p1 = ev_ss.split(",", 1)
+                ev_ss = f"{p1.strip()},{p0.strip()}"
+            final_score = ev_ss
+    except Exception:
+        pass
+
     acc_path = f"cricket/inplay/control/event_id={event_id}/innings_accumulator.json"
     old_acc  = download_json(silver, acc_path) or {}
     new_acc  = {
@@ -169,7 +195,7 @@ def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = N
         if last_pred is not None:
             outcome = "over" if actual_total > last_pred else ("under" if actual_total < last_pred else "push")
 
-    tracker = {**existing_gold, "rows": deduped, "last_updated_utc": _utc_now().isoformat()}
+    tracker = {**existing_gold, "event_id": event_id, "rows": deduped, "last_updated_utc": _utc_now().isoformat()}
     if final_score:
         tracker["score_summary_events"] = final_score
     if outcome is not None:

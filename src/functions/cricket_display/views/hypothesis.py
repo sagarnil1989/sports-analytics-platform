@@ -150,7 +150,7 @@ def view_hypothesis_inn2_over6(req: func.HttpRequest) -> func.HttpResponse:
         over_reached = r.get("over_reached") or "?"
 
         inn1_final = r.get("inn1_final_score")
-        inn1_final_str = str(inn1_final) if inn1_final is not None else "?"
+        inn1_final_str = r.get("inn1_final_display") or (str(inn1_final) if inn1_final is not None else "?")
         inn1_score = r.get("inn1_score_at_over6")
         inn1_wkts = r.get("inn1_wickets_at_over6")
         inn1_str = f"{inn1_score}/{inn1_wkts}" if inn1_score is not None and inn1_wkts is not None else ("?" if inn1_score is None else str(inn1_score))

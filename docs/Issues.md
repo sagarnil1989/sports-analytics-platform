@@ -1,6 +1,6 @@
 In https://func-ramanuj-display.azurewebsites.net/api/ml/win-predictor
-1. Event id missing
-2. Royal Challengers Bengaluru vs Gujarat Titans - T2 ( may be there is a limit on the number of charter for match name)
-3. Final score is Kolkata Knight Riders vs Delhi Capitals - T20 is 203 not 201 -> final score over here(https://func-ramanuj-display.azurewebsites.net/api/ended/view) is correct
-4. Gujarat Titans vs Punjab Kings - T20 is termed as Defended but its chase won
-
+1. Event id missing — ROOT CAUSE: gold tracker JSON doesn't store event_id field; ML notebook was reading t.get("event_id") which returned None. FIXED: _dl_tracker() in ML notebook extracts event_id from blob path; gold_rebuild.py now writes event_id into tracker dict.
+2. Royal Challengers Bengaluru vs Gujarat Titans - T2 ( may be there is a limit on the number of charter for match name) — FIXED: removed [:50] truncation in views/ml.py
+3. Final score is Kolkata Knight Riders vs Delhi Capitals - T20 is 203 not 201 -> final score over here(https://func-ramanuj-display.azurewebsites.net/api/ended/view) is correct — FIXED: gold_rebuild.py now calls /v1/event/view for authoritative score with overs; score_summary_events is single source of truth
+4. Gujarat Titans vs Punjab Kings - T20 is termed as Defended but its chase won . this is aLSO wrong in https://func-ramanuj-display.azurewebsites.net/api/ended/view but in api call its correct — FIXED: same root cause as #3; authoritative score from event/view fixes the win label
+5. In the final score I also wanted to see the overs used like the full details I see in ss field in api call — FIXED: score_summary_events now stores overs e.g. "163/9(20),167/6(19.5)"; all display pages format with overs

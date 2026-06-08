@@ -182,6 +182,9 @@ def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
             </thead><tbody>"""
 
             def _score_cell(p, score_key, wkt_key):
+                display = p.get(f"{score_key}_display")
+                if display:
+                    return str(display)
                 s = p.get(score_key)
                 w = p.get(wkt_key) if wkt_key else None
                 if s is None: return "—"
@@ -204,7 +207,7 @@ def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
                 event_id_val = escape(str(p.get("event_id") or ""))
                 html += f"""<tr>
                     <td style="font-family:monospace;color:#888;font-size:12px">{event_id_val}</td>
-                    <td>{escape(str(p.get("match_name",""))[:50])}</td>
+                    <td>{escape(str(p.get("match_name","")))}</td>
                     <td style="color:#666">{escape(str(p.get("match_date",""))[:10])}</td>
                     <td style="font-size:13px">{escape(str(p.get("inn1_bat_team","")))}</td>
                     {ctx_cells}

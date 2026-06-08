@@ -23,5 +23,5 @@ os.environ["SPORT_ID"]                       = dbutils.secrets.get("cricket-pipe
 
 # COMMAND ----------
 
-from silver import silver_parse_ended_matches
+from snapshot_parser import silver_parse_ended_matches
 silver_parse_ended_matches(quiet_threshold_minutes=60)

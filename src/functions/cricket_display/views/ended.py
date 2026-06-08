@@ -20,6 +20,17 @@ def view_ended_matches(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
 
 
+def _fmt_score(raw: str) -> str:
+    """Format score_summary_events for display: '163/9(20),167/6(19.5)' → '163/9 (20 ov), 167/6 (19.5 ov)'."""
+    import re
+    if not raw:
+        return raw
+    def _part(s):
+        m = re.match(r'^(\d+(?:/\d+)?)\s*\((\d+\.?\d*)\)', s.strip())
+        return f"{m.group(1)} ({m.group(2)} ov)" if m else s.strip()
+    return ", ".join(_part(p) for p in raw.split(",", 1))
+
+
 def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
     try:
         bronze = get_bronze_container_client()
@@ -57,7 +68,7 @@ def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
                     <td>{escape(str(m.get("match_name") or "-"))}</td>
                     <td>{league_esc}</td>
                     <td><span class="{badge_cls}">{fmt_esc}</span></td>
-                    <td>{escape(str(m.get("score") or "-"))}</td>
+                    <td>{escape(_fmt_score(str(m.get("score") or ""))) or "-"}</td>
                     <td>{escape(str(m.get("event_time_utc") or "-"))}</td>
                     <td><a href="/api/matches/{event_id}/heatmap">Heatmap</a></td>
                     <td><a href="/api/prematch/{event_id}/view">Open</a></td>

@@ -13,7 +13,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from storage import (
+from api_and_blob import (
     download_json,
     get_named_container_client,
     upload_json,
@@ -135,17 +135,24 @@ def _process_event(
     actual_total: Optional[int] = None
     final_innings2_score: Optional[int] = None
     final_innings2_wickets: Optional[int] = None
+    inn1_final_display: Optional[str] = None
     if raw_summary and "," in raw_summary:
         parts = [p.strip() for p in raw_summary.split(",", 1)]
         if batting_first_team and tracker_away and batting_first_team == tracker_away:
             parts = [parts[1], parts[0]]
         try:
-            m0 = _re.match(r"(\d+)(?:/(\d+))?", parts[0])
+            m0 = _re.match(r"(\d+)(?:/(\d+))?\(?(\d+\.?\d*)?\)?", parts[0])
             m1 = _re.match(r"(\d+)(?:/(\d+))?", parts[1])
             if m0 and m1:
                 actual_total = int(m0.group(1))
                 final_innings2_score = int(m1.group(1))
                 final_innings2_wickets = int(m1.group(2)) if m1.group(2) else None
+                inn1_wkts_str = f"/{m0.group(2)}" if m0.group(2) else ""
+                inn1_overs_str = m0.group(3) if m0.group(3) else None
+                inn1_final_display = (
+                    f"{actual_total}{inn1_wkts_str} ({inn1_overs_str} ov)"
+                    if inn1_overs_str else f"{actual_total}{inn1_wkts_str}"
+                )
         except Exception:
             pass
 
@@ -227,6 +234,7 @@ def _process_event(
         "chasing_team": chasing_team,
         "target": target,
         "inn1_final_score": actual_total,
+        "inn1_final_display": inn1_final_display,
         "inn1_score_at_over6": inn1_score_at_over6,
         "inn1_wickets_at_over6": inn1_wickets_at_over6,
         "over_reached": over6_row.get("over"),

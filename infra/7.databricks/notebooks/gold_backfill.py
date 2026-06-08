@@ -28,5 +28,5 @@ print(f"[gold_backfill] event_id={'ALL stale matches' if not event_id else event
 
 # COMMAND ----------
 
-from views import gold_rebuild_ended_matches
+from gold_rebuild import gold_rebuild_ended_matches
 gold_rebuild_ended_matches(event_id=event_id or None)

@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
 
-from storage import (
+from api_and_blob import (
     call_betsapi,
     download_json,
     extract_results,
@@ -17,7 +17,7 @@ from storage import (
     utc_now,
     build_live_snapshot_lineage,
 )
-from leagues import load_allowed_league_ids
+from league_config import load_allowed_league_ids
 
 SNAPSHOT_HEARTBEAT_SECONDS = 300  # force-write every 5 min even if payload unchanged
 
@@ -84,7 +84,7 @@ def bronze_capture_cricket_inplay_snapshot() -> None:
     10. /v1/bet365/event?raw=1               -> Bet365 raw event feed (FI)
     """
     import time as _time
-    from storage import download_json
+    from api_and_blob import download_json
     run_start = _time.monotonic()
     budget_seconds = 480  # exit at 8 min — well inside the 10-min Azure Functions ceiling
 

@@ -4,7 +4,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from storage import (
+from api_and_blob import (
     blob_exists,
     download_json,
     download_required_json,
@@ -15,7 +15,7 @@ from storage import (
     upload_json,
     utc_now,
 )
-from innings_tracker import (
+from tracker_writer import (
     extract_innings_snapshot,
     parse_over_from_pg,
     _over_key,
@@ -392,7 +392,14 @@ def silver_parse_snapshot(
         "away_team_name": away.get("name"),
         "match_name": ev.get("NA"),
         "time_status": matching_event.get("time_status") or match_from_filter.get("time_status"),
-        "score_summary_events": matching_event.get("ss") or event_view_item.get("ss") or match_from_filter.get("raw_item", {}).get("ss"),
+        # When the match has ended (time_status=3), prefer event_view ss — it holds the
+        # authoritative final score. The inplay API can briefly show a stale ss while
+        # still marking time_status=3, which caused wrong final scores being stored.
+        "score_summary_events": (
+            event_view_item.get("ss") or matching_event.get("ss") or match_from_filter.get("raw_item", {}).get("ss")
+            if str(matching_event.get("time_status") or match_from_filter.get("time_status") or "") == "3"
+            else matching_event.get("ss") or event_view_item.get("ss") or match_from_filter.get("raw_item", {}).get("ss")
+        ),
         "score_summary_bet365": ev.get("SS"),
         "stadium_data": (event_view_item.get("extra") or {}).get("stadium_data"),
         "venue": (event_view_item.get("venue") or event_view_item.get("ve")
@@ -416,7 +423,7 @@ def silver_parse_snapshot(
         "source_bronze_manifest_path": f"bronze/betsapi/inplay_snapshot/sport_id={sport_id}/event_id={event_id}/fi={fi}/snapshot_id={snapshot_id}/manifest.json",
         "source_bronze_lineage_path": f"bronze/betsapi/inplay_snapshot/sport_id={sport_id}/event_id={event_id}/fi={fi}/snapshot_id={snapshot_id}/lineage.json",
     }
-    from storage import format_unix_ts
+    from api_and_blob import format_unix_ts
     match_snapshot["event_time_utc"] = format_unix_ts(match_snapshot["event_time_unix"])
 
     team_scores: List[Dict[str, Any]] = []

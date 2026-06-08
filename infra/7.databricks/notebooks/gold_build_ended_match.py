@@ -23,5 +23,5 @@ os.environ["SPORT_ID"]                       = dbutils.secrets.get("cricket-pipe
 
 # COMMAND ----------
 
-from views import gold_rebuild_ended_matches
+from gold_rebuild import gold_rebuild_ended_matches
 gold_rebuild_ended_matches()

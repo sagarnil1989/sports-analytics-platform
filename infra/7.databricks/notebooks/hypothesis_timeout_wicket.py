@@ -28,12 +28,13 @@ def _load_from_dbfs(module_name, dbfs_path):
     return mod
 
 _src = "dbfs:/FileStore/cricket-pipeline/src"
-_load_from_dbfs("storage", f"{_src}/storage.py")
-_load_from_dbfs("cricket_hypothesis", f"{_src}/cricket_hypothesis.py")
+_load_from_dbfs("api_and_blob", f"{_src}/api_and_blob.py")
+_load_from_dbfs("league_config", f"{_src}/league_config.py")
+_load_from_dbfs("hypothesis", f"{_src}/hypothesis.py")
 
 # COMMAND ----------
 
-from cricket_hypothesis import extract_timeout_wicket
+from hypothesis import extract_timeout_wicket
 result = extract_timeout_wicket()
 
 print(f"Total timeouts detected : {result['total_timeouts_detected']}")

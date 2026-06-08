@@ -22,7 +22,7 @@ os.environ["SPORT_ID"]                       = dbutils.secrets.get("cricket-pipe
 
 # COMMAND ----------
 
-from gold import gold_build_match_pages
+from match_page_builder import gold_build_match_pages
 
 # Run for 55 minutes then exit cleanly; ADF triggers the next 1-hour run.
 RUN_DURATION_SECONDS = 55 * 60

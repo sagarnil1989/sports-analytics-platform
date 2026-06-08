@@ -21,5 +21,5 @@ os.environ["SPORT_ID"]                       = dbutils.secrets.get("cricket-pipe
 
 # COMMAND ----------
 
-from silver import silver_parse_bronze_to_silver
+from snapshot_parser import silver_parse_bronze_to_silver
 silver_parse_bronze_to_silver()

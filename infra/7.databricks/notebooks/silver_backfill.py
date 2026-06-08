@@ -132,7 +132,7 @@ if not work_items:
 # COMMAND ----------
 # ── STEP 4: Process in parallel ─────────────────────────────────────────────
 
-from silver import silver_parse_snapshot, silver_write_outputs
+from snapshot_parser import silver_parse_snapshot, silver_write_outputs
 
 def process_snapshot(item):
     """Download bronze files, parse to silver, write outputs + marker."""

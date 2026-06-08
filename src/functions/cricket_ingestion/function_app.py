@@ -1,7 +1,7 @@
 import azure.functions as func
 
-from bronze import bronze_discover_cricket_inplay, bronze_capture_cricket_inplay_snapshot
-from prematch import (
+from inplay_capture import bronze_discover_cricket_inplay, bronze_capture_cricket_inplay_snapshot
+from prematch_capture import (
     bronze_discover_cricket_upcoming,
     bronze_capture_cricket_prematch_odds,
 )

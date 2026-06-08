@@ -81,9 +81,19 @@ prefix = "cricket/innings_tracker/"
 blobs  = [b.name for b in gold.list_blobs(name_starts_with=prefix)
           if b.name.endswith("innings_1_from_silver.json")]
 
+def _dl_tracker(path):
+    t = _dl(path)
+    if t is not None and not t.get("event_id"):
+        # event_id lives in the blob path, not inside the JSON
+        parts = path.split("/")
+        ep = next((p for p in parts if p.startswith("event_id=")), None)
+        if ep:
+            t["event_id"] = ep.replace("event_id=", "")
+    return t
+
 trackers = []
 with ThreadPoolExecutor(max_workers=32) as ex:
-    futs = {ex.submit(_dl, b): b for b in blobs}
+    futs = {ex.submit(_dl_tracker, b): b for b in blobs}
     for fut in as_completed(futs):
         t = fut.result()
         if t:
@@ -187,12 +197,20 @@ def chase_aggregate(inn_rows, inn1_score, over_target):
         "runs_needed": runs_needed,
     }
 
+def _fmt_score_part(part):
+    """Format "163/9(20)" → "163/9 (20 ov)", passthrough if no overs."""
+    import re as _re
+    m = _re.match(r'^(\d+(?:/\d+)?)\s*\((\d+\.?\d*)\)', part.strip())
+    if m:
+        return f"{m.group(1)} ({m.group(2)} ov)"
+    return part.strip()
+
 def parse_score_summary(tracker, inn1_bat_team):
     """
     Parse the authoritative final scores from the tracker's score_summary field.
     This is the same source used by the ended/view page — set from the Bet365
     events API, not from snapshot rows. Format after normalisation: "inn1,inn2"
-    where each part is "runs/wickets" e.g. "196/4,87/10".
+    where each part is "runs/wickets(overs)" e.g. "196/4(20),87/10(18.3)".
 
     Returns (inn1_runs, inn2_runs) or (None, None) if unparseable.
     """
@@ -215,6 +233,22 @@ def parse_score_summary(tracker, inn1_bat_team):
         return inn1_runs, inn2_runs
     except Exception:
         return None, None
+
+def parse_inn1_display(tracker, inn1_bat_team):
+    """Return display string for inn1 final score with overs, e.g. '163/9 (20 ov)'."""
+    import re as _re
+    raw = (tracker.get("score_summary_events")
+           or tracker.get("score_summary_bet365")
+           or tracker.get("score_summary") or "")
+    raw = raw.replace("-", ",").strip()
+    if not raw or "," not in raw:
+        return None
+    parts = raw.split(",", 1)
+    home = str(tracker.get("home_team_name") or "").strip()
+    away = str(tracker.get("away_team_name") or "").strip()
+    if inn1_bat_team and away and inn1_bat_team == away:
+        parts = [parts[1].strip(), parts[0].strip()]
+    return _fmt_score_part(parts[0])
 
 def batting_dominance(event_id, silver_client):
     """max_SR minus avg_SR across inn1 batsmen (min 5 balls faced)."""
@@ -319,6 +353,7 @@ for t in t20_trackers:
     inn1_final         = inn1_rows[-1]
     inn1_total_score   = auth_inn1 if auth_inn1 is not None else (inn1_final.get("score") or 0)
     inn1_total_wickets = inn1_final.get("wickets") or 0
+    inn1_score_display = parse_inn1_display(t, inn1_bat_team) or str(inn1_total_score)
 
     # Phase state snapshots for composite features
     pp_state  = state_after_n_overs(inn1_rows, 6)   # end of powerplay
@@ -366,6 +401,7 @@ for t in t20_trackers:
         # innings 1 aggregate
         "inn1_total_score":   inn1_total_score,
         "inn1_total_wickets": inn1_total_wickets,
+        "inn1_score_display": inn1_score_display,
         # phase snapshots (used by composite features)
         "inn1_pp_score":    inn1_pp_score,
         "inn1_pp_wickets":  inn1_pp_wickets,
@@ -773,7 +809,7 @@ def xgb_train_pruned(model_name, feature_cols, train_df, test_df):
     display(fi_df)
 
     score_ctx = [c for c in [
-        "inn1_total_score",
+        "inn1_total_score", "inn1_score_display",
         "inn2_ov2_score", "inn2_ov2_wickets",
         "inn2_ov6_score", "inn2_ov6_wickets",
         "inn2_ov10_score", "inn2_ov10_wickets",
