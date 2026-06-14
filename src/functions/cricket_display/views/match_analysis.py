@@ -149,19 +149,29 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
                                  and r.get("wickets") == _inn1_pre_wkts)]
 
         # ── authoritative final scores ────────────────────────────────────────
-        # score_summary_events for completed matches comes from /v1/event/view
-        # which returns scores in innings order (inn1 first, inn2 second) —
-        # the same source used by the matches table Final Score column.
-        # Use parse_ss_final_scores directly, same as the matches table, so
-        # both views show identical scores without a home/away swap heuristic.
+        # score_summary_events is in home/away order (raw BetsAPI ss), NOT innings order.
+        # Detect which team batted first from inn1_rows (always clean — ghost rows are
+        # tagged innings=2). If the away team batted first, swap the two score parts.
+        # This is the same logic used by the matches table Final Score column.
         _fs = parse_ss_final_scores(tracker.get("score_summary_events") or "")
-        inn1_runs = _fs["inn1_runs"]
-        inn1_wkts = _fs["inn1_wickets"]
-        inn2_runs = _fs["inn2_runs"]
-        inn2_wkts = _fs["inn2_wickets"]
+        _away_team   = str(tracker.get("away_team_name") or "").strip()
+        _inn1_bat    = next(
+            (str(r.get("batting_team") or "").strip() for r in inn1_rows if r.get("batting_team")),
+            None,
+        )
+        _away_batted_first = bool(_inn1_bat and _away_team and _inn1_bat == _away_team)
+        if _away_batted_first:
+            inn1_runs = _fs["inn2_runs"]
+            inn1_wkts = _fs["inn2_wickets"]
+            inn2_runs = _fs["inn1_runs"]
+            inn2_wkts = _fs["inn1_wickets"]
+        else:
+            inn1_runs = _fs["inn1_runs"]
+            inn1_wkts = _fs["inn1_wickets"]
+            inn2_runs = _fs["inn2_runs"]
+            inn2_wkts = _fs["inn2_wickets"]
 
-        # Fall back to last captured snapshot when score_summary_events is absent
-        # (live match in progress, or old gold data without score_summary_events).
+        # Fall back to last captured snapshot when score_summary_events is absent.
         if inn1_runs is None:
             inn1_runs = inn1_rows[-1].get("score") if inn1_rows else None
             inn1_wkts = inn1_rows[-1].get("wickets") if inn1_rows else None

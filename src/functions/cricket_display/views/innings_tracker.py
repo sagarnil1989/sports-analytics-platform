@@ -275,7 +275,7 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
             def _ov_str(ov, wkts):
                 if wkts == 10:
                     return " (All Out)"
-                return f" ({ov} ov)" if ov is not None else ""
+                return ""
 
             venue_line = ""
             if venue:

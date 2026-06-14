@@ -70,7 +70,7 @@ Same root cause and fix as Issue 3.
 
 `score_summary_events` for live snapshots from `/v3/events/inplay` is home/away ordered, not innings-ordered. For this match Gujarat Titans (away) batted first, so home=RCB=inn2 was in `parts[0]` and away=Gujarat=inn1 was in `parts[1]`. The previous swap heuristic (`d_straight` vs `d_swapped`) was also failing because the ghost inn2 rows (Issue 10) had `score=155` which made `inn2_last_score=155`, eliminating the distance advantage for the correct assignment (tie always defaulted wrong).
 
-- **Root fix**: `score_summary_events` for **completed** matches is populated from `/v1/event/view` which returns scores in innings order. Switched to `parse_ss_final_scores()` directly (same function used by the matches table Final Score column) — no heuristic needed. The second-pass filter (using the now-correct `inn1_runs=155`) also catches any ghost inn2 rows the first-pass filter missed.
+- **Root fix**: `score_summary_events` is in home/away order (raw BetsAPI `ss`). The correct approach is the same as the matches table: call `parse_ss_final_scores()` to get both scores, then detect which team batted first from `inn1_rows` (which team is the away team), and swap the two parts if the away team batted first. This is reliable because `inn1_rows` is never contaminated by ghost rows. The second-pass filter (using the now-correct `inn1_runs=155`) also catches any ghost inn2 rows the first-pass filter missed.
 - **File**: `views/match_analysis.py` → score resolution block (replaces distance heuristic)
 
 ---

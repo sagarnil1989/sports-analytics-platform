@@ -13,4 +13,5 @@ local.settings.template.json
 __pycache__/
 *.pyc
 local.settings.json
+.python_packages
 
