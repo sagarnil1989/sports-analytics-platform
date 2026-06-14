@@ -7,7 +7,7 @@
 | # | Title | Area | Status |
 |---|-------|------|--------|
 | [1](#issue-1) | S Sudharsan shown as 2nd batsman instead of 1st | Detailed Analysis | ✅ Fixed |
-| [2](#issue-2) | `[PLAYERFULLNAME#198836]` stored in gold s6 field | Silver / Bronze | 🔴 Open |
+| [2](#issue-2) | `[PLAYERFULLNAME#198836]` stored in gold s6 field | Silver / Bronze | ✅ Fixed |
 | [3](#issue-3) | JC Butler appears twice in batting scorecard | Detailed Analysis | ✅ Fixed |
 | [4](#issue-4) | JO Holder appears twice in batting scorecard | Detailed Analysis | ✅ Fixed |
 | [5](#issue-5) | 1st innings score wrong — 161 shown instead of 155 | Detailed Analysis | ✅ Fixed |
@@ -33,14 +33,13 @@ At over 0.0, s6 is `[PLAYERFULLNAME#198836]:0:0#[PLAYERFULLNAME#176362]:0:0`. Th
 
 ## Issue 2
 **`[PLAYERFULLNAME#198836]` stored in gold s6 field**
-🔴 Open — bronze / silver data issue
+✅ Fixed
 
-The BetsAPI stream sends `[PLAYERFULLNAME#NNN]` placeholders at match start when player names have not yet loaded into the feed. These are stored verbatim through bronze → silver → gold. Later snapshots in the same match have real names.
+The BetsAPI stream sends `[PLAYERFULLNAME#NNN]` placeholders at match start when player names have not yet loaded into the feed. These were stored verbatim through bronze → silver → gold because the `#` inside the placeholder collided with the S6 batsman separator, shredding the name into garbage tokens like `198836]`.
 
-- **Impact**: First few snapshots of any innings have unresolvable player IDs in s6. Issue 1 was a symptom of this.
-- **To investigate**: Check bronze TE records at over 0.0–0.2 for any match. Confirm at what over the API starts sending real names.
-- **Proposed fix**: In `bronze_to_silver.py`, skip or delay s6 embedding for snapshots where any batsman name still matches `[PLAYERFULLNAME#...]`. Alternatively, post-process in `gold_rebuild.py` to backfill names from later snapshots.
-- **Files**: `bronze_to_silver.py`, `infra/7.databricks/lib/gold_rebuild.py`
+- **Root cause**: S6 format is `striker:runs:balls#non_striker:runs:balls`. `[PLAYERFULLNAME#NNN]:0:0` contains an internal `#` that split() treated as a batsman separator, producing a first "batsman" named `[PLAYERFULLNAME` and a second named `NNN]:0:0`.
+- **Fix**: In `snapshot_parser.py`, S6 is normalised with `re.sub(r'\[PLAYERFULLNAME#(\d+)\]', r'PLAYERFULLNAME_\1', s6)` before splitting on `#`. This collapses the placeholder's internal `#` so only the real separator is seen. The normalised name `PLAYERFULLNAME_NNN` flows through silver into gold and is handled cleanly by the display layer's existing `_da_decode_s6` normalisation.
+- **File**: `infra/7.databricks/lib/snapshot_parser.py` → S6 parsing block inside `silver_parse_snapshot()`
 
 ---
 

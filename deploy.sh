@@ -23,7 +23,7 @@ case "$APP" in
     TAG_PREFIX="deploy-display"
     ;;
   ingestion)
-    FUNC_APP_NAME="func-ramanuj"
+    FUNC_APP_NAME="func-ramanuj-ingestion"
     FUNC_DIR="src/functions/cricket_ingestion"
     TAG_PREFIX="deploy-ingestion"
     ;;

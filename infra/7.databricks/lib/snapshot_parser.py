@@ -457,10 +457,14 @@ def silver_parse_snapshot(
         if r_type == "TE" and r.get("NA") and (r.get("SC") or r.get("S5")):
             parsed = parse_runs_wickets(r.get("S5"))
             # Parse batsmen details from S6: "striker_name:runs:balls#non_striker_name:runs:balls"
+            # [PLAYERFULLNAME#NNN] placeholders appear at match start before names load.
+            # The '#' inside the placeholder is NOT a batsman separator — normalise it
+            # to 'PLAYERFULLNAME_NNN' first so the real '#' separator still works.
             batsmen = []
             s6 = str(r.get("S6") or "").strip()
             if s6:
-                for part in s6.split("#"):
+                s6_norm = re.sub(r'\[PLAYERFULLNAME#(\d+)\]', r'PLAYERFULLNAME_\1', s6)
+                for part in s6_norm.split("#"):
                     bits = part.split(":")
                     if len(bits) >= 3:
                         try:
