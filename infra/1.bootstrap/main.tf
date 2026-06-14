@@ -12,55 +12,17 @@ resource "azurerm_key_vault" "main" {
   sku_name                   = "standard"
   soft_delete_retention_days = 7
   purge_protection_enabled   = false
+  enable_rbac_authorization  = true
   tags                       = local.config.tags
 }
+
 data "azurerm_client_config" "current" {}
-resource "azurerm_key_vault_access_policy" "deployer_full" {
-  key_vault_id = azurerm_key_vault.main.id
-  tenant_id    = data.azurerm_client_config.current.tenant_id
-  object_id    = data.azurerm_client_config.current.object_id
 
-  secret_permissions = [
-    "Get",
-    "List",
-    "Set",
-    "Delete",
-    "Recover",
-    "Backup",
-    "Restore",
-    "Purge"
-  ]
-
-  key_permissions = [
-    "Get",
-    "List",
-    "Create",
-    "Update",
-    "Delete",
-    "Recover",
-    "Backup",
-    "Restore",
-    "Purge",
-    "Encrypt",
-    "Decrypt",
-    "Sign",
-    "Verify",
-    "WrapKey",
-    "UnwrapKey"
-  ]
-
-  certificate_permissions = [
-    "Get",
-    "List",
-    "Create",
-    "Update",
-    "Delete",
-    "Recover",
-    "Backup",
-    "Restore",
-    "Purge",
-    "Import"
-  ]
+# Grants the deploying identity (local user or CI SP) full control over secrets.
+resource "azurerm_role_assignment" "deployer_kv_admin" {
+  scope                = azurerm_key_vault.main.id
+  role_definition_name = "Key Vault Administrator"
+  principal_id         = data.azurerm_client_config.current.object_id
 }
 
 resource "azurerm_log_analytics_workspace" "main" {

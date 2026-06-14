@@ -14,7 +14,7 @@
 | [6](#issue-6) | Death phase end score 151/8 instead of 155/8 | Detailed Analysis | ✅ Fixed |
 | [7](#issue-7) | Bowling — Over 11 completely missing | Detailed Analysis | ✅ Fixed |
 | [8](#issue-8) | `0]` shown as 1st batsman in 2nd innings | Detailed Analysis | ✅ Fixed |
-| [9](#issue-9) | Phase boundary score wrong when snapshot missing | Detailed Analysis | 🔴 Open |
+| [9](#issue-9) | Phase boundary score wrong when snapshot missing | Detailed Analysis | ✅ Fixed |
 | [10](#issue-10) | Inn 2 row at over 19.5 showing innings 1 data | Detailed Analysis | ✅ Fixed |
 | [11](#issue-11) | Win% in Chase Analysis — formula explained | Detailed Analysis | 📖 Doc |
 
@@ -113,11 +113,12 @@ At over 0.0 of innings 2, no balls have been bowled yet. The s6 field at this po
 
 ## Issue 9
 **Phase boundary score wrong when exact boundary snapshot is missing (2nd innings)**
-🔴 Open — deferred
+✅ Fixed
 
-In the 2nd innings of event 11963258, data is missing for overs 14.4–14.5. A snapshot exists at 15.1 with score=139, wickets=5, ball_window=`[0, 4, 0, 2, 0, 0]` (newest first). Since ball 15.1 scored 0 runs, end-of-over-14 score = 139 − 0 = 139. The phase code does not do this inference — it uses the last captured snapshot within each phase as the boundary score, so Middle (7-15) ends at over 14.3 score rather than 139.
+In the 2nd innings of event 11963258, data is missing for overs 14.4–14.5. A snapshot exists at 15.1 with score=139, wickets=5, ball_window=`[0, 4, 0, 2, 0, 0]` (newest first). The old code used the last captured snapshot within each phase as the boundary score, so Middle (7-15) was ending at the over 14.3 score rather than 139.
 
-- **Proposed fix**: When the exact `X.0` boundary snapshot is missing, find the first snapshot of over X+1 and subtract `ball_window[0]` (the run scored on that ball) to infer the end-of-over score.
+- **Fix**: After the main bucketing loop, `build_phases` now runs a boundary inference pass for each non-Death phase. It finds the first snapshot of the following phase, counts how many legal balls have been bowled in that new over (from the over string), then subtracts those runs (and wickets) from the snapshot score — working back to the true end-of-phase score. The inferred score is only applied when it is higher than the last captured snapshot within the phase, preventing spurious overrides when the boundary snapshot was actually captured.
+- **Handles**: extras (wides, no-balls, leg-byes) in the first few balls of the new over are counted correctly; only legal balls consume the counter.
 - **File**: `views/match_analysis.py` → `build_phases()`
 
 ---

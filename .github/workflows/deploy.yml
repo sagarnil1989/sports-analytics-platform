@@ -26,28 +26,13 @@ env:
 jobs:
 
 # ──────────────────────────────────────────────────────────────
-# APPROVAL GATE
-# Pauses here and notifies the reviewer(s) configured on the
-# "production" environment. Approve before any apply runs.
-# ──────────────────────────────────────────────────────────────
-
-  approve:
-    name: "Approve deployment"
-    runs-on: ubuntu-latest
-    environment: production
-    if: ${{ github.event.inputs.skip_infra != 'true' }}
-    steps:
-      - name: Approved
-        run: echo "Deployment approved. All components will now plan and apply in parallel."
-
-# ──────────────────────────────────────────────────────────────
 # INFRA — all modules run in parallel, each does plan → apply.
 # ──────────────────────────────────────────────────────────────
 
   infra_1_bootstrap:
     name: "Infra 1 · Bootstrap"
-    needs: approve
     runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.skip_infra != 'true' }}
     defaults:
       run:
         working-directory: infra/1.bootstrap
@@ -65,8 +50,8 @@ jobs:
 
   infra_2_datalake:
     name: "Infra 2 · Data Lake"
-    needs: approve
     runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.skip_infra != 'true' }}
     defaults:
       run:
         working-directory: infra/2.datalake
@@ -84,8 +69,8 @@ jobs:
 
   infra_3_function_app:
     name: "Infra 3 · Function App"
-    needs: approve
     runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.skip_infra != 'true' }}
     defaults:
       run:
         working-directory: infra/3.function-app
@@ -103,8 +88,8 @@ jobs:
 
   infra_5_static_web:
     name: "Infra 5 · Static Web App"
-    needs: approve
     runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.skip_infra != 'true' }}
     defaults:
       run:
         working-directory: infra/5.static-web-app
@@ -122,8 +107,8 @@ jobs:
 
   infra_6_adf:
     name: "Infra 6 · ADF"
-    needs: approve
     runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.skip_infra != 'true' }}
     defaults:
       run:
         working-directory: infra/6.adf
@@ -141,8 +126,8 @@ jobs:
 
   infra_7_databricks:
     name: "Infra 7 · Databricks"
-    needs: approve
     runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.skip_infra != 'true' }}
     defaults:
       run:
         working-directory: infra/7.databricks
@@ -160,8 +145,8 @@ jobs:
 
   infra_8_adf_config:
     name: "Infra 8 · ADF Config"
-    needs: approve
     runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.skip_infra != 'true' }}
     defaults:
       run:
         working-directory: infra/8.adf-config
@@ -179,8 +164,8 @@ jobs:
 
   infra_9_ml:
     name: "Infra 9 · ML"
-    needs: approve
     runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.skip_infra != 'true' }}
     defaults:
       run:
         working-directory: infra/9.ml

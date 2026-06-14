@@ -411,6 +411,55 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
                             b["singles"] += 1
                         elif bs == "2":
                             b["doubles"] += 1
+            # Infer phase boundary scores when the exact X.0 snapshot is missing.
+            # For each non-Death phase, find the first snapshot of the next phase and
+            # subtract the runs from balls already bowled in that new over to recover
+            # the true score at the end of the previous phase.
+            _ph_order = list(PHASE_OVERS.keys())
+            for _ci, _cph in enumerate(_ph_order[:-1]):
+                _cb = buckets[_cph]
+                if _cb["end_score"] is None:
+                    continue
+                _nph = _ph_order[_ci + 1]
+                _fn  = next((r for r in inn_rows_local if phase_label(r.get("over")) == _nph), None)
+                if _fn is None:
+                    continue
+                # How many legal balls have been bowled in the new over at this snapshot?
+                try:
+                    _legal = int(str(_fn.get("over") or "0").split(".")[1])
+                except (ValueError, IndexError):
+                    _legal = 0
+                # Walk ball_window (newest first) counting runs/wickets for those legal balls.
+                _bw       = _fn.get("ball_window") or []
+                _rsub     = 0
+                _wsub     = 0
+                _seen_leg = 0
+                for _bl in _bw:
+                    if _seen_leg >= _legal:
+                        break
+                    _bs = str(_bl).strip().lower()
+                    if _bs == "w":
+                        _wsub     += 1
+                        _seen_leg += 1
+                    elif any(x in _bs for x in ("wd", "nb", "lb")):
+                        _m = _re.match(r'^(\d+)', _bs)
+                        _rsub += int(_m.group(1)) if _m else 0
+                        # extras don't consume legal ball count
+                    else:
+                        try:
+                            _rsub += int(_bs)
+                        except ValueError:
+                            pass
+                        _seen_leg += 1
+                _inf_score = (_fn.get("score") or 0) - _rsub
+                _inf_wkts  = (_fn.get("wickets") or 0) - _wsub
+                # Only update if the inferred score is higher — the inference gives
+                # the score at the phase boundary, which can't be less than any
+                # snapshot taken within that phase.
+                if _inf_score > _cb["end_score"]:
+                    _cb["end_score"] = _inf_score
+                    _cb["end_wkts"]  = _inf_wkts
+
             result = []
             for ph in PHASE_OVERS:
                 b = buckets[ph]
