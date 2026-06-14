@@ -28,7 +28,7 @@ def _load_from_dbfs(module_name, dbfs_path):
     return mod
 
 _src = "dbfs:/FileStore/cricket-pipeline/src"
-_load_from_dbfs("api_and_blob", f"{_src}/api_and_blob.py")
+_load_from_dbfs("util", f"{_src}/util.py")
 _load_from_dbfs("league_config", f"{_src}/league_config.py")
 _load_from_dbfs("hypothesis", f"{_src}/hypothesis.py")
 

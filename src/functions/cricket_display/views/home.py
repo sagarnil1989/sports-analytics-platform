@@ -1,8 +1,8 @@
-from ._common import (
+from .common import (
     json, logging, os, escape, Any, Dict, List, Optional,
     func, ResourceNotFoundError,
     call_betsapi, download_json, download_required_json, format_unix_ts,
-    get_bronze_container_client, get_named_container_client, safe_float, upload_json, utc_now,
+    get_named_container_client, safe_float, upload_json, utc_now,
     extract_bet365_current_markets,
     collect_known_leagues, load_allowed_league_ids, save_league_preferences,
     extract_innings_snapshot,
@@ -26,13 +26,11 @@ def view_home(req: func.HttpRequest) -> func.HttpResponse:
     </head>
     <body>
         <h1>🏏 Cricket Analytics Platform</h1>
-        <p>Browse live, upcoming and historical betting data</p>
-        <div class="card"><a href="/api/matches/view">Live Matches</a><p>Real-time matches with live odds and Bet365 markets</p></div>
+        <p>Browse upcoming and historical betting data</p>
         <div class="card"><a href="/api/prematch/view">Upcoming Matches</a><p>Prematch odds and markets before the game starts</p></div>
         <div class="card"><a href="/api/leagues/view">Leagues</a><p>Browse matches grouped by leagues</p></div>
         <div class="card"><a href="/api/prematch/leagues/view">Prematch Leagues</a><p>Upcoming matches grouped by leagues</p></div>
         <div class="card"><a href="/api/ended/view">Ended Matches</a><p>Recently finished matches with final results</p></div>
-        <div class="card"><a href="/api/innings-tracker">Innings Tracker Analytics</a><p>Over/Under prediction accuracy by over stage, team, venue and odds</p></div>
         <h2 style="margin:24px 0 4px; color:#333;">T20</h2>
         <h3 style="margin:16px 0 4px; color:#555; font-size:15px; text-transform:uppercase; letter-spacing:1px;">Model</h3>
         <div class="card"><a href="/api/ml/win-predictor">ML Win Predictor</a><p>Model performance, feature importances and algorithm comparison across all three prediction windows</p></div>

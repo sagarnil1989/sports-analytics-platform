@@ -1,8 +1,9 @@
-from ._common import (
+from .common import (
     json, logging, os, escape, Any, Dict, List, Optional,
     func, ResourceNotFoundError,
     call_betsapi, download_json, download_required_json, format_unix_ts,
-    get_bronze_container_client, get_named_container_client, safe_float, upload_json, utc_now,
+    get_named_container_client, parse_ss_final_scores,
+    safe_float, upload_json, utc_now,
     extract_bet365_current_markets,
     collect_known_leagues, load_allowed_league_ids, save_league_preferences,
     extract_innings_snapshot,
@@ -14,7 +15,7 @@ def view_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
     try:
         event_id = req.route_params.get("event_id")
         gold = get_named_container_client("gold")
-        tracker = download_json(gold, f"cricket/innings_tracker/event_id={event_id}/innings_1.json") or {}
+        tracker = download_json(gold, f"event_id={event_id}/innings_tracker.json") or {}
 
         match_name = escape(str(tracker.get("match_name") or f"Match {event_id}"))
         venue = escape(str(tracker.get("venue") or ""))
@@ -25,6 +26,9 @@ def view_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
         rows_data: List[Dict[str, Any]] = tracker.get("rows", [])
         outcome = tracker.get("outcome")
         actual_total = tracker.get("actual_total")
+        if actual_total is None:
+            _es = parse_ss_final_scores(tracker.get("score_summary_events") or "")
+            actual_total = _es.get("inn1_runs")
 
         timeline_rows = sorted(
             [r for r in rows_data if r.get("predicted_total") is not None],
@@ -159,17 +163,17 @@ def view_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
 
 
 def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
-    """Innings tracker built from per-delivery silver state files.
+    """Innings tracker built from silver data.
 
-    Reads gold/cricket/innings_tracker/event_id={event_id}/innings_1_from_silver.json
-    which is pre-built by the batch silver reprocessing script.
+    Reads gold/event_id={event_id}/innings_tracker.json which is pre-built by the
+    batch silver reprocessing job (bronze_to_silver + silver_to_gold notebooks).
     Shows one row per unique match state with ball window, score, predicted total,
     and Match Winner 2-Way odds per delivery.
     """
     try:
         event_id = req.route_params.get("event_id")
         gold = get_named_container_client("gold")
-        tracker = download_json(gold, f"cricket/innings_tracker/event_id={event_id}/innings_1_from_silver.json") or {}
+        tracker = download_json(gold, f"event_id={event_id}/innings_tracker.json") or {}
 
         if not tracker:
             return func.HttpResponse(
@@ -190,11 +194,10 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
         venue_parts= [p for p in [venue_str, city_str, country_str] if p]
         venue      = escape(", ".join(venue_parts))
 
-        # Parse final score and build scoreboard
         import re as _re
         final_ss = (
-            tracker.get("final_score_ss")
-            or tracker.get("score_summary_events")
+            tracker.get("score_summary_events")
+            or tracker.get("final_score_ss")
             or tracker.get("score_summary_bet365")
             or ""
         )
@@ -222,6 +225,13 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
                 inn1_bat_team = str(r["batting_team"]).strip()
                 break
         away_batted_first = bool(inn1_bat_team and away_team and inn1_bat_team == away_team.strip())
+
+        # Build display name in batting-first order for header
+        if away_batted_first:
+            swapped = match_name.replace(f"{home_team} vs {away_team}", f"{away_team} vs {home_team}", 1)
+            display_match_name = escape(swapped if swapped != match_name else f"{away_team} vs {home_team}")
+        else:
+            display_match_name = match_name
 
         scoreboard_html = ""
         if final_ss and "," in final_ss:
@@ -289,6 +299,9 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
                 {venue_line}
             </div>"""
         actual_total = tracker.get("actual_total")
+        if actual_total is None and _ended2:
+            _es2 = parse_ss_final_scores(_ended2.get("score", ""))
+            actual_total = _es2.get("inn1_runs")
         outcome      = tracker.get("outcome")
 
         def ball_pill(b: str) -> str:
@@ -345,8 +358,6 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
         table_rows = ""
         for r in rows_data:
             innings  = r.get("innings", 1)
-            if innings != 1:
-                continue
             pred     = r.get("predicted_total")
             runs     = r.get("runs")
             wickets  = r.get("wickets", 0)
@@ -369,7 +380,7 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
 
             row_class = ""
             outcome_cell = "-"
-            if actual_total is not None and pred is not None and innings == 1:
+            if innings == 1 and actual_total is not None and pred is not None:
                 if actual_total > pred:
                     row_class = ' class="over-row"'
                     outcome_cell = "▲ Over"
@@ -424,7 +435,7 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
         html = f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>Innings Tracker — {match_name}</title>
+    <title>Innings Tracker — {display_match_name}</title>
     <style>
         body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
         h1 {{ margin-bottom: 4px; }}
@@ -468,9 +479,9 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
 </head>
 <body>
     <p><a href="/api/matches/{escape(str(event_id))}/view">← Back to match</a> | <a href="/api/matches/{escape(str(event_id))}/heatmap">Heatmap</a> | <a href="/api/matches/{escape(str(event_id))}/detailed-analysis">Detailed Analysis</a> | <a href="/api/innings-tracker">All matches analytics</a></p>
-    <h1>Innings Tracker — {match_name}</h1>
+    <h1>Innings Tracker — {display_match_name}</h1>
     <div class="meta">📅 {match_date} &nbsp;|&nbsp; {league}</div>
-    <div class="meta">{escape(home_team)} vs {escape(away_team)} &nbsp;|&nbsp; <b>{len(rows_data)} states</b></div>
+    <div class="meta">{display_match_name} &nbsp;|&nbsp; {len(rows_data)} snapshots captured</div>
     {scoreboard_html}
     {summary_html}
     <table>
@@ -519,7 +530,7 @@ def view_innings_tracker_analytics(req: func.HttpRequest) -> func.HttpResponse:
         except Exception:
             f_max_wkts_int = None
 
-        idx = download_json(gold, "cricket/innings_tracker/index.json") or {}
+        idx = download_json(gold, "index/innings_tracker.json") or {}
         all_matches = idx.get("matches", [])
 
         result_rows: List[Dict[str, Any]] = []
@@ -532,7 +543,7 @@ def view_innings_tracker_analytics(req: func.HttpRequest) -> func.HttpResponse:
                 continue
             event_id_m = str(meta.get("event_id") or "")
             actual_total = meta.get("actual_total")
-            tracker = download_json(gold, f"cricket/innings_tracker/event_id={event_id_m}/innings_1.json") or {}
+            tracker = download_json(gold, f"event_id={event_id_m}/innings_tracker.json") or {}
 
             for r in tracker.get("rows", []):
                 # Analytics page is for innings 1 O/U prediction only — skip innings 2 rows

@@ -1,4 +1,4 @@
-from ._common import (
+from .common import (
     json, logging, escape, func,
     download_json, get_named_container_client,
     build_simple_table_page,

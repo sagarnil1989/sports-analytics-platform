@@ -32,39 +32,40 @@ def _dl(container, path):
         return None
 
 # COMMAND ----------
-# ── 1. Find all processed-snapshot markers for this event ─────────────────────
+# ── 1. Find all silver snapshots for this event ───────────────────────────────
 
-prefix = "cricket/control/processed_snapshots/"
-markers = []
-for blob in silver.list_blobs(name_starts_with=prefix):
-    fname = blob.name.split("/")[-1]          # e.g. 20260501T123456Z_11658820_194752823.json
-    parts = fname.replace(".json", "").split("_")
-    if len(parts) >= 2 and parts[1] == EVENT_ID:
-        markers.append({
-            "marker_path": blob.name,
-            "snapshot_id": parts[0],
-            "event_id":    parts[1],
-            "fi":          parts[2] if len(parts) > 2 else None,
-            "last_modified": blob.last_modified,
-        })
+silver_prefix = f"event_id={EVENT_ID}/"
+snapshots = []
+seen_sids = set()
+for blob in silver.list_blobs(name_starts_with=silver_prefix):
+    if not blob.name.endswith("/innings_snapshot.json"):
+        continue
+    parts = blob.name.split("/")
+    sid = next((p[12:] for p in parts if p.startswith("snapshot_id=")), None)
+    if not sid or sid in seen_sids:
+        continue
+    seen_sids.add(sid)
+    snapshots.append({
+        "snapshot_id": sid,
+        "innings_snap_path": blob.name,
+        "last_modified": blob.last_modified,
+    })
 
-markers.sort(key=lambda x: x["snapshot_id"])
-print(f"Processed snapshots found: {len(markers)}")
-if not markers:
-    dbutils.notebook.exit(f"No processed snapshots found for event_id={EVENT_ID}")
+snapshots.sort(key=lambda x: x["snapshot_id"])
+print(f"Silver snapshots found: {len(snapshots)}")
+if not snapshots:
+    dbutils.notebook.exit(f"No silver snapshots found for event_id={EVENT_ID}")
 
 # COMMAND ----------
-# ── 2. Load marker payloads + innings_snapshot in parallel ────────────────────
+# ── 2. Load innings_snapshot payloads in parallel ─────────────────────────────
 
-def _load_marker(m):
-    doc = _dl(silver, m["marker_path"]) or {}
-    base = doc.get("silver_base_path", "").lstrip("silver/")
-    snap = _dl(silver, f"{base}/innings_snapshot.json") if base else None
-    return {**m, "marker": doc, "innings_snap": snap}
+def _load_snap(s):
+    snap = _dl(silver, s["innings_snap_path"]) or {}
+    return {**s, "innings_snap": snap}
 
 rows = []
 with ThreadPoolExecutor(max_workers=64) as ex:
-    futs = {ex.submit(_load_marker, m): m for m in markers}
+    futs = {ex.submit(_load_snap, s): s for s in snapshots}
     for fut in as_completed(futs):
         rows.append(fut.result())
 
@@ -95,8 +96,7 @@ records = []
 prev_time = None
 
 for r in rows:
-    snap   = r["innings_snap"] or {}
-    marker = r["marker"]
+    snap = r["innings_snap"]
 
     snap_time_str = snap.get("snapshot_time_utc") or r["last_modified"].isoformat()
     try:
@@ -121,13 +121,11 @@ for r in rows:
         "target":       str(snap.get("target") if snap.get("target") is not None else ""),
         "batting_team": (snap.get("batting_team") or "")[:20],
         "ball_window":  ball_str,
-        "markets":      str(marker.get("current_market_selection_count", 0)),
         "gap_prev_s":   str(gap_s) if gap_s is not None else "",
     })
 
 df = pd.DataFrame(records)
 
-# Keep numeric versions for charts — separate from the display-safe string df
 def _int(v):
     try: return int(v)
     except: return None
@@ -136,15 +134,13 @@ df["_runs"]    = df["runs"].apply(_int)
 df["_wickets"] = df["wickets"].apply(_int)
 df["_innings"] = df["innings"].apply(_int)
 df["_gap_s"]   = df["gap_prev_s"].apply(lambda v: float(v) if v else None)
-df["_markets"] = df["markets"].apply(_int)
 
-first_snap = rows[0]["innings_snap"] or {}
-print(f"\nMatch: {first_snap.get('match_name', 'Unknown')}")
-print(f"League: {first_snap.get('league_name', 'Unknown')}")
-print(f"Date range: {df['time_utc'].iloc[0]}  →  {df['time_utc'].iloc[-1]}")
+if rows:
+    first_snap = rows[0]["innings_snap"]
+    print(f"\nMatch: {first_snap.get('match_name', 'Unknown')}")
+    print(f"Date range: {df['time_utc'].iloc[0]}  →  {df['time_utc'].iloc[-1]}")
 
-# display-safe: all strings, Arrow has no trouble with uniform str columns
-display_df = df[["snapshot_id","time_utc","innings","over","score","batting_team","ball_window","markets","gap_prev_s"]]
+display_df = df[["snapshot_id","time_utc","innings","over","score","batting_team","ball_window","gap_prev_s"]]
 display(spark.createDataFrame(display_df))
 
 # COMMAND ----------
@@ -178,7 +174,6 @@ display(spark.createDataFrame(gap_df))
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import numpy as np
 
 plot_df = df[df["_runs"].notna()].copy()
@@ -186,7 +181,6 @@ plot_df["snap_dt"] = pd.to_datetime(plot_df["time_utc"])
 
 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 10), gridspec_kw={"height_ratios": [3, 1]})
 
-# ── Top: run progression ──────────────────────────────────────────────────────
 colors = {1: "#2196F3", 2: "#FF5722"}
 for inn in [1, 2]:
     seg = plot_df[plot_df["_innings"] == inn]
@@ -206,9 +200,10 @@ ax1.legend()
 ax1.grid(True, alpha=0.3)
 ax1.tick_params(axis="x", rotation=30)
 
-# ── Bottom: market selection count ───────────────────────────────────────────
-ax2.bar(plot_df["snap_dt"], plot_df["_markets"].fillna(0), color="#9C27B0", alpha=0.6, width=0.001)
-ax2.set_ylabel("Markets", fontsize=10)
+# Over-by-over gap bar (replacing market count — no longer in innings_snapshot)
+gap_plot = plot_df.copy()
+ax2.bar(gap_plot["snap_dt"], gap_plot["_gap_s"].fillna(0), color="#9C27B0", alpha=0.6, width=0.001)
+ax2.set_ylabel("Gap (s)", fontsize=10)
 ax2.set_xlabel("Time (UTC)", fontsize=10)
 ax2.grid(True, alpha=0.3)
 ax2.tick_params(axis="x", rotation=30)
@@ -220,14 +215,13 @@ plt.close(fig)
 # COMMAND ----------
 # ── 7. Over-by-over summary table ─────────────────────────────────────────────
 
-# One row per over — last snapshot in that over
 over_df = df[df["over"].str.match(r"^\d+\.\d+$", na=False)].copy()
 over_df["over_num"] = over_df["over"].apply(lambda x: int(x.split(".")[0]))
 over_summary = (
     over_df.sort_values("snapshot_id")
            .groupby(["innings", "over_num"])
            .last()
-           .reset_index()[["innings", "over_num", "over", "score", "ball_window", "markets"]]
+           .reset_index()[["innings", "over_num", "over", "score", "ball_window"]]
            .sort_values(["innings", "over_num"])
            .astype(str)
 )

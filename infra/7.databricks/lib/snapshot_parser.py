@@ -4,7 +4,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from api_and_blob import (
+from util import (
     blob_exists,
     download_json,
     download_required_json,
@@ -370,9 +370,17 @@ def silver_parse_snapshot(
     ev = next((r for r in records if r.get("type") == "EV"), {})
     matching_event = find_matching_event(events_inplay_payload, event_id, fi) or {}
 
+    # event_view_payload is the response of BetsAPI /v1/event/view captured by the
+    # Function App and saved to bronze as api_event_view.json. It is NOT a live API
+    # call here — the parser reads the already-saved bronze file. event_view_item is
+    # the first result from that response and contains the authoritative ss field
+    # (score with overs, e.g. "167/6(19.5)-163/9(20)") once the match is over.
     event_view_results = extract_results(event_view_payload or {})
     event_view_item = event_view_results[0] if event_view_results and isinstance(event_view_results[0], dict) else {}
 
+    # matching_event is the entry for this match from BetsAPI /v3/events/inplay
+    # (also pre-captured to bronze as api_inplay_event_list.json). It is real-time
+    # and fast, but its ss field can be briefly stale right as a match ends.
     match_from_filter = manifest.get("match_from_filter", {})
     home = matching_event.get("home") or event_view_item.get("home") or match_from_filter.get("home") or {}
     away = matching_event.get("away") or event_view_item.get("away") or match_from_filter.get("away") or {}
@@ -392,9 +400,24 @@ def silver_parse_snapshot(
         "away_team_name": away.get("name"),
         "match_name": ev.get("NA"),
         "time_status": matching_event.get("time_status") or match_from_filter.get("time_status"),
-        # When the match has ended (time_status=3), prefer event_view ss — it holds the
-        # authoritative final score. The inplay API can briefly show a stale ss while
-        # still marking time_status=3, which caused wrong final scores being stored.
+        # ss field format from BetsAPI: "167/6(19.5)-163/9(20)"
+        #   → home score first, hyphen-separated, overs in brackets.
+        #   → consumers normalise with .replace("-", ",") to get "167/6(19.5),163/9(20)".
+        #
+        # Priority when match is LIVE (time_status != 3):
+        #   1. matching_event.ss   — from /v3/events/inplay: fastest, most up-to-date ball-by-ball
+        #   2. event_view_item.ss  — from /v1/event/view: slightly behind, used as fallback
+        #   3. match_from_filter   — last known value from the manifest, last resort
+        #
+        # Priority when match has ENDED (time_status == 3):
+        #   1. event_view_item.ss  — from /v1/event/view: authoritative final score WITH overs
+        #   2. matching_event.ss   — from /v3/events/inplay: can briefly show stale score at
+        #                            match end (e.g. 161 instead of 167 for a few seconds)
+        #   3. match_from_filter   — last resort fallback
+        #
+        # NOTE: this value is written to silver match_state.json. The gold tracker's
+        # score_summary_events (the single source of truth) is then set by gold_rebuild.py
+        # which makes a fresh /v1/event/view call at rebuild time to get the definitive score.
         "score_summary_events": (
             event_view_item.get("ss") or matching_event.get("ss") or match_from_filter.get("raw_item", {}).get("ss")
             if str(matching_event.get("time_status") or match_from_filter.get("time_status") or "") == "3"
@@ -423,7 +446,7 @@ def silver_parse_snapshot(
         "source_bronze_manifest_path": f"bronze/betsapi/inplay_snapshot/sport_id={sport_id}/event_id={event_id}/fi={fi}/snapshot_id={snapshot_id}/manifest.json",
         "source_bronze_lineage_path": f"bronze/betsapi/inplay_snapshot/sport_id={sport_id}/event_id={event_id}/fi={fi}/snapshot_id={snapshot_id}/lineage.json",
     }
-    from api_and_blob import format_unix_ts
+    from util import format_unix_ts
     match_snapshot["event_time_utc"] = format_unix_ts(match_snapshot["event_time_unix"])
 
     team_scores: List[Dict[str, Any]] = []
@@ -653,19 +676,15 @@ def silver_write_state_file(silver_container, parsed: Dict[str, Any]) -> None:
         "snapshot_time_utc": match["snapshot_time_utc"],
     }
 
-    state_path = f"cricket/inplay/state/event_id={event_id}/state_{innings_no}_{n}_{w}_{b}.json"
+    state_path = f"event_id={event_id}/state/state_{innings_no}_{n}_{w}_{b}.json"
     upload_json(silver_container, state_path, state_file, overwrite=True)
 
 
-def silver_write_outputs(silver_container, parsed: Dict[str, Any]) -> None:
+def silver_write_outputs(silver_container, parsed: Dict[str, Any], write_marker: bool = True) -> None:
     """Write all silver outputs for one parsed snapshot, including innings tracker accumulator."""
     match = parsed["match_snapshot"]
-    dt = datetime.fromisoformat(match["snapshot_time_utc"].replace("Z", "+00:00"))
     event_id = match["event_id"]
-    base = (
-        f"cricket/inplay/year={dt.year}/month={dt.month:02d}/day={dt.day:02d}/hour={dt.hour:02d}/"
-        f"event_id={event_id}/snapshot_id={match['snapshot_id']}"
-    )
+    base = f"event_id={event_id}/snapshot_id={match['snapshot_id']}"
     upload_json(silver_container, f"{base}/match_state.json", parsed["match_snapshot"], overwrite=True)
     upload_json(silver_container, f"{base}/team_scores.json", {"rows": parsed["team_scores"]}, overwrite=True)
     upload_json(silver_container, f"{base}/player_entries.json", {"rows": parsed["player_entries"]}, overwrite=True)
@@ -674,7 +693,7 @@ def silver_write_outputs(silver_container, parsed: Dict[str, Any]) -> None:
     upload_json(silver_container, f"{base}/active_markets.json", {"rows": current_market_rows}, overwrite=True)
 
     if current_market_rows:
-        control_path = f"cricket/inplay/control/event_id={event_id}/last_known_markets.json"
+        control_path = f"event_id={event_id}/last_known_markets.json"
         upload_json(silver_container, control_path, {
             "rows": current_market_rows,
             "snapshot_id": match["snapshot_id"],
@@ -686,7 +705,7 @@ def silver_write_outputs(silver_container, parsed: Dict[str, Any]) -> None:
     innings_point = extract_innings_snapshot(match, parsed["team_scores"], current_market_rows)
     if innings_point is not None:
         upload_json(silver_container, f"{base}/innings_snapshot.json", innings_point, overwrite=True)
-        acc_path = f"cricket/inplay/control/event_id={event_id}/innings_accumulator.json"
+        acc_path = f"event_id={event_id}/innings_accumulator.json"
         acc = download_json(silver_container, acc_path) or {
             "event_id": event_id,
             "match_name": match.get("match_name"),
@@ -729,7 +748,8 @@ def silver_write_outputs(silver_container, parsed: Dict[str, Any]) -> None:
         "innings_snapshot_written": innings_point is not None,
         "lineage_path": f"silver/{base}/lineage.json" if match.get("api_lineage") else None,
     }
-    upload_json(silver_container, marker_path, marker, overwrite=True)
+    if write_marker:
+        upload_json(silver_container, marker_path, marker, overwrite=True)
 
 
 def silver_parse_bronze_to_silver() -> None:

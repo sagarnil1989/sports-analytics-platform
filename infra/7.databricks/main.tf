@@ -61,9 +61,9 @@ resource "databricks_secret" "bets_api_token" {
 # Terraform re-uploads whenever the local file changes (hash-based detection).
 # ---------------------------------------------------------------------------
 
-resource "databricks_dbfs_file" "api_and_blob_py" {
-  source = "${local.src_path}/api_and_blob.py"
-  path   = "${local.dbfs_src_path}/api_and_blob.py"
+resource "databricks_dbfs_file" "util_py" {
+  source = "${local.src_path}/util.py"
+  path   = "${local.dbfs_src_path}/util.py"
 }
 
 resource "databricks_dbfs_file" "snapshot_parser_py" {
@@ -91,32 +91,31 @@ resource "databricks_dbfs_file" "gold_rebuild_py" {
   path   = "${local.dbfs_src_path}/gold_rebuild.py"
 }
 
+resource "databricks_dbfs_file" "prematch_page_builder_py" {
+  source = "${path.module}/lib/prematch_page_builder.py"
+  path   = "${local.dbfs_src_path}/prematch_page_builder.py"
+}
+
 
 # ---------------------------------------------------------------------------
 # Databricks notebooks
 # ---------------------------------------------------------------------------
 
-resource "databricks_notebook" "silver_build_ended_match" {
-  source   = "${path.module}/notebooks/silver_build_ended_match.py"
-  path     = "/cricket-pipeline/silver_build_ended_match"
+resource "databricks_notebook" "bronze_to_silver" {
+  source   = "${path.module}/notebooks/bronze_to_silver.py"
+  path     = "/cricket-pipeline/bronze_to_silver"
   language = "PYTHON"
 }
 
-resource "databricks_notebook" "gold_build_ended_match" {
-  source   = "${path.module}/notebooks/gold_build_ended_match.py"
-  path     = "/cricket-pipeline/gold_build_ended_match"
+resource "databricks_notebook" "silver_to_gold" {
+  source   = "${path.module}/notebooks/silver_to_gold.py"
+  path     = "/cricket-pipeline/silver_to_gold"
   language = "PYTHON"
 }
 
-resource "databricks_notebook" "gold_backfill" {
-  source   = "${path.module}/notebooks/gold_backfill.py"
-  path     = "/cricket-pipeline/gold_backfill"
-  language = "PYTHON"
-}
-
-resource "databricks_notebook" "silver_backfill" {
-  source   = "${path.module}/notebooks/silver_backfill.py"
-  path     = "/cricket-pipeline/silver_backfill"
+resource "databricks_notebook" "gold_build_prematch_pages" {
+  source   = "${path.module}/notebooks/gold_build_prematch_pages.py"
+  path     = "/cricket-pipeline/gold_build_prematch_pages"
   language = "PYTHON"
 }
 
@@ -164,5 +163,11 @@ resource "databricks_notebook" "hypothesis_inn2_over6" {
 resource "databricks_notebook" "hypothesis_timeout_wicket" {
   source   = "${path.module}/notebooks/hypothesis_timeout_wicket.py"
   path     = "/cricket-pipeline/hypothesis/timeout_wicket"
+  language = "PYTHON"
+}
+
+resource "databricks_notebook" "analysis_ended_match_table" {
+  source   = "${path.module}/notebooks/analysis_ended_match_table.py"
+  path     = "/cricket-pipeline/analysis/ended_match_table"
   language = "PYTHON"
 }

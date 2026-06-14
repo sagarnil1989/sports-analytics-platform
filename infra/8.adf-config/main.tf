@@ -69,9 +69,9 @@ resource "azurerm_data_factory_linked_service_azure_databricks" "main" {
 # ---------------------------------------------------------------------------
 # ADF — pipeline: build ended match (daily scheduled)
 #
-# Activity 1: silver_build_ended_match notebook
+# Activity 1: bronze_to_silver notebook (no event_id = all quiet matches)
 #   Parses bronze → silver for matches quiet >1 hour.
-# Activity 2: gold_build_ended_match notebook (depends on Activity 1 success)
+# Activity 2: silver_to_gold notebook (depends on Activity 1 success)
 #   Rebuilds innings_1_from_silver.json from silver. No bronze access.
 # Activity 3: discover_cricket_ended notebook (depends on Activity 2 success)
 #   Scans gold tracker files and writes the ended index to bronze.
@@ -91,7 +91,7 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
 
   activities_json = jsonencode([
     {
-      name = "RunSilverBuildEndedMatch"
+      name = "bronze_to_silver"
       type = "DatabricksNotebook"
       policy = {
         timeout = "0.04:00:00"
@@ -101,18 +101,18 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
         type          = "LinkedServiceReference"
       }
       typeProperties = {
-        notebookPath = "/cricket-pipeline/silver_build_ended_match"
+        notebookPath = "/cricket-pipeline/bronze_to_silver"
       }
     },
     {
-      name = "RunGoldBuildEndedMatch"
+      name = "silver_to_gold"
       type = "DatabricksNotebook"
       policy = {
         timeout = "0.04:00:00"
       }
       dependsOn = [
         {
-          activity             = "RunSilverBuildEndedMatch"
+          activity             = "bronze_to_silver"
           dependencyConditions = ["Succeeded"]
         }
       ]
@@ -121,18 +121,18 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
         type          = "LinkedServiceReference"
       }
       typeProperties = {
-        notebookPath = "/cricket-pipeline/gold_build_ended_match"
+        notebookPath = "/cricket-pipeline/silver_to_gold"
       }
     },
     {
-      name = "RunDiscoverCricketEnded"
+      name = "discover_cricket_ended"
       type = "DatabricksNotebook"
       policy = {
         timeout = "0.01:00:00"
       }
       dependsOn = [
         {
-          activity             = "RunGoldBuildEndedMatch"
+          activity             = "silver_to_gold"
           dependencyConditions = ["Succeeded"]
         }
       ]
@@ -145,14 +145,14 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
       }
     },
     {
-      name = "RunHypothesisInn2Over6"
+      name = "hypothesis_inn2_over6"
       type = "DatabricksNotebook"
       policy = {
         timeout = "0.01:00:00"
       }
       dependsOn = [
         {
-          activity             = "RunDiscoverCricketEnded"
+          activity             = "discover_cricket_ended"
           dependencyConditions = ["Succeeded"]
         }
       ]
@@ -165,14 +165,14 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
       }
     },
     {
-      name = "RunHypothesisTimeoutWicket"
+      name = "hypothesis_timeout_wicket"
       type = "DatabricksNotebook"
       policy = {
         timeout = "0.01:00:00"
       }
       dependsOn = [
         {
-          activity             = "RunDiscoverCricketEnded"
+          activity             = "discover_cricket_ended"
           dependencyConditions = ["Succeeded"]
         }
       ]
@@ -208,9 +208,9 @@ resource "azurerm_data_factory_trigger_schedule" "build_ended_match" {
 # ---------------------------------------------------------------------------
 # ADF — pipeline: backfill (manual trigger only)
 #
-# Activity 1: silver_backfill notebook
-#   Pass event_id to process one quiet match, or leave empty to loop 4 hours.
-# Activity 2: gold_backfill notebook (depends on Activity 1 success)
+# Activity 1: bronze_to_silver notebook
+#   Pass event_id to process one quiet match, or leave empty to process all quiet matches.
+# Activity 2: silver_to_gold notebook (depends on Activity 1 success)
 #   Rebuilds gold for the same event_id (or all stale events if empty).
 #
 # Both activities receive the same event_id parameter.
@@ -227,7 +227,7 @@ resource "azurerm_data_factory_pipeline" "backfill" {
 
   activities_json = jsonencode([
     {
-      name = "RunSilverBackfill"
+      name = "bronze_to_silver"
       type = "DatabricksNotebook"
       policy = {
         timeout = "0.04:00:00"
@@ -237,21 +237,21 @@ resource "azurerm_data_factory_pipeline" "backfill" {
         type          = "LinkedServiceReference"
       }
       typeProperties = {
-        notebookPath   = "/cricket-pipeline/silver_backfill"
+        notebookPath   = "/cricket-pipeline/bronze_to_silver"
         baseParameters = {
           event_id = "@pipeline().parameters.event_id"
         }
       }
     },
     {
-      name = "RunGoldBackfill"
+      name = "silver_to_gold"
       type = "DatabricksNotebook"
       policy = {
         timeout = "0.04:00:00"
       }
       dependsOn = [
         {
-          activity             = "RunSilverBackfill"
+          activity             = "bronze_to_silver"
           dependencyConditions = ["Succeeded"]
         }
       ]
@@ -260,7 +260,7 @@ resource "azurerm_data_factory_pipeline" "backfill" {
         type          = "LinkedServiceReference"
       }
       typeProperties = {
-        notebookPath   = "/cricket-pipeline/gold_backfill"
+        notebookPath   = "/cricket-pipeline/silver_to_gold"
         baseParameters = {
           event_id = "@pipeline().parameters.event_id"
         }

@@ -95,20 +95,14 @@ def parse_ball_window(bw):
     return {"dots": dots, "fours": boundaries_4, "sixes": boundaries_6, "wickets": wickets, "extras": extras}
 
 def silver_team_scores_path(event_id, snapshot_id):
-    try:
-        dt = datetime.strptime(snapshot_id, "%Y%m%dT%H%M%SZ")
-        return (f"cricket/inplay/year={dt.year}/month={dt.month:02d}/day={dt.day:02d}"
-                f"/hour={dt.hour:02d}/event_id={event_id}/snapshot_id={snapshot_id}/team_scores.json")
-    except Exception:
-        return None
+    return f"event_id={event_id}/snapshot_id={snapshot_id}/team_scores.json"
 
 # COMMAND ----------
 # ═══════════════════════════════════════════════════════════════════
 # SECTION 1 — MATCH HEADER (from gold tracker)
 # ═══════════════════════════════════════════════════════════════════
 
-tracker = (_dl(gold, f"cricket/innings_tracker/event_id={EVENT_ID}/innings_1_from_silver.json")
-           or _dl(gold, f"cricket/innings_tracker/event_id={EVENT_ID}/innings_1.json"))
+tracker = _dl(gold, f"event_id={EVENT_ID}/innings_tracker.json")
 
 if not tracker:
     dbutils.notebook.exit(f"No gold tracker found for event_id={EVENT_ID}")

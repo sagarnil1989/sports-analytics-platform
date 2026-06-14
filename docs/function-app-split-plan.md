@@ -63,7 +63,7 @@ identical until Phase 5 strips the views from ingestion.
 
 ## Phase 3 — Terraform (`infra/3.function-app/`) ✅ COMPLETE
 
-**No changes to existing `func-ramanuj`** — adding display app alongside it.
+**`func-ramanuj` was later renamed to `func-ramanuj-ingestion`** (2026-06-10) to match naming convention.
 
 New resources added to `main.tf`:
 

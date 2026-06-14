@@ -1,8 +1,7 @@
-# Databricks notebook: gold — ended match innings builder
-# Called by ADF pl_silver_build_ended_match on success (ExecutePipeline activity).
-# Reads from silver only — no bronze access.
-# Rebuilds innings_1_from_silver.json for every event where silver has data
-# newer than the existing gold file.
+# Databricks notebook: gold — prematch page builder
+# Called by ADF pl_build_prematch_pages (runs daily at 07:00 UTC).
+# Reads bronze/betsapi/prematch_snapshot/ and writes gold/cricket/prematch/.
+# No input parameters — always processes all recent bronze prematch snapshots.
 
 # COMMAND ----------
 
@@ -23,5 +22,6 @@ os.environ["SPORT_ID"]                       = dbutils.secrets.get("cricket-pipe
 
 # COMMAND ----------
 
-from gold_rebuild import gold_rebuild_ended_matches
-gold_rebuild_ended_matches()
+from prematch_page_builder import gold_build_prematch_pages
+
+gold_build_prematch_pages()

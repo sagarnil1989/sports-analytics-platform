@@ -201,7 +201,7 @@ reduced set. This keeps the model clean and prevents noise from irrelevant colum
 
 **1. Website** (easiest, no login needed)
 
-`https://func-ramanuj.azurewebsites.net/api/ml/win-predictor`
+`https://func-ramanuj-display.azurewebsites.net/api/ml/win-predictor`
 
 Shows: model comparison table, feature importance bars, LSTM status.
 Also linked from the Home page.

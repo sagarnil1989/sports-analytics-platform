@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from api_and_blob import call_betsapi, download_json, get_named_container_client, upload_json
+from util import call_betsapi, download_json, extract_results, get_named_container_client, upload_json
 from tracker_writer import extract_innings_snapshot
 from league_config import load_allowed_league_ids
 
@@ -27,10 +27,8 @@ def _silver_snapshot_paths_for_event(silver_container, event_id: str) -> List[st
     """List all silver match_state.json paths for one event, sorted oldest-first."""
     paths = []
     seen_sids: set = set()
-    for blob in silver_container.list_blobs(name_starts_with="cricket/inplay/year="):
+    for blob in silver_container.list_blobs(name_starts_with=f"event_id={event_id}/"):
         if not blob.name.endswith("/match_state.json"):
-            continue
-        if f"/event_id={event_id}/" not in blob.name:
             continue
         parts = blob.name.split("/")
         sid = next((p for p in parts if p.startswith("snapshot_id=")), None)
@@ -43,7 +41,7 @@ def _silver_snapshot_paths_for_event(silver_container, event_id: str) -> List[st
 
 
 def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Rebuild innings_1.json and innings_1_from_silver.json for one event from silver data."""
+    """Rebuild innings_tracker.json for one event from silver data."""
     silver = get_named_container_client("silver")
     gold   = get_named_container_client("gold")
 
@@ -56,7 +54,7 @@ def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = N
 
     snapshot_paths.sort()
 
-    gold_tracker_path = f"cricket/innings_tracker/event_id={event_id}/innings_1.json"
+    gold_tracker_path = f"event_id={event_id}/innings_tracker.json"
     existing_gold = download_json(gold, gold_tracker_path) or {}
 
     silver_score = stadium_data = silver_match_name = None
@@ -131,6 +129,19 @@ def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = N
                             point["away_team_odds"] = a
                             break
             if point is not None:
+                ts_rows = team_scores_doc.get("rows", [])
+                bat_row  = next((r for r in ts_rows if str((r.get("raw") or {}).get("PI") or r.get("pi") or "") == "1"), None)
+                bowl_row = next((r for r in ts_rows if str((r.get("raw") or {}).get("PI") or r.get("pi") or "") == "0"), None)
+                if bat_row is None:
+                    bat_row = next((r for r in ts_rows if r.get("s6")), None)
+                if bowl_row is None:
+                    bowl_row = next((r for r in ts_rows if r != bat_row), None)
+                if bat_row:
+                    point["s6"]     = bat_row.get("s6")
+                    point["s7_bat"] = bat_row.get("s7")
+                if bowl_row:
+                    point["s8"]      = bowl_row.get("s8")
+                    point["s7_bowl"] = bowl_row.get("s7")
                 raw_points.append(point)
         except Exception:
             errors += 1
@@ -142,34 +153,38 @@ def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = N
         seen[key] = p
     deduped = sorted(seen.values(), key=lambda p: str(p.get("snapshot_time_utc") or ""))
 
-    # Fetch authoritative final score with overs from BetsAPI event/view.
-    # This is the single source of truth — stored in score_summary_events so all
-    # consumers (ended/view, ML, hypothesis) read from one place.
-    # Falls back to silver/gold score if BetsAPI no longer has the match.
-    try:
-        ev_payload = call_betsapi("/v1/event/view", {"event_id": event_id})
-        ev_result  = (ev_payload.get("results") or [{}])[0]
-        ev_ss      = str(ev_result.get("ss") or "").strip()
-        if ev_ss:
-            ev_ss = ev_ss.replace("-", ",")
-            # Reorder to innings sequence: score_summary is home-first, but we
-            # want batting-first team first.
-            first_bat  = next(
-                (r.get("batting_team") for r in deduped if r.get("innings") == 1 and r.get("batting_team")),
-                None,
-            )
-            ev_home = (
-                (existing_gold.get("home_team_name") or silver_home_team or "").strip()
-            )
-            if first_bat and ev_home and first_bat != ev_home and "," in ev_ss:
-                p0, p1 = ev_ss.split(",", 1)
-                ev_ss = f"{p1.strip()},{p0.strip()}"
-            final_score = ev_ss
-    except Exception:
-        pass
+    # Fetch authoritative final score, home/away, league, and stadium from the
+    # bronze master file written by bronze_capture_ended_event_view (daily function).
+    # That file stores the full /v1/event/view response including overs in ss.
+    # Falls back to a live BetsAPI call if the master file hasn't been written yet.
+    bronze = get_named_container_client("bronze")
+    master_path   = f"betsapi/event_final/event_id={event_id}/event_view.json"
+    master_raw    = download_json(bronze, master_path)
+    master_result = (extract_results(master_raw) or [{}])[0] if master_raw else {}
 
-    acc_path = f"cricket/inplay/control/event_id={event_id}/innings_accumulator.json"
+    if not master_result:
+        try:
+            ev_payload    = call_betsapi("/v1/event/view", {"event_id": event_id})
+            master_result = (extract_results(ev_payload) or [{}])[0]
+        except Exception:
+            master_result = {}
+
+    ev_ss = str(master_result.get("ss") or "").strip()
+    if ev_ss:
+        # Store home-first (same as BetsAPI ss). Do NOT swap here — display layers
+        # (innings_tracker.py, bronze_discover_cricket_ended) already have their own
+        # batting-order swap for presentation. Swapping here causes double-swap.
+        ev_ss = ev_ss.replace("-", ",")
+        final_score = ev_ss
+
+    master_home    = (master_result.get("home")   or {}).get("name") or None
+    master_away    = (master_result.get("away")   or {}).get("name") or None
+    master_league  = (master_result.get("league") or {}).get("name") or None
+    master_stadium = (master_result.get("extra")  or {}).get("stadium_data") or None
+
+    acc_path = f"event_id={event_id}/innings_accumulator.json"
     old_acc  = download_json(silver, acc_path) or {}
+    fi       = str(old_acc.get("fi") or existing_gold.get("fi") or "")
     new_acc  = {
         **old_acc,
         "event_id": event_id,
@@ -195,7 +210,7 @@ def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = N
         if last_pred is not None:
             outcome = "over" if actual_total > last_pred else ("under" if actual_total < last_pred else "push")
 
-    tracker = {**existing_gold, "event_id": event_id, "rows": deduped, "last_updated_utc": _utc_now().isoformat()}
+    tracker = {**existing_gold, "event_id": event_id, "fi": fi, "rows": deduped, "last_updated_utc": _utc_now().isoformat()}
     if final_score:
         tracker["score_summary_events"] = final_score
     if outcome is not None:
@@ -206,16 +221,22 @@ def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = N
         tracker["stadium_data"] = stadium_data
     if not tracker.get("match_name")     and silver_match_name:  tracker["match_name"]     = silver_match_name
     if not tracker.get("league_id")      and silver_league_id:   tracker["league_id"]      = silver_league_id
-    if not tracker.get("league_name")    and silver_league_name: tracker["league_name"]    = silver_league_name
-    if not tracker.get("home_team_name") and silver_home_team:   tracker["home_team_name"] = silver_home_team
-    if not tracker.get("away_team_name") and silver_away_team:   tracker["away_team_name"] = silver_away_team
     if not tracker.get("match_date_utc") and silver_match_date:  tracker["match_date_utc"] = silver_match_date
+    # Master data from bronze event_final overrides silver for names and stadium.
+    tracker["league_name"]    = master_league    or tracker.get("league_name")    or silver_league_name
+    tracker["home_team_name"] = master_home      or tracker.get("home_team_name") or silver_home_team
+    tracker["away_team_name"] = master_away      or tracker.get("away_team_name") or silver_away_team
+    if master_stadium:
+        tracker["stadium_data"] = master_stadium
+    if not tracker.get("stadium_data"):
+        stadium_overrides = download_json(gold, "overrides/stadium_overrides.json") or {}
+        override_name = stadium_overrides.get(event_id)
+        if override_name:
+            tracker["stadium_data"] = {"name": override_name}
+    _combined = f"{tracker.get('match_name') or ''} {tracker.get('league_name') or ''}".lower()
+    tracker["gender"] = "W" if ("women" in _combined or "(w)" in _combined) else "M"
 
     upload_json(gold, gold_tracker_path, tracker, overwrite=True)
-
-    if deduped:
-        silver_tracker_path = f"cricket/innings_tracker/event_id={event_id}/innings_1_from_silver.json"
-        upload_json(gold, silver_tracker_path, tracker, overwrite=True)
 
     return {
         "event_id": event_id,
@@ -228,10 +249,10 @@ def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = N
 
 
 def gold_rebuild_ended_matches(event_id: Optional[str] = None) -> None:
-    """Build/rebuild innings_1_from_silver.json from silver data only.
+    """Build/rebuild innings_tracker.json in gold from silver data.
 
-    Finds events that have silver-processed snapshots but are missing or have
-    a stale innings_1_from_silver.json, then rebuilds each one.
+    Finds events that have a silver complete marker but are missing or have
+    a stale innings_tracker.json in gold, then rebuilds each one.
 
     Args:
         event_id: If provided, process only this event. Otherwise process all stale events.
@@ -239,47 +260,41 @@ def gold_rebuild_ended_matches(event_id: Optional[str] = None) -> None:
     silver = get_named_container_client("silver")
     gold   = get_named_container_client("gold")
 
-    marker_prefix = "cricket/control/processed_snapshots/"
-    silver_newest: Dict[str, Any] = {}
-    for blob in silver.list_blobs(name_starts_with=marker_prefix):
+    # Read event-level complete markers — one file per fully-processed event.
+    silver_complete: Dict[str, Any] = {}
+    for blob in silver.list_blobs(name_starts_with="control/complete/"):
         fname = blob.name.rsplit("/", 1)[-1]
-        if not fname.endswith(".json"):
-            continue
-        parts = fname[:-5].rsplit("_", 2)
-        if len(parts) != 3:
-            continue
-        eid = parts[1]
-        lm = blob.last_modified
-        if lm and (eid not in silver_newest or lm > silver_newest[eid]):
-            silver_newest[eid] = lm
+        if fname.startswith("event_id=") and fname.endswith(".json"):
+            eid = fname[9:-5]
+            silver_complete[eid] = blob.last_modified
 
     if event_id:
-        if event_id not in silver_newest:
+        if event_id not in silver_complete:
             logging.warning(json.dumps({
                 "event": "gold_rebuild_ended_matches_skipped",
-                "reason": "no silver processed snapshots found",
+                "reason": "no silver complete marker found",
                 "event_id": event_id,
             }))
             return
         to_rebuild = [event_id]
     else:
         gold_ts: Dict[str, Any] = {}
-        for blob in gold.list_blobs(name_starts_with="cricket/innings_tracker/event_id="):
-            if blob.name.endswith("innings_1_from_silver.json"):
+        for blob in gold.list_blobs(name_starts_with="event_id="):
+            if blob.name.endswith("/innings_tracker.json"):
                 bparts = blob.name.split("/")
                 ep = next((p for p in bparts if p.startswith("event_id=")), None)
                 if ep:
-                    gold_ts[ep.replace("event_id=", "")] = blob.last_modified
+                    gold_ts[ep[9:]] = blob.last_modified
 
         to_rebuild = []
-        for eid, silver_lm in silver_newest.items():
+        for eid, silver_lm in silver_complete.items():
             gold_lm = gold_ts.get(eid)
             if gold_lm is None or (silver_lm and silver_lm > gold_lm):
                 to_rebuild.append(eid)
 
     logging.info(json.dumps({
         "event": "gold_rebuild_ended_matches_started",
-        "total_silver_events": len(silver_newest),
+        "total_silver_events": len(silver_complete),
         "to_rebuild": len(to_rebuild),
     }))
 
@@ -320,47 +335,33 @@ def auto_rebuild_ended_innings() -> None:
     except Exception:
         pass
 
-    silver_file_written_at: Dict[str, Any] = {}
-    tracker_prefix = "cricket/innings_tracker/event_id="
-    for blob in gold.list_blobs(name_starts_with=tracker_prefix):
-        if blob.name.endswith("innings_1_from_silver.json"):
-            parts = blob.name.split("/")
-            ep = next((p for p in parts if p.startswith("event_id=")), None)
+    gold_tracker_ts: Dict[str, Any] = {}
+    for blob in gold.list_blobs(name_starts_with="event_id="):
+        if blob.name.endswith("/innings_tracker.json"):
+            ep = next((p for p in blob.name.split("/") if p.startswith("event_id=")), None)
             if ep:
-                silver_file_written_at[ep.replace("event_id=", "")] = blob.last_modified
+                gold_tracker_ts[ep[9:]] = blob.last_modified
 
     silver = get_named_container_client("silver")
-    acc_prefix = "cricket/inplay/control/event_id="
     acc_last_mod: Dict[str, Any] = {}
-    for blob in silver.list_blobs(name_starts_with=acc_prefix):
-        if not blob.name.endswith("innings_accumulator.json"):
+    for blob in silver.list_blobs(name_starts_with="event_id="):
+        if not blob.name.endswith("/innings_accumulator.json"):
             continue
-        parts = blob.name.split("/")
-        ep = next((p for p in parts if p.startswith("event_id=")), None)
+        ep = next((p for p in blob.name.split("/") if p.startswith("event_id=")), None)
         if ep:
-            acc_last_mod[ep.replace("event_id=", "")] = blob.last_modified
+            acc_last_mod[ep[9:]] = blob.last_modified
 
     candidates: List[str] = []
     seen: set = set()
 
-    for blob in gold.list_blobs(name_starts_with=tracker_prefix):
-        if not blob.name.endswith("innings_1.json"):
-            continue
-        parts = blob.name.split("/")
-        ep = next((p for p in parts if p.startswith("event_id=")), None)
-        if not ep:
-            continue
-        eid = ep.replace("event_id=", "")
+    for eid, gold_lm in gold_tracker_ts.items():
         if eid in live_eids or eid in seen:
             continue
-        last_mod = blob.last_modified
-        if last_mod and last_mod > one_hour_ago:
+        if gold_lm and gold_lm > one_hour_ago:
             continue
-        silver_ts = silver_file_written_at.get(eid)
-        if silver_ts is not None:
-            acc_ts = acc_last_mod.get(eid)
-            if acc_ts is None or acc_ts <= silver_ts:
-                continue
+        acc_ts = acc_last_mod.get(eid)
+        if acc_ts is None or acc_ts <= gold_lm:
+            continue
         candidates.append(eid)
         seen.add(eid)
 
@@ -369,8 +370,7 @@ def auto_rebuild_ended_innings() -> None:
             continue
         if acc_ts and acc_ts > one_hour_ago:
             continue
-        silver_ts = silver_file_written_at.get(eid)
-        if silver_ts is not None and acc_ts is not None and acc_ts <= silver_ts:
+        if gold_tracker_ts.get(eid) is not None:
             continue
         candidates.append(eid)
         seen.add(eid)
@@ -384,8 +384,8 @@ def auto_rebuild_ended_innings() -> None:
         if rebuilt >= 2:
             break
         tracker = (
-            download_json(gold, f"cricket/innings_tracker/event_id={eid}/innings_1.json")
-            or download_json(silver, f"cricket/inplay/control/event_id={eid}/innings_accumulator.json")
+            download_json(gold, f"event_id={eid}/innings_tracker.json")
+            or download_json(silver, f"event_id={eid}/innings_accumulator.json")
         )
         if not tracker:
             continue

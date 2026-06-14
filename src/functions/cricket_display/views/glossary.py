@@ -1,5 +1,5 @@
 """Glossary page — plain-English explanations of all ML and cricket analytics terms."""
-from ._common import func
+from .common import func
 
 
 def view_glossary_html(req: func.HttpRequest) -> func.HttpResponse:

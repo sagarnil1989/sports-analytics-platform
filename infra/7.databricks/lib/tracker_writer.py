@@ -1,7 +1,7 @@
 import re
 from typing import Any, Dict, List, Optional
 
-from api_and_blob import (
+from util import (
     _is_innings_market,
     download_json,
     upload_json,
@@ -81,25 +81,32 @@ def extract_innings_snapshot(
     current_wickets: Optional[int] = None
     batting_team: Optional[str] = None
 
-    # Determine batting team from the innings market name: the market is always named
-    # "{batting_team} {N} Overs Runs", so parsing the market name is the most reliable
-    # source — it avoids ambiguity in the PI field (which Bet365 uses as a home/away
-    # indicator, not a batting indicator as previously assumed).
+    # Determine innings number early so we can choose the right batting_team strategy.
+    # s3_raw is the target field (S3) — present only in innings 2.
+    s3_raw_early = str(match_snapshot.get("ev_stats_s3_raw") or "").strip()
+    innings_no_early = 2 if s3_raw_early and s3_raw_early not in ("", "0") else 1
+
+    # In innings 1: detect batting team from the innings market name
+    # "{batting_team} {N} Overs Runs" — most reliable source in innings 1.
+    # In innings 2: the innings-1 market is still visible in feed data, so the same
+    # regex would incorrectly identify the innings-1 batting team. Skip it and rely
+    # solely on team_score_rows for innings 2.
     total_overs_for_bat = int(str(match_snapshot.get("total_overs") or 20))
     _innings_mkt_re = re.compile(
         rf'^(.+?)\s+{total_overs_for_bat}\s+[Oo]vers?\s+[Rr]uns?$', re.IGNORECASE
     )
-    for mkt_row in current_market_rows:
-        mgn = str(mkt_row.get("market_group_name") or "").strip()
-        m = _innings_mkt_re.match(mgn)
-        if m:
-            candidate = m.group(1).strip()
-            if home_team and candidate.lower() == home_team.lower():
-                batting_team = home_team
-                break
-            if away_team and candidate.lower() == away_team.lower():
-                batting_team = away_team
-                break
+    if innings_no_early == 1:
+        for mkt_row in current_market_rows:
+            mgn = str(mkt_row.get("market_group_name") or "").strip()
+            m = _innings_mkt_re.match(mgn)
+            if m:
+                candidate = m.group(1).strip()
+                if home_team and candidate.lower() == home_team.lower():
+                    batting_team = home_team
+                    break
+                if away_team and candidate.lower() == away_team.lower():
+                    batting_team = away_team
+                    break
 
     # Read score/wickets/over from the matching team_score row.
     # If batting_team was identified from the market, prefer that team's row.
@@ -203,18 +210,17 @@ def extract_innings_snapshot(
 
     innings_market_name = innings_rows[0].get("market_group_name") if innings_rows else None
 
-    # Parse ball_window and innings number from PG field in match_snapshot
+    # Parse ball_window from PG field. innings_no already derived from s3_raw above.
     pg_raw = str(match_snapshot.get("ev_stats_pg_raw") or "").strip()
-    s3_raw = str(match_snapshot.get("ev_stats_s3_raw") or "").strip()
+    s3_raw = s3_raw_early
     ball_window: List[str] = []
-    innings_no = 1
+    innings_no = innings_no_early
     if "#" in pg_raw:
         try:
             ball_part, suffix = pg_raw.rsplit("#", 1)
             parts = suffix.split(":")
             if len(parts) >= 3:
                 ball_window = [s.strip() for s in ball_part.split(":") if s.strip()] if ball_part else []
-                innings_no = 2 if s3_raw and s3_raw not in ("", "0") else 1
         except Exception:
             pass
 
@@ -227,6 +233,13 @@ def extract_innings_snapshot(
             if int(over_parts[0]) == 0 and (int(over_parts[1]) if len(over_parts) > 1 else 0) == 0:
                 return None
         except Exception:
+            pass
+
+    target_runs: Optional[int] = None
+    if s3_raw and s3_raw not in ("", "0"):
+        try:
+            target_runs = int(s3_raw)
+        except ValueError:
             pass
 
     return {
@@ -246,6 +259,7 @@ def extract_innings_snapshot(
         "innings_market_name": innings_market_name,
         "ball_window": ball_window,
         "innings": innings_no,
+        "target": target_runs,
         "snapshot_id": match_snapshot.get("snapshot_id"),
         "snapshot_time_utc": match_snapshot.get("snapshot_time_utc"),
     }
@@ -263,7 +277,7 @@ def gold_write_innings_tracker_from_silver(
     if not event_id:
         return
 
-    acc_path = f"cricket/inplay/control/event_id={event_id}/innings_accumulator.json"
+    acc_path = f"event_id={event_id}/innings_accumulator.json"
     acc = download_json(silver_container, acc_path) or {}
     rows: List[Dict[str, Any]] = acc.get("rows", [])
 
@@ -293,6 +307,7 @@ def gold_write_innings_tracker_from_silver(
     score_summary = score_obj.get("summary_from_events") or score_obj.get("summary_from_bet365") or ""
     tracker = {
         "event_id": event_id,
+        "fi": acc.get("fi") or header.get("fi") or "",
         "match_name": match_name,
         "venue": venue,
         "stadium_data": stadium_data,
@@ -308,17 +323,10 @@ def gold_write_innings_tracker_from_silver(
         "last_updated_utc": utc_now().isoformat(),
     }
 
-    tracker_path = f"cricket/innings_tracker/event_id={event_id}/innings_1.json"
+    tracker_path = f"event_id={event_id}/innings_tracker.json"
     upload_json(gold_container, tracker_path, tracker, overwrite=True)
 
-    # When the match is confirmed ended, also write the _from_silver snapshot.
-    # This is the gate file used by bronze_discover_cricket_ended() to determine
-    # which matches appear in the ended view.
-    if time_status == "3" and rows:
-        silver_path = f"cricket/innings_tracker/event_id={event_id}/innings_1_from_silver.json"
-        upload_json(gold_container, silver_path, tracker, overwrite=True)
-
-    index_path = "cricket/innings_tracker/index.json"
+    index_path = "index/innings_tracker.json"
     idx = download_json(gold_container, index_path) or {}
     matches_idx: Dict[str, Dict] = {str(m.get("event_id") or ""): m for m in idx.get("matches", [])}
     matches_idx[event_id] = {
@@ -357,7 +365,7 @@ def update_innings_tracker(
     if not event_id:
         return
 
-    tracker_path = f"cricket/innings_tracker/event_id={event_id}/innings_1.json"
+    tracker_path = f"event_id={event_id}/innings_tracker.json"
     existing = download_json(gold_container, tracker_path) or {}
     rows: List[Dict[str, Any]] = existing.get("rows", [])
 
@@ -400,6 +408,7 @@ def update_innings_tracker(
 
     tracker = {
         "event_id": event_id,
+        "fi": header.get("fi") or "",
         "match_name": header.get("match_name"),
         "venue": header.get("venue"),
         "stadium_data": header.get("stadium_data"),
@@ -415,7 +424,7 @@ def update_innings_tracker(
     }
     upload_json(gold_container, tracker_path, tracker, overwrite=True)
 
-    index_path = "cricket/innings_tracker/index.json"
+    index_path = "index/innings_tracker.json"
     idx = download_json(gold_container, index_path) or {}
     matches_idx: Dict[str, Dict] = {str(m.get("event_id") or ""): m for m in idx.get("matches", [])}
     matches_idx[event_id] = {

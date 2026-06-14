@@ -1,6 +1,9 @@
-# Databricks notebook: silver backfill
-# Manual trigger via ADF pl_backfill. Pass event_id to process one match, leave empty for all quiet matches.
-# All orchestration is inline. Processes snapshots in parallel (8 threads) for fast blob I/O.
+# Databricks notebook: bronze_to_silver
+# Reads raw bronze API snapshots and writes structured silver layer data.
+# Used by two ADF pipelines:
+#   pl_build_ended_match (daily 02:00 CET) — no event_id, processes all matches quiet >=60 min
+#   pl_backfill (manual)                   — pass event_id for one match, or empty for all quiet matches
+# All orchestration is inline. Processes snapshots in parallel (128 threads) for fast blob I/O.
 
 # COMMAND ----------
 
@@ -67,26 +70,26 @@ def _scan_bronze():
         result[eid].append((blob.name, blob.last_modified, fi or "", sid))
     return result
 
-def _scan_silver_markers():
-    keys = set()
-    for blob in silver.list_blobs(name_starts_with="cricket/control/processed_snapshots/"):
+def _scan_complete_events():
+    complete = set()
+    for blob in silver.list_blobs(name_starts_with="control/complete/"):
         fname = blob.name.rsplit("/", 1)[-1]
-        if fname.endswith(".json"):
-            keys.add(fname[:-5])
-    return keys
+        if fname.startswith("event_id=") and fname.endswith(".json"):
+            complete.add(fname[9:-5])  # strip "event_id=" and ".json"
+    return complete
 
 t0 = time.monotonic()
 print("Scanning bronze + silver in parallel...")
 with _ScanPool(max_workers=2) as pool:
-    f_bronze  = pool.submit(_scan_bronze)
-    f_markers = pool.submit(_scan_silver_markers)
-    bronze_events  = f_bronze.result()
-    processed_keys = f_markers.result()
+    f_bronze   = pool.submit(_scan_bronze)
+    f_complete = pool.submit(_scan_complete_events)
+    bronze_events   = f_bronze.result()
+    complete_events = f_complete.result()
 
 total_events    = len(bronze_events)
 total_manifests = sum(len(v) for v in bronze_events.values())
-print(f"  bronze : {total_events} events | {total_manifests} snapshots")
-print(f"  silver : {len(processed_keys)} already processed")
+print(f"  bronze   : {total_events} events | {total_manifests} snapshots")
+print(f"  complete : {len(complete_events)} events already done (will skip)")
 print(f"  listing took {time.monotonic()-t0:.1f}s")
 
 # COMMAND ----------
@@ -98,10 +101,25 @@ print("\nBuilding work list...")
 now    = datetime.now(timezone.utc)
 cutoff = now - timedelta(minutes=QUIET_THRESHOLD_MINUTES)
 
+# Force-rebuild: if a specific event_id was passed, delete its complete marker so all
+# its snapshots are treated as unprocessed and rerun from scratch.
+if event_id_filter and event_id_filter in complete_events:
+    try:
+        silver.get_blob_client(f"control/complete/event_id={event_id_filter}.json").delete_blob()
+        complete_events.discard(event_id_filter)
+        print(f"  Deleted complete marker for {event_id_filter} — full reprocess")
+    except Exception:
+        pass
+
 work_items = []   # (manifest_path, eid, sid, fi)
-skipped_active = skipped_processed = 0
+skipped_complete = skipped_active = 0
 
 for eid, manifests in bronze_events.items():
+    # Skip events already fully processed — one flag covers all their snapshots.
+    if eid in complete_events:
+        skipped_complete += len(manifests)
+        continue
+
     # Without a specific event_id filter, skip matches that are still active.
     if not event_id_filter:
         latest_ts = max((lm for _, lm, _, _ in manifests if lm), default=None)
@@ -110,18 +128,18 @@ for eid, manifests in bronze_events.items():
             continue
 
     for path, _, fi, sid in manifests:
-        key = f"{sid}_{eid}_{fi}"
-        if key in processed_keys:
-            skipped_processed += 1
-            continue
         work_items.append((path, eid, sid, fi))
 
 # Oldest snapshot first so backlog drains from the earliest match forward.
 work_items.sort(key=lambda x: x[2])
 
-event_count = len(set(x[1] for x in work_items))
+expected_by_event = defaultdict(int)
+for _, eid, _, _ in work_items:
+    expected_by_event[eid] += 1
+
+event_count = len(expected_by_event)
 print(f"  {len(work_items)} snapshots to process across {event_count} events")
-print(f"  {skipped_processed} already processed (skipped)")
+print(f"  {skipped_complete} snapshots in {len(complete_events)} complete events (skipped)")
 print(f"  {skipped_active} in active matches (skipped, quieted less than {QUIET_THRESHOLD_MINUTES} min ago)")
 print(f"  ({time.monotonic()-t0:.1f}s)")
 
@@ -166,7 +184,7 @@ def process_snapshot(item):
         lineage_payload=lineage_payload,
         bet365_event_stats_payload=bet365_stats_payload,
     )
-    silver_write_outputs(silver, parsed)
+    silver_write_outputs(silver, parsed, write_marker=False)
     return eid, sid
 
 
@@ -174,6 +192,8 @@ print(f"\nProcessing {len(work_items)} snapshots with {PARALLEL_WORKERS} paralle
 run_start  = time.monotonic()
 done = failed = 0
 failed_items = []
+succeeded_by_event = defaultdict(int)
+failed_eids        = set()
 
 with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as pool:
     futures = {pool.submit(process_snapshot, item): item for item in work_items}
@@ -182,6 +202,7 @@ with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as pool:
         try:
             eid, sid = future.result()
             done += 1
+            succeeded_by_event[eid] += 1
             if done % 50 == 0 or done == len(work_items):
                 elapsed = time.monotonic() - run_start
                 rate    = done / elapsed if elapsed > 0 else 0
@@ -189,6 +210,7 @@ with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as pool:
                 print(f"  {done}/{len(work_items)}  |  {rate:.1f}/s  |  ETA {eta_s/60:.1f} min  |  failed {failed}")
         except Exception as ex:
             failed += 1
+            failed_eids.add(item[1])
             failed_items.append((item[1], item[2], str(ex)))
 
 elapsed = time.monotonic() - run_start
@@ -202,3 +224,25 @@ if failed_items:
     print(f"\nFailed snapshots:")
     for eid, sid, err in failed_items[:20]:
         print(f"  event_id={eid}  snapshot_id={sid}  error={err}")
+
+# ── STEP 5: Write event-level complete markers ───────────────────────────────
+# Only written when every snapshot for an event succeeded in this run.
+# Next run will skip these events entirely — O(events) listing instead of O(snapshots).
+# To force a full reprocess: run pl_backfill with event_id — Step 3 deletes the marker.
+
+complete_written = 0
+now_iso = datetime.now(timezone.utc).isoformat()
+
+for eid, success_count in succeeded_by_event.items():
+    if eid in failed_eids:
+        continue
+    if success_count != expected_by_event[eid]:
+        continue
+    silver.get_blob_client(f"control/complete/event_id={eid}.json").upload_blob(
+        json.dumps({"completed_at_utc": now_iso, "snapshot_count": success_count}),
+        overwrite=True,
+    )
+    complete_written += 1
+
+print(f"\n  complete markers written : {complete_written}")
+print(f"  events with failures (not marked complete) : {len(failed_eids)}")

@@ -13,7 +13,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from api_and_blob import (
+from util import (
     download_json,
     get_named_container_client,
     upload_json,
@@ -31,35 +31,54 @@ def _is_womens_match(match_name: str) -> bool:
     return "women" in n or "(w)" in n
 
 
-def extract_inn2_over6_favorite() -> Dict[str, Any]:
-    """Scan all ended T20 matches and write inn2_over6_favorite.json to gold."""
-    silver = get_named_container_client("silver")
-    gold = get_named_container_client("gold")
-
-    # Collect all ended event_ids from gold innings tracker files (T20 only)
-    event_ids: List[str] = []
-    for blob in gold.list_blobs(name_starts_with="cricket/innings_tracker/event_id="):
-        if not blob.name.endswith("innings_1_from_silver.json"):
+def _scan_ended_event_ids(gold) -> List[str]:
+    """Return all event_ids that have an innings_tracker.json in gold."""
+    event_ids = []
+    for blob in gold.list_blobs(name_starts_with="event_id="):
+        if not blob.name.endswith("/innings_tracker.json"):
             continue
         parts = blob.name.split("/")
         eid_part = next((p for p in parts if p.startswith("event_id=")), None)
-        if not eid_part:
-            continue
-        tracker = download_json(gold, blob.name) or {}
-        if not _is_t20_match(tracker.get("match_name") or ""):
-            continue
-        event_ids.append(eid_part.replace("event_id=", ""))
+        if eid_part:
+            event_ids.append(eid_part[9:])
+    return event_ids
 
-    logging.info(json.dumps({"event": "hypothesis_inn2_over6_start", "event_count": len(event_ids)}))
+
+def extract_inn2_over6_favorite(event_id: Optional[str] = None) -> Dict[str, Any]:
+    """Process T20 matches and write per-event hypothesis_inn2_over6.json to gold.
+
+    If event_id is given, processes only that event. Otherwise scans all ended events.
+    Returns aggregate summary.
+    """
+    silver = get_named_container_client("silver")
+    gold = get_named_container_client("gold")
+
+    if event_id:
+        event_ids_to_process = [event_id]
+    else:
+        all_ids = _scan_ended_event_ids(gold)
+        event_ids_to_process = []
+        for eid in all_ids:
+            tracker = download_json(gold, f"event_id={eid}/innings_tracker.json") or {}
+            if _is_t20_match(tracker.get("match_name") or ""):
+                event_ids_to_process.append(eid)
+
+    logging.info(json.dumps({"event": "hypothesis_inn2_over6_start", "event_count": len(event_ids_to_process)}))
 
     results = []
-    for event_id in event_ids:
+    for eid in event_ids_to_process:
         try:
-            row = _process_event(event_id, silver, gold)
+            row = _process_event(eid, silver, gold)
             if row:
+                upload_json(
+                    gold,
+                    f"event_id={eid}/hypothesis_inn2_over6.json",
+                    {"generated_at_utc": utc_now().isoformat(), **row},
+                    overwrite=True,
+                )
                 results.append(row)
         except Exception:
-            logging.exception(json.dumps({"event": "hypothesis_event_error", "event_id": event_id}))
+            logging.exception(json.dumps({"event": "hypothesis_event_error", "event_id": eid}))
 
     results.sort(key=lambda r: r.get("match_name", ""))
 
@@ -80,7 +99,6 @@ def extract_inn2_over6_favorite() -> Dict[str, Any]:
         "results": results,
     }
 
-    upload_json(gold, "cricket/hypothesis/inn2_over6_favorite.json", output, overwrite=True)
     logging.info(json.dumps({
         "event": "hypothesis_inn2_over6_done",
         "total": len(results),
@@ -92,8 +110,8 @@ def extract_inn2_over6_favorite() -> Dict[str, Any]:
 
 
 def _load_accumulator_rows(event_id: str, silver) -> List[Dict]:
-    """Load innings rows from silver accumulator — one file per event, no blob scanning."""
-    acc = download_json(silver, f"cricket/inplay/control/event_id={event_id}/innings_accumulator.json") or {}
+    """Load innings rows from silver accumulator."""
+    acc = download_json(silver, f"event_id={event_id}/innings_accumulator.json") or {}
     return acc.get("rows") or []
 
 
@@ -105,32 +123,23 @@ def _process_event(
     """Extract hypothesis row for one ended match. Returns None if data is insufficient."""
     import re as _re
 
-    # Load gold tracker for authoritative final scores and team metadata.
-    tracker = download_json(gold, f"cricket/innings_tracker/event_id={event_id}/innings_1_from_silver.json") or {}
+    tracker = download_json(gold, f"event_id={event_id}/innings_tracker.json") or {}
 
     match_name = tracker.get("match_name") or f"event_{event_id}"
     tracker_home = tracker.get("home_team_name") or ""
     tracker_away = tracker.get("away_team_name") or ""
 
-    # Determine batting_first_team from the tracker's own rows — the same
-    # source the ML predictor uses. The accumulator may lack batting_team for
-    # older matches, but the tracker rows always have it.
     tracker_rows = tracker.get("rows") or []
     inn1_tracker_rows = [r for r in tracker_rows if r.get("innings") == 1]
     batting_first_team = next((r["batting_team"] for r in inn1_tracker_rows if r.get("batting_team")), "") or ""
 
-    # Load accumulator rows from silver for inn2 over-6 odds/score state.
-    # One HTTP request per event; no blob listing.
     rows = _load_accumulator_rows(event_id, silver)
 
     inn1_rows = [r for r in rows if r.get("innings") == 1]
     inn2_rows_raw = [r for r in rows if r.get("innings") == 2]
 
-    # Chasing team from accumulator inn2 rows
     chasing_team_from_acc = next((r["batting_team"] for r in inn2_rows_raw if r.get("batting_team")), "") or ""
 
-    # Authoritative final scores from score_summary_events (Bet365 API).
-    # Format is home-team-first. Swap when away team batted first.
     raw_summary = (tracker.get("score_summary_events") or tracker.get("score_summary") or "").replace("-", ",").strip()
     actual_total: Optional[int] = None
     final_innings2_score: Optional[int] = None
@@ -160,20 +169,14 @@ def _process_event(
         return None
 
     target = actual_total + 1
-
-    # Match date from tracker
     match_date = str(tracker.get("match_date_utc") or "")[:10]
 
-    # Team names from accumulator rows (most reliable source)
     home_team = tracker_home
     away_team = tracker_away
     chasing_team = chasing_team_from_acc or (away_team if batting_first_team == home_team else home_team)
 
-    # Sort inn1 by over for snapshot lookups
     inn1_sorted = sorted(inn1_rows, key=lambda r: float(r.get("over") or 0))
 
-    # Ghost-filter inn2: skip rows where innings==2 but score > 0 at over 0.0
-    # (transition ghost snapshots from innings break)
     genuine_found = False
     inn2: List[Dict] = []
     for r in sorted(inn2_rows_raw, key=lambda r: r.get("snapshot_time_utc") or ""):
@@ -189,12 +192,10 @@ def _process_event(
     if not inn2:
         return None
 
-    # Inn1 over-6 snapshot
     inn1_over6 = next((r for r in inn1_sorted if float(r.get("over") or 0) >= 6.0), None)
     inn1_score_at_over6 = inn1_over6.get("score") if inn1_over6 else None
     inn1_wickets_at_over6 = inn1_over6.get("wickets") if inn1_over6 else None
 
-    # Inn2 over-6 snapshot
     inn2_sorted = sorted(inn2, key=lambda r: float(r.get("over") or 0))
     over6_row = next((r for r in inn2_sorted if float(r.get("over") or 0) >= 6.0), None)
     if not over6_row:
@@ -212,7 +213,6 @@ def _process_event(
         else:
             favorite_at_over6 = "Even"
 
-    # Winner detection using authoritative final scores from score_summary.
     if final_innings2_wickets is not None and final_innings2_wickets >= 10:
         actual_winner = chasing_team if (final_innings2_score or 0) > actual_total else batting_first_team
     else:
@@ -257,46 +257,50 @@ def _process_event(
 TIMEOUT_THRESHOLD_SECONDS = 180  # 3 min gap = strategic timeout (wicket falls take ~2–2.5 min)
 
 
-def extract_timeout_wicket() -> Dict[str, Any]:
-    """Scan all ended matches and write timeout_wicket.json to gold.
+def extract_timeout_wicket(event_id: Optional[str] = None) -> Dict[str, Any]:
+    """Process T20 matches and write per-event hypothesis_timeout_wicket.json to gold.
 
-    A 'strategic timeout' is detected when the game state (over + wickets) is
-    unchanged across snapshots for more than TIMEOUT_THRESHOLD_SECONDS.
-    Normal delivery gaps are 30-60s; over-change breaks ~90s; a strategic
-    timeout is ~180s — so a 3-minute threshold reliably separates them.
-
-    For each timeout, records whether a wicket fell during the over that
-    immediately resumed after the pause ended.
+    If event_id is given, processes only that event. Otherwise scans all ended events.
+    Returns aggregate summary.
     """
     silver = get_named_container_client("silver")
     gold = get_named_container_client("gold")
 
-    event_ids: List[str] = []
-    for blob in gold.list_blobs(name_starts_with="cricket/innings_tracker/event_id="):
-        if not blob.name.endswith("innings_1_from_silver.json"):
-            continue
-        parts = blob.name.split("/")
-        eid_part = next((p for p in parts if p.startswith("event_id=")), None)
-        if not eid_part:
-            continue
-        tracker_check = download_json(gold, blob.name) or {}
-        if not _is_t20_match(tracker_check.get("match_name") or ""):
-            continue
-        event_ids.append(eid_part.replace("event_id=", ""))
+    if event_id:
+        event_ids_to_process = [event_id]
+    else:
+        all_ids = _scan_ended_event_ids(gold)
+        event_ids_to_process = []
+        for eid in all_ids:
+            tracker_check = download_json(gold, f"event_id={eid}/innings_tracker.json") or {}
+            if _is_t20_match(tracker_check.get("match_name") or ""):
+                event_ids_to_process.append(eid)
 
     all_timeouts: List[Dict[str, Any]] = []
 
-    for event_id in event_ids:
-        tracker = download_json(gold, f"cricket/innings_tracker/event_id={event_id}/innings_1_from_silver.json") or {}
-        match_name = tracker.get("match_name") or f"event_{event_id}"
-        rows = _load_accumulator_rows(event_id, silver)
+    for eid in event_ids_to_process:
+        tracker = download_json(gold, f"event_id={eid}/innings_tracker.json") or {}
+        match_name = tracker.get("match_name") or f"event_{eid}"
+        rows = _load_accumulator_rows(eid, silver)
         if not rows:
             continue
         try:
-            timeouts = _find_timeouts(event_id, match_name, rows)
+            timeouts = _find_timeouts(eid, match_name, rows)
+            if timeouts:
+                upload_json(
+                    gold,
+                    f"event_id={eid}/hypothesis_timeout_wicket.json",
+                    {
+                        "generated_at_utc": utc_now().isoformat(),
+                        "event_id": eid,
+                        "match_name": match_name,
+                        "timeouts": timeouts,
+                    },
+                    overwrite=True,
+                )
             all_timeouts.extend(timeouts)
         except Exception:
-            logging.exception(json.dumps({"event": "timeout_hypothesis_error", "event_id": event_id}))
+            logging.exception(json.dumps({"event": "timeout_hypothesis_error", "event_id": eid}))
 
     total = len(all_timeouts)
     wicket_yes = sum(1 for t in all_timeouts if t.get("wicket_in_resumed_over") is True)
@@ -317,7 +321,6 @@ def extract_timeout_wicket() -> Dict[str, Any]:
         "results": all_timeouts,
     }
 
-    upload_json(gold, "cricket/hypothesis/timeout_wicket.json", output, overwrite=True)
     logging.info(json.dumps({
         "event": "timeout_wicket_hypothesis_done",
         "total_timeouts": total,
@@ -333,11 +336,7 @@ def _find_timeouts(
     match_name: str,
     rows: List[Dict],
 ) -> List[Dict[str, Any]]:
-    """Find strategic timeouts and check for wickets in the resumed over.
-
-    rows — accumulator rows for the event (already loaded, no blob scanning).
-    Each row must have: innings, over, wickets, snapshot_time_utc.
-    """
+    """Find strategic timeouts and check for wickets in the resumed over."""
     all_snaps: List[Dict] = []
     for row in rows:
         if row.get("innings") not in (1, 2):
@@ -363,7 +362,7 @@ def _find_timeouts(
         if len(snaps) < 2:
             continue
 
-        quiet_start_idx = 0  # index where the current static period began
+        quiet_start_idx = 0
 
         for i in range(1, len(snaps)):
             curr = snaps[i]
@@ -373,7 +372,6 @@ def _find_timeouts(
             if not state_changed:
                 continue
 
-            # State changed at snapshot i — measure how long it was static before
             quiet_duration = (prev["ts"] - snaps[quiet_start_idx]["ts"]).total_seconds()
 
             if quiet_duration >= TIMEOUT_THRESHOLD_SECONDS:
@@ -391,8 +389,6 @@ def _find_timeouts(
                     quiet_start_idx = i
                     continue
 
-                # Skip innings-break pauses: pause at over 0.0, resume at first delivery
-                # (over 0.1). The gap between innings is always long but is not a timeout.
                 if paused_over_f < 0.1 and resumed_over_f < 0.2:
                     quiet_start_idx = i
                     continue
@@ -400,8 +396,6 @@ def _find_timeouts(
                 resumed_over_int = int(resumed_over_f)
                 wickets_start = curr["wickets"]
 
-                # Find wickets at the END of the resumed over
-                # (when the over number advances past resumed_over_int)
                 wickets_end: Optional[int] = None
                 for j in range(i + 1, len(snaps)):
                     try:
@@ -412,7 +406,6 @@ def _find_timeouts(
                         wickets_end = snaps[j - 1]["wickets"]
                         break
 
-                # If over never ended in data, use last known wicket count
                 if wickets_end is None:
                     wickets_end = snaps[-1]["wickets"]
 

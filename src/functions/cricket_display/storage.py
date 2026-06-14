@@ -6,8 +6,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
+from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, ContentSettings
-from azure.core.exceptions import ResourceNotFoundError, ResourceExistsError
+from azure.core.exceptions import ResourceNotFoundError, ResourceExistsError, HttpResponseError
 
 
 def _is_innings_market(name: str, batting_team: Optional[str] = None, total_overs: int = 20) -> bool:
@@ -78,8 +79,8 @@ def get_bool_env(name: str, default: bool) -> bool:
 # ------------------------------------------------------------------
 
 def get_blob_service_client() -> BlobServiceClient:
-    storage_conn = get_env("DATA_STORAGE_CONNECTION_STRING")
-    return BlobServiceClient.from_connection_string(storage_conn)
+    endpoint = get_env("DATA_LAKE_BLOB_ENDPOINT")
+    return BlobServiceClient(account_url=endpoint, credential=DefaultAzureCredential())
 
 
 def get_named_container_client(container_name: str):
@@ -92,10 +93,6 @@ def get_named_container_client(container_name: str):
     except Exception:
         pass
     return container
-
-
-def get_bronze_container_client():
-    return get_named_container_client("bronze")
 
 
 def upload_json(container_client, blob_path: str, payload: Dict[str, Any], overwrite: bool = False) -> None:
@@ -111,7 +108,7 @@ def download_json(container_client, blob_path: str) -> Optional[Dict[str, Any]]:
     try:
         data = container_client.download_blob(blob_path).readall()
         return json.loads(data)
-    except ResourceNotFoundError:
+    except (ResourceNotFoundError, HttpResponseError):
         return None
 
 
@@ -203,6 +200,26 @@ def extract_results(api_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     if isinstance(results, list):
         return results
     return []
+
+
+def parse_ss_final_scores(ss: str) -> Dict[str, Any]:
+    """Parse a BetsAPI ss string like '163/9(20),167/6(19.5)' into per-innings runs/wickets."""
+    parts = [p.strip() for p in (ss or "").replace("-", ",").split(",") if p.strip()]
+
+    def _parse(part: str):
+        m = re.match(r'^(\d+)(?:/(\d+))?', part)
+        if not m:
+            return None, None
+        return int(m.group(1)), (int(m.group(2)) if m.group(2) else None)
+
+    inn1_runs, inn1_wkts = _parse(parts[0]) if parts else (None, None)
+    inn2_runs, inn2_wkts = _parse(parts[1]) if len(parts) > 1 else (None, None)
+    return {
+        "inn1_runs": inn1_runs,
+        "inn1_wickets": inn1_wkts,
+        "inn2_runs": inn2_runs,
+        "inn2_wickets": inn2_wkts,
+    }
 
 
 # ------------------------------------------------------------------

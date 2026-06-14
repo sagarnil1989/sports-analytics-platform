@@ -10,6 +10,10 @@ from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.core.exceptions import ResourceNotFoundError, ResourceExistsError
 
 
+# ------------------------------------------------------------------
+# Market helpers
+# ------------------------------------------------------------------
+
 def _is_innings_market(name: str, batting_team: Optional[str] = None, total_overs: int = 20) -> bool:
     """Return True only for the full-innings runs market of the batting team.
 
@@ -17,13 +21,11 @@ def _is_innings_market(name: str, batting_team: Optional[str] = None, total_over
     market name pattern:  "{batting_team} {total_overs} Overs Runs"
     e.g. "Gujarat Titans 20 Overs Runs"
 
-    total_overs comes from S5 in the EV record (always "20" for T20, "50" for ODI).
     Falls back to a simple suffix check when batting_team is unknown.
     """
     if batting_team:
         expected = f"{batting_team.strip().lower()} {total_overs} overs runs"
         return name.strip().lower() == expected
-    # Fallback: accept any "{N} Overs Runs" where N >= 10 (full innings, not a micro-market)
     return bool(re.search(r'\b(?:[1-9]\d)\s+overs?\s+runs?\b', name, re.IGNORECASE))
 
 
@@ -203,130 +205,3 @@ def extract_results(api_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     if isinstance(results, list):
         return results
     return []
-
-
-# ------------------------------------------------------------------
-# Inplay match summarization
-# ------------------------------------------------------------------
-
-def get_event_id_from_inplay_item(item: Dict[str, Any]) -> Optional[str]:
-    for key in ["our_event_id", "event_id"]:
-        value = item.get(key)
-        if value is not None and str(value).strip():
-            return str(value)
-    if item.get("bet365_id") is not None:
-        value = item.get("id")
-        if value is not None and str(value).strip():
-            return str(value)
-    value = item.get("id")
-    if value is not None and str(value).strip():
-        return str(value)
-    return None
-
-
-def get_fi_from_inplay_item(item: Dict[str, Any]) -> Optional[str]:
-    for key in ["bet365_id", "FI", "fi", "id"]:
-        value = item.get(key)
-        if value is not None and str(value).strip():
-            return str(value)
-    return None
-
-
-def summarize_inplay_items(items: List[Dict[str, Any]], max_live_matches: int) -> List[Dict[str, Any]]:
-    live = []
-    for item in items:
-        fi = get_fi_from_inplay_item(item)
-        event_id = get_event_id_from_inplay_item(item)
-        if not fi:
-            continue
-        if str(item.get("time_status", "1")) != "1":
-            continue
-        _league = item.get("league") or {}
-        live.append({
-            "fi": fi,
-            "event_id": event_id or fi,
-            "sport_id": str(item.get("sport_id", os.environ.get("SPORT_ID", "3"))),
-            "league_id": str(_league.get("id")) if _league.get("id") is not None else None,
-            "league_name": _league.get("name"),
-            "league": _league,
-            "home": item.get("home"),
-            "away": item.get("away"),
-            "time_status": item.get("time_status"),
-            "raw_item": item,
-        })
-    if max_live_matches <= 0:
-        return live
-    return live[:max_live_matches]
-
-
-# ------------------------------------------------------------------
-# Lineage helpers
-# ------------------------------------------------------------------
-
-def get_api_result_count(api_payload: Optional[Dict[str, Any]]) -> Optional[int]:
-    if not api_payload:
-        return None
-    body = api_payload.get("response", {}).get("body")
-    if not isinstance(body, dict):
-        return None
-    results = body.get("results")
-    if isinstance(results, list):
-        return len(results)
-    if isinstance(results, dict):
-        return len(results)
-    return None
-
-
-def build_api_call_lineage(
-    api_name: str,
-    api_payload: Optional[Dict[str, Any]],
-    id_used: Dict[str, Any],
-    bronze_path: Optional[str],
-    purpose: str,
-) -> Dict[str, Any]:
-    response = (api_payload or {}).get("response", {})
-    request = (api_payload or {}).get("request", {})
-    return {
-        "api_name": api_name,
-        "purpose": purpose,
-        "id_used": id_used,
-        "path": request.get("url"),
-        "params_without_token": request.get("params_without_token"),
-        "called_at_utc": request.get("called_at_utc"),
-        "http_status_code": response.get("http_status_code"),
-        "success": response.get("success"),
-        "elapsed_ms": response.get("elapsed_ms"),
-        "error": response.get("error"),
-        "error_detail": response.get("error_detail"),
-        "result_count": get_api_result_count(api_payload),
-        "bronze_path": bronze_path,
-    }
-
-
-def build_live_snapshot_lineage(
-    sport_id: str,
-    event_id: str,
-    fi: str,
-    base_path: str,
-    payloads: Dict[str, Optional[Dict[str, Any]]],
-) -> Dict[str, Any]:
-    bronze_base = f"bronze/{base_path}"
-    calls = [
-        build_api_call_lineage("events_inplay", payloads.get("events_inplay"), {"sport_id": sport_id}, f"{bronze_base}/api_inplay_event_list.json", "Find live cricket matches and current score/status from /v3/events/inplay."),
-        build_api_call_lineage("event_view", payloads.get("event_view"), {"event_id": event_id}, f"{bronze_base}/api_event_view.json", "Get event scoreboard/details from /v1/event/view using event_id."),
-        build_api_call_lineage("event_odds_summary", payloads.get("event_odds_summary"), {"event_id": event_id}, f"{bronze_base}/api_event_odds_summary.json", "Get compact odds summary from /v2/event/odds/summary using event_id."),
-        build_api_call_lineage("event_odds", payloads.get("event_odds"), {"event_id": event_id}, f"{bronze_base}/api_event_odds.json", "Get event odds history from /v2/event/odds using event_id."),
-        build_api_call_lineage("bet365_event", payloads.get("bet365_event"), {"FI": fi}, f"{bronze_base}/api_live_market_odds.json", "Get live Bet365 market stream from /v1/bet365/event using FI/bet365_id."),
-    ]
-    return {
-        "generated_at_utc": utc_now().isoformat(),
-        "sport_id": sport_id,
-        "event_id": event_id,
-        "fi": fi,
-        "id_mapping": {
-            "event_id": {"value": event_id, "used_for": ["/v1/event/view", "/v2/event/odds/summary", "/v2/event/odds"]},
-            "fi": {"value": fi, "also_called": "bet365_id", "used_for": ["/v1/bet365/event"]},
-        },
-        "bronze_base_path": f"bronze/{base_path}",
-        "api_calls": calls,
-    }

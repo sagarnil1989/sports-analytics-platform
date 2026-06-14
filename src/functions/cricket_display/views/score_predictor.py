@@ -1,5 +1,5 @@
 """Inn1 score predictor page — MAE/RMSE per model + per-match test predictions."""
-from ._common import json, logging, os, escape, func, get_named_container_client
+from .common import json, logging, os, escape, func, get_named_container_client
 
 
 def view_ml_score_predictor_html(req: func.HttpRequest) -> func.HttpResponse:

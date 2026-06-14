@@ -1,6 +1,6 @@
 # Databricks notebook: discover_cricket_ended
 # Replaces the Function App timer of the same name — no 10-minute timeout here.
-# Scans gold for innings_1_from_silver.json files and writes the ended match index to bronze.
+# Scans gold for innings_tracker.json files and writes the ended match index to bronze.
 # Schedule: hourly via ADF trigger pl_discover_cricket_ended.
 
 # COMMAND ----------
@@ -30,6 +30,27 @@ def _dl(container, path):
         return json.loads(container.get_blob_client(path).download_blob().readall())
     except Exception:
         return None
+
+def _detect_format(match_name="", league_name="", extra_length=None, max_over=0, score_ss=""):
+    combined = f"{match_name} {league_name}".lower()
+    if "t20" in combined or "twenty20" in combined:
+        return "T20"
+    if "odi" in combined or "one day" in combined:
+        return "ODI"
+    try:
+        length = int(str(extra_length))
+        if length == 20: return "T20"
+        if length == 50: return "ODI"
+    except (TypeError, ValueError):
+        pass
+    if max_over > 0:
+        return "T20" if max_over <= 20 else "ODI"
+    if score_ss:
+        import re as _re
+        overs_in_ss = [float(m) for m in _re.findall(r'\((\d+(?:\.\d+)?)\)', score_ss)]
+        if overs_in_ss:
+            return "T20" if max(overs_in_ss) <= 20 else "ODI"
+    return ""
 
 def _ul(container, path, data):
     container.get_blob_client(path).upload_blob(
@@ -76,16 +97,16 @@ for m in (live_idx.get("matches") or []):
 print(f"Live events (excluded): {len(live_eids)}")
 
 # COMMAND ----------
-# ── 3. Collect all event_ids with innings_1_from_silver.json in gold ─────────
+# ── 3. Collect all event_ids with innings_tracker.json in gold ───────────────
 
 silver_eids = {}  # eid -> blob_name
-for blob in gold.list_blobs(name_starts_with="cricket/innings_tracker/event_id="):
-    if not blob.name.endswith("innings_1_from_silver.json"):
+for blob in gold.list_blobs(name_starts_with="event_id="):
+    if not blob.name.endswith("/innings_tracker.json"):
         continue
     parts = blob.name.split("/")
     eid_part = next((p for p in parts if p.startswith("event_id=")), None)
     if eid_part:
-        silver_eids[eid_part.replace("event_id=", "")] = blob.name
+        silver_eids[eid_part[9:]] = blob.name
 
 print(f"Gold tracker files found: {len(silver_eids)}")
 
@@ -141,25 +162,34 @@ for eid, tracker_blob_name in silver_eids.items():
         print(f"  SKIP no fi: event_id={eid}")
         continue
 
-    score = (
-        tracker.get("score_summary_events")
-        or tracker.get("score_summary_bet365")
-        or tracker.get("score_summary")
-        or ""
-    )
+    # Always prefer event_final bronze as the authoritative score source —
+    # it has the BetsAPI final ss with overs included e.g. "158/6(15.5)-155/10(19.2)".
+    # Snapshot-derived scores lack overs and may be from a pre-final snapshot.
+    score = None
+    event_final_data = _dl(bronze, f"betsapi/event_final/event_id={eid}/event_view.json")
+    if event_final_data:
+        ef_body    = (event_final_data.get("response") or {}).get("body") or {}
+        ef_results = ef_body.get("results") or event_final_data.get("results") or []
+        if ef_results:
+            score = ef_results[0].get("ss") or None
+            if score:
+                score_patched += 1
 
-    # If score is missing from all snapshot sources, fetch from /v1/event/view.
-    # This covers matches where the event dropped off the live feed before the
-    # final snapshot captured the last ball's score.
-    # We patch the gold tracker so subsequent runs don't need to call the API again.
+    # Fallback 1: snapshot-derived score fields in the tracker
+    if not score:
+        score = (
+            tracker.get("score_summary_events")
+            or tracker.get("score_summary_bet365")
+            or tracker.get("score_summary")
+            or ""
+        )
+
+    # Fallback 2: live API call if event_final doesn't exist yet
     if not score:
         fetched = _fetch_final_score(eid)
         if fetched:
-            print(f"  Patched score via event/view: event_id={eid}  ss={fetched}")
-            tracker["score_summary_events"] = fetched
-            _ul(gold, tracker_blob_name, tracker)
+            print(f"  Patched score via event/view API: event_id={eid}  ss={fetched}")
             score = fetched
-            score_patched += 1
 
     score = score.replace("-", ",") if score else score
 
@@ -174,16 +204,29 @@ for eid, tracker_blob_name in silver_eids.items():
         if score and "," in score:
             p = score.split(",", 1)
             score = f"{p[1].strip()},{p[0].strip()}"
-        match_name = f"{away_name} vs {home_name}"
+        swapped = match_name.replace(f"{home_name} vs {away_name}", f"{away_name} vs {home_name}", 1)
+        match_name = swapped if swapped != match_name else f"{away_name} vs {home_name}"
 
-    # Detect format from the highest over seen across all rows
+    # Detect format using canonical priority: name/league → extra.length → max over.
+    ef_extra_length = None
+    if event_final_data:
+        ef_body2    = (event_final_data.get("response") or {}).get("body") or {}
+        ef_results2 = ef_body2.get("results") or event_final_data.get("results") or []
+        if ef_results2:
+            ef_extra_length = ef_results2[0].get("extra", {}).get("length")
     max_over = 0
     for r in rows:
         try:
             max_over = max(max_over, int(str(r.get("over") or "0").split(".")[0]))
         except Exception:
             pass
-    match_format = "T20" if max_over <= 20 else "ODI"
+    match_format = _detect_format(
+        match_name=match_name,
+        league_name=str(tracker.get("league_name") or ""),
+        extra_length=ef_extra_length,
+        max_over=max_over,
+        score_ss=score or "",
+    )
 
     matches.append({
         "event_id":       eid,
@@ -210,8 +253,8 @@ ended_index = {
 _ul(bronze, "cricket/ended/latest/index.json", ended_index)
 
 print(f"\n── Done ──")
-print(f"  Ended matches written : {len(matches)}")
-print(f"  Scores patched (API)  : {score_patched}")
+print(f"  Ended matches written    : {len(matches)}")
+print(f"  Scores from event_final  : {score_patched}")
 print(f"  Skipped (live)        : {skipped_live}")
 print(f"  Skipped (blocked)     : {skipped_blocked}")
 print(f"  Skipped (no fi)       : {skipped_no_fi}")

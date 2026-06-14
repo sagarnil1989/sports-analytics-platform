@@ -1,12 +1,7 @@
-from ._common import (
-    json, logging, os, escape, Any, Dict, List, Optional,
-    func, ResourceNotFoundError,
-    call_betsapi, download_json, download_required_json, format_unix_ts,
-    get_bronze_container_client, get_named_container_client, safe_float, upload_json, utc_now,
-    extract_bet365_current_markets,
-    collect_known_leagues, load_allowed_league_ids, save_league_preferences,
-    extract_innings_snapshot,
-    build_simple_table_page,
+from .common import (
+    json, logging, escape, Any, Dict, List, Optional,
+    func,
+    download_json, get_named_container_client,
 )
 
 
@@ -65,14 +60,19 @@ def view_market_heatmap_html(req: func.HttpRequest) -> func.HttpResponse:
             return 'Powerplay Runs', 'over', '#d97706'
         return None, None, None   # skip unknown
 
-    try:
+    event_id = req.route_params.get("event_id", "")
+    return func.HttpResponse(
+        f"<h2>Heatmap not available</h2><p>Event {escape(event_id)}: market heatmap data has not been migrated to gold yet.</p>",
+        status_code=503, mimetype="text/html",
+    )
+
+    try:  # noqa: unreachable — kept for future re-enable
         event_id = req.route_params.get("event_id", "")
-        silver_c = get_named_container_client("silver")
         gold_c   = get_named_container_client("gold")
 
         # ── load gold tracker for match meta + final score ────────────────────
         tracker = (
-            download_json(gold_c, f"cricket/innings_tracker/event_id={event_id}/innings_1_from_silver.json")
+            download_json(gold_c, f"event_id={event_id}/innings_tracker.json")
             or {}
         )
         match_name  = escape(tracker.get("match_name") or f"Event {event_id}")
@@ -87,7 +87,7 @@ def view_market_heatmap_html(req: func.HttpRequest) -> func.HttpResponse:
             m = _re.match(r'state_(\d+)_(\d+)_(\d+)_(\d+)\.json', bname.rsplit("/", 1)[-1])
             return (int(m.group(1)), int(m.group(2)), int(m.group(4)), int(m.group(3))) if m else (99,999,99,99)
 
-        prefix = f"cricket/inplay/state/event_id={event_id}/"
+        prefix = f"event_id={event_id}/state/"
         blobs  = sorted(
             [b.name for b in silver_c.list_blobs(name_starts_with=prefix) if b.name.endswith(".json")],
             key=_sort_key

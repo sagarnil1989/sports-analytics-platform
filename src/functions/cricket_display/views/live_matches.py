@@ -1,8 +1,8 @@
-from ._common import (
+from .common import (
     json, logging, os, escape, Any, Dict, List, Optional,
     func, ResourceNotFoundError,
     call_betsapi, download_json, download_required_json, format_unix_ts,
-    get_bronze_container_client, get_named_container_client, safe_float, upload_json, utc_now,
+    get_named_container_client, safe_float, upload_json, utc_now,
     extract_bet365_current_markets,
     collect_known_leagues, load_allowed_league_ids, save_league_preferences,
     extract_innings_snapshot,
@@ -311,7 +311,7 @@ a{{color:#0066cc}}</style></head>
         home_name = escape(str((header.get("home_team") or {}).get("name") or "Home"))
         away_name = escape(str((header.get("away_team") or {}).get("name") or "Away"))
 
-        tracker_data = download_json(gold, f"cricket/innings_tracker/event_id={event_id}/innings_1.json") or {}
+        tracker_data = download_json(gold, f"event_id={event_id}/innings_tracker.json") or {}
         tracker_rows = tracker_data.get("rows", [])
 
         odds_rows = ""

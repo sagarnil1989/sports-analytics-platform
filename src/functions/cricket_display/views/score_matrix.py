@@ -3,7 +3,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
-from ._common import json, logging, os, func, get_named_container_client
+from .common import json, logging, os, func, get_named_container_client
 
 
 def _parse_over(r):
@@ -197,9 +197,8 @@ def view_ml_score_matrix_html(req: func.HttpRequest) -> func.HttpResponse:
         gold   = get_named_container_client("gold")
         train_cutoff = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%d")
 
-        prefix = "cricket/innings_tracker/"
-        blobs  = [b.name for b in gold.list_blobs(name_starts_with=prefix)
-                  if b.name.endswith("innings_1_from_silver.json")]
+        blobs  = [b.name for b in gold.list_blobs(name_starts_with="event_id=")
+                  if b.name.endswith("/innings_tracker.json")]
 
         def _dl(path):
             try:

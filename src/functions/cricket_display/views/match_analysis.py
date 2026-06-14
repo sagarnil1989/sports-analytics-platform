@@ -1,25 +1,9 @@
-from ._common import (
-    json, logging, os, escape, Any, Dict, List, Optional,
-    func, ResourceNotFoundError,
-    call_betsapi, download_json, download_required_json, format_unix_ts,
-    get_bronze_container_client, get_named_container_client, safe_float, upload_json, utc_now,
-    extract_bet365_current_markets,
-    collect_known_leagues, load_allowed_league_ids, save_league_preferences,
-    extract_innings_snapshot,
+from .common import (
+    json, logging, escape, Any, Dict, List, Optional,
+    func,
+    download_json, get_named_container_client,
     build_simple_table_page,
 )
-
-
-def _da_silver_path(event_id: str, snapshot_id: str) -> Optional[str]:
-    from datetime import datetime as _dt
-    try:
-        d = _dt.strptime(snapshot_id, "%Y%m%dT%H%M%SZ")
-        return (
-            f"cricket/inplay/year={d.year}/month={d.month:02d}/day={d.day:02d}"
-            f"/hour={d.hour:02d}/event_id={event_id}/snapshot_id={snapshot_id}/team_scores.json"
-        )
-    except Exception:
-        return None
 
 
 def _da_decode_s6(s6_raw: str):
@@ -50,31 +34,20 @@ def _da_looks_like_id(name: str) -> bool:
     return bool(_re.match(r'^\d+\]?$', str(name or "").strip()))
 
 
-def _da_load_silver_for_row(silver_c, event_id: str, row: dict):
+def _da_load_row(row: dict):
+    """Decode batting/bowling data from gold-embedded S6/S8 fields."""
     snap_id = row.get("snapshot_id")
-    path = _da_silver_path(event_id, snap_id)
-    if not path:
-        return snap_id, None
-    doc = download_json(silver_c, path)
-    if not doc:
+    s6      = row.get("s6")
+    s7_bat  = row.get("s7_bat")
+    s8      = row.get("s8")
+    s7_bowl = row.get("s7_bowl")
+
+    if not s6 and not s8:
         return snap_id, None
 
-    silver_rows = doc.get("rows", [])
-    batting, bowling = None, None
-    for r in silver_rows:
-        raw_pi = str((r.get("raw") or {}).get("PI") or r.get("pi") or "")
-        if raw_pi == "1":
-            batting = r
-        elif raw_pi == "0":
-            bowling = r
-    if batting is None:
-        batting = next((r for r in silver_rows if r.get("s6")), None)
-    if bowling is None:
-        bowling = next((r for r in silver_rows if r != batting), None)
-
-    batsmen_raw = _da_decode_s6((batting or {}).get("s6"))
-    prev_over   = _da_decode_s8((bowling or {}).get("s8"))
-    striker_real = str((batting or {}).get("s7") or "").split("#")[0].strip() or None
+    batsmen_raw  = _da_decode_s6(s6)
+    prev_over    = _da_decode_s8(s8)
+    striker_real = str(s7_bat or "").split("#")[0].strip() or None
 
     id_map_entry: dict = {}
     if striker_real and batsmen_raw and _da_looks_like_id(batsmen_raw[0].get("name")):
@@ -84,7 +57,7 @@ def _da_load_silver_for_row(silver_c, event_id: str, row: dict):
     if striker_real and batsmen and _da_looks_like_id(batsmen[0].get("name")):
         batsmen[0]["name"] = striker_real
 
-    current_bowler = str((bowling or {}).get("s7") or "").split("#")[0].strip() or None
+    current_bowler = str(s7_bowl or "").split("#")[0].strip() or None
 
     return snap_id, {
         "batsmen":        batsmen,
@@ -102,12 +75,8 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
     try:
         event_id = req.route_params.get("event_id", "")
         gold_c   = get_named_container_client("gold")
-        silver_c = get_named_container_client("silver")
 
-        tracker = (
-            download_json(gold_c, f"cricket/innings_tracker/event_id={event_id}/innings_1_from_silver.json")
-            or download_json(gold_c, f"cricket/innings_tracker/event_id={event_id}/innings_1.json")
-        )
+        tracker = download_json(gold_c, f"event_id={event_id}/innings_tracker.json")
         if not tracker:
             return func.HttpResponse(
                 f"<h2>No gold data for event {escape(event_id)}.</h2>"
@@ -138,10 +107,10 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
         inn1_rows = [r for r in all_rows if r.get("innings") == 1]
         inn2_rows = [r for r in all_rows if r.get("innings") == 2]
 
-        # ── load silver in parallel ───────────────────────────────────────────
+        # ── decode embedded gold S6/S8 per row in parallel ───────────────────
         silver_by_snap: dict = {}
-        with ThreadPoolExecutor(max_workers=64) as ex:
-            futs = {ex.submit(_da_load_silver_for_row, silver_c, event_id, r): r for r in all_rows}
+        with ThreadPoolExecutor(max_workers=32) as ex:
+            futs = {ex.submit(_da_load_row, r): r for r in all_rows}
             for fut in as_completed(futs):
                 sid, dec = fut.result()
                 if dec:
@@ -339,7 +308,22 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
 
         inn1_final = inn1_rows[-1] if inn1_rows else {}
         inn2_final = inn2_rows[-1] if inn2_rows else {}
-        target = (inn1_final.get("score") or 0) + 1 if inn1_rows else None
+
+        import re as _re2
+        def _parse_score_part(part):
+            m = _re2.match(r'^(\d+)(?:/(\d+))?', part.strip())
+            return (int(m.group(1)), int(m.group(2)) if m.group(2) else None) if m else (None, None)
+
+        final_ss = (tracker.get("score_summary_events") or "").replace("-", ",")
+        parts = [p.strip() for p in final_ss.split(",", 1)] if final_ss else []
+        es1_runs, es1_wkts = _parse_score_part(parts[0]) if parts else (None, None)
+        es2_runs, es2_wkts = _parse_score_part(parts[1]) if len(parts) > 1 else (None, None)
+
+        inn1_runs  = es1_runs  if es1_runs  is not None else inn1_final.get("score")
+        inn1_wkts  = es1_wkts  if es1_wkts  is not None else inn1_final.get("wickets")
+        inn2_runs  = es2_runs  if es2_runs  is not None else inn2_final.get("score")
+        inn2_wkts  = es2_wkts  if es2_wkts  is not None else inn2_final.get("wickets")
+        target     = (inn1_runs + 1) if inn1_runs is not None else None
 
         # ── HTML rendering helpers ────────────────────────────────────────────
         def thead(*cols):
@@ -448,8 +432,8 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
             )
 
         # ── assemble HTML ─────────────────────────────────────────────────────
-        s1_score = f"{inn1_final.get('score', '?')}/{inn1_final.get('wickets', '?')}" if inn1_rows else "—"
-        s2_score = f"{inn2_final.get('score', '?')}/{inn2_final.get('wickets', '?')}" if inn2_rows else "—"
+        s1_score   = f"{inn1_runs}/{inn1_wkts}" if inn1_runs is not None else ("—" if not inn1_rows else "?/?")
+        s2_score   = f"{inn2_runs}/{inn2_wkts}" if inn2_runs is not None else ("—" if not inn2_rows else "?/?")
         target_str = f"Target: {target}" if target else ""
 
         nav = (

@@ -3,7 +3,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
-from ._common import json, logging, os, func, get_named_container_client
+from .common import json, logging, os, func, get_named_container_client
 
 # ── selected features from last MLflow run (read from summary JSON at request time) ──
 
@@ -91,7 +91,7 @@ def _parse_score_summary(t, inn1_bat_team):
 
 
 def _event_id_from_path(path: str) -> str:
-    """Extract event_id from blob path e.g. cricket/innings_tracker/event_id=11658831/..."""
+    """Extract event_id from blob path e.g. event_id=11658831/innings_tracker.json"""
     m = re.search(r"event_id=(\d+)", path)
     return m.group(1) if m else ""
 
@@ -100,7 +100,7 @@ def _batting_dominance(event_id: str, silver) -> float | None:
     """max_SR minus avg_SR across inn1 batsmen (min 5 balls). Returns None if insufficient data."""
     if not event_id:
         return None
-    prefix = f"silver/cricket/inplay/state/event_id={event_id}/"
+    prefix = f"event_id={event_id}/state/"
     try:
         state_blobs = [b.name for b in silver.list_blobs(name_starts_with=prefix)
                        if "/state_1_" in b.name]
@@ -389,14 +389,12 @@ def _render_html(records, selected, train_cutoff):
 def view_ml_feature_matrix_html(req: func.HttpRequest) -> func.HttpResponse:
     try:
         gold   = get_named_container_client("gold")
-        silver = get_named_container_client("silver")
 
         selected    = _load_selected(gold)
         train_cutoff = (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%d")
 
-        prefix = "cricket/innings_tracker/"
-        blobs  = [b.name for b in gold.list_blobs(name_starts_with=prefix)
-                  if b.name.endswith("innings_1_from_silver.json")]
+        blobs  = [b.name for b in gold.list_blobs(name_starts_with="event_id=")
+                  if b.name.endswith("/innings_tracker.json")]
 
         def _dl(path):
             try:
@@ -429,11 +427,7 @@ def view_ml_feature_matrix_html(req: func.HttpRequest) -> func.HttpResponse:
             return str(t.get("event_id") or _event_id_from_path(path) or "")
 
         eids = [_eid(t, path) for t, path in t20]
-        with ThreadPoolExecutor(max_workers=32) as ex:
-            dom_futs = {ex.submit(_batting_dominance, eid, silver): eid for eid in eids if eid}
-            dom_results = {}
-            for fut in as_completed(dom_futs):
-                dom_results[dom_futs[fut]] = fut.result()
+        dom_results = {eid: None for eid in eids}  # batting dominance removed (silver not accessible)
 
         records = []
         for t, path in t20:

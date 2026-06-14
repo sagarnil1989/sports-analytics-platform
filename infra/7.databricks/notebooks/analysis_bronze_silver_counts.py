@@ -54,7 +54,7 @@ print("Scanning silver...")
 silver_counts    = defaultdict(int)
 silver_blobs_map = defaultdict(list)   # event_id -> [blob]
 
-for blob in silver.list_blobs(name_starts_with="cricket/inplay/"):
+for blob in silver.list_blobs(name_starts_with="event_id="):
     if not blob.name.endswith("/match_state.json"):
         continue
     parts    = blob.name.split("/")

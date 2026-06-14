@@ -112,4 +112,4 @@ func start
 | [`docs/leagues.md`](docs/leagues.md) | League management, opt-in model, discovery |
 | [`docs/CLAUDE.md`](docs/CLAUDE.md) | BetsAPI EV record JSON parsing spec |
 | [`docs/cricket_market_heatmap.md`](docs/cricket_market_heatmap.md) | Heatmap feature spec |
-| [`docs/database-writes.md`](docs/database-writes.md) | What gets written to the SQL database |
+

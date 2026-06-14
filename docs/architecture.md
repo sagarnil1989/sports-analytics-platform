@@ -4,7 +4,7 @@
 
 | Component | Runs on | Role |
 |---|---|---|
-| Bronze capture (inplay + prematch) | `func-ramanuj` — timer triggers only | Every 5s–1hr, calls BetsAPI, writes raw snapshots |
+| Bronze capture (inplay + prematch) | `func-ramanuj-ingestion` — timer triggers only | Every 5s–1hr, calls BetsAPI, writes raw snapshots |
 | HTTP API / display routes | `func-ramanuj-display` — HTTP triggers only | On-demand reads from gold/bronze; all UI pages |
 | Silver + gold (ended matches) | ADF `pl_build_ended_match` → Databricks | Daily at 02:00 CET |
 | Manual backfill | ADF `pl_backfill` → Databricks | Triggered manually in ADF Studio |
@@ -60,7 +60,7 @@ Cluster startup adds ~2–3 minutes per pipeline run.
 | `silver.py` | `silver_*` parse functions | Databricks via ADF |
 | `gold.py` | `gold_*` index build functions | Databricks via ADF |
 | `views/` (package) | `view_*` HTTP handlers split across 10 modules | `func-ramanuj-display` (`cricket_display/`) |
-| `function_app.py` (ingestion) | Entry point: 4 bronze timer triggers only — no HTTP routes | `func-ramanuj` (`cricket_ingestion/`) |
+| `function_app.py` (ingestion) | Entry point: 4 bronze timer triggers only — no HTTP routes | `func-ramanuj-ingestion` (`cricket_ingestion/`) |
 | `function_app.py` (display) | Entry point: all 35 HTTP routes — no timer triggers | `func-ramanuj-display` (`cricket_display/`) |
 
 ### Per-match HTTP routes
@@ -74,7 +74,6 @@ Cluster startup adds ~2–3 minutes per pipeline run.
 | `/api/matches/{event_id}/lineage/view` | `view_match_lineage_html` | Data lineage and API call log |
 
 The **Detailed Analysis** page (`view_detailed_analysis_html` in `views/detailed_analysis.py`) loads the gold tracker (single blob) then fetches silver `team_scores.json` for every snapshot in parallel (64 workers) to decode S6/S7/S8. It runs the same scorecard and phase logic as `analysis_match_data_explorer.py`.
-| `cricwebsite_db.py` | PostgreSQL writer | Function App |
 
 ---
 
@@ -86,8 +85,7 @@ The **Detailed Analysis** page (`view_detailed_analysis_html` in `views/detailed
 | Function Storage Account | Required by Azure Functions runtime | €1 |
 | Key Vault | API keys and Databricks PAT | ~€1 |
 | Log Analytics + App Insights | Monitoring | €3–10 |
-| Azure SQL Database Basic | Serving database | ~€5 |
-| Azure Functions Consumption (`func-ramanuj`) | Bronze capture — timer triggers only | ~€0 at MVP scale |
+| Azure Functions Consumption (`func-ramanuj-ingestion`) | Bronze capture — timer triggers only | ~€0 at MVP scale |
 | Azure Functions Consumption (`func-ramanuj-display`) | All HTTP/display routes | ~€0 at MVP scale |
 | Display Function Storage Account (`stramanujdispweu`) | Required by `func-ramanuj-display` runtime | ~€1–2 |
 | Azure Data Factory | Pipeline orchestration | ~€1–2 |

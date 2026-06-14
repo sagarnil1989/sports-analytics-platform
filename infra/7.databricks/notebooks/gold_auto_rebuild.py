@@ -1,6 +1,6 @@
 # Databricks notebook: gold auto-rebuild
 # Triggered by ADF pl_gold_auto_rebuild every 15 minutes.
-# Detects ended matches and rebuilds innings_1_from_silver.json.
+# Detects ended matches and rebuilds innings_tracker.json.
 
 # COMMAND ----------
 

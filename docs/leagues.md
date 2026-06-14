@@ -26,7 +26,7 @@ This means:
 ## Management Page
 
 ```
-https://func-ramanuj.azurewebsites.net/api/mgmt/leagues/view
+https://func-ramanuj-display.azurewebsites.net/api/mgmt/leagues/view
 ```
 
 Shows all known leagues with toggle switches. Toggle a league on to start capturing its prematch odds.

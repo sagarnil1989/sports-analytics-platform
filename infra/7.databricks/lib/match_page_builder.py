@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from azure.core.exceptions import ResourceNotFoundError
 
-from api_and_blob import (
+from util import (
     download_json,
     download_required_json,
     get_int_env,
@@ -18,31 +18,16 @@ from tracker_writer import gold_write_innings_tracker_from_silver
 
 
 def gold_list_latest_silver_match_snapshots(silver_container, live_event_ids: List[str]) -> List[str]:
-    """Return the newest silver match_state.json path for each live event_id.
-
-    Silver paths are partitioned by year/month/day/hour, so we scan only the last
-    4 hour partitions per event_id rather than all historical silver data.
-    With 0 live events returns immediately with no blob listing at all.
-    """
-    now = utc_now()
-    hour_prefixes = []
-    for h in range(4):
-        t = now - timedelta(hours=h)
-        hour_prefixes.append(
-            f"cricket/inplay/year={t.year}/month={t.month:02d}/day={t.day:02d}/hour={t.hour:02d}/"
-        )
-
+    """Return the newest silver match_state.json path for each live event_id."""
     result: List[str] = []
     for eid in live_event_ids:
         best: tuple = (None, None)
-        for hour_prefix in hour_prefixes:
-            prefix = f"{hour_prefix}event_id={eid}/"
-            for blob in silver_container.list_blobs(name_starts_with=prefix):
-                if not blob.name.endswith("/match_state.json"):
-                    continue
-                lm = getattr(blob, "last_modified", None)
-                if best[0] is None or (lm and lm > best[0]):
-                    best = (lm, blob.name)
+        for blob in silver_container.list_blobs(name_starts_with=f"event_id={eid}/"):
+            if not blob.name.endswith("/match_state.json"):
+                continue
+            lm = getattr(blob, "last_modified", None)
+            if best[0] is None or (lm and lm > best[0]):
+                best = (lm, blob.name)
         if best[1]:
             result.append(best[1])
     return result
@@ -304,7 +289,7 @@ def gold_build_match_pages() -> None:
                 current_markets = {"rows": []}
             if not current_markets.get("rows"):
                 event_id_for_control = match_snapshot.get("event_id")
-                control_path = f"cricket/inplay/control/event_id={event_id_for_control}/last_known_markets.json"
+                control_path = f"event_id={event_id_for_control}/last_known_markets.json"
                 fallback = download_json(silver, control_path)
                 if fallback and fallback.get("rows"):
                     current_markets = fallback
