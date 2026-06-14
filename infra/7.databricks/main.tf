@@ -51,7 +51,7 @@ resource "databricks_secret" "sport_id" {
 resource "databricks_secret" "bets_api_token" {
   scope        = databricks_secret_scope.cricket.name
   key          = "BETS_API_TOKEN"
-  string_value = var.bets_api_token
+  string_value = data.azurerm_key_vault_secret.bet365_api_token.value
 }
 
 # ---------------------------------------------------------------------------

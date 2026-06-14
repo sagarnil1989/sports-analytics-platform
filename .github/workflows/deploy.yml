@@ -128,8 +128,6 @@ jobs:
     name: "Infra 7 · Databricks"
     runs-on: ubuntu-latest
     if: ${{ github.event.inputs.skip_infra != 'true' }}
-    env:
-      TF_VAR_bets_api_token: ${{ secrets.BETS_API_TOKEN }}
     defaults:
       run:
         working-directory: infra/7.databricks
