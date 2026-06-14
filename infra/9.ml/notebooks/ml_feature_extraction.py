@@ -33,9 +33,10 @@ def _dl(path):
 # STEP 1 — Discover all ended-match gold tracker files
 # ═══════════════════════════════════════════════════════════════════
 
-prefix = "cricket/innings_tracker/"
-blobs  = [b.name for b in gold.list_blobs(name_starts_with=prefix)
-          if b.name.endswith("innings_1_from_silver.json")]
+blobs = [
+    b.name for b in gold.list_blobs(name_starts_with="event_id=")
+    if b.name.endswith("/innings_tracker.json")
+]
 
 print(f"Discovered {len(blobs)} ended-match tracker files")
 
@@ -198,23 +199,28 @@ print(f"  Matches used        : {stats['matches_used']}")
 print(f"  Skipped (not T20)   : {stats['skipped_not_t20']}")
 print(f"  Skipped (no label)  : {stats['skipped_no_label']}")
 print(f"  Total feature rows  : {len(df):,}")
-print(f"  Innings 1 rows      : {(df['innings']==1).sum():,}")
-print(f"  Innings 2 rows      : {(df['innings']==2).sum():,}")
-print(f"  Outcome split       : {dict(df['outcome'].value_counts())}")
+if not df.empty:
+    print(f"  Innings 1 rows      : {(df['innings']==1).sum():,}")
+    print(f"  Innings 2 rows      : {(df['innings']==2).sum():,}")
+    print(f"  Outcome split       : {dict(df['outcome'].value_counts())}")
 print(f"{'='*55}\n")
-display(df.describe())
+if not df.empty:
+    display(df.describe())
 
 # COMMAND ----------
 # ═══════════════════════════════════════════════════════════════════
 # STEP 4 — Write Parquet to gold
 # ═══════════════════════════════════════════════════════════════════
 
-buf = io.BytesIO()
-df.to_parquet(buf, index=False, engine="pyarrow")
-buf.seek(0)
+if df.empty:
+    print("No data to write — skipping Parquet upload.")
+else:
+    buf = io.BytesIO()
+    df.to_parquet(buf, index=False, engine="pyarrow")
+    buf.seek(0)
 
-out_path = "cricket/ml_features/t20/features.parquet"
-gold.get_blob_client(out_path).upload_blob(buf, overwrite=True)
+    out_path = "cricket/ml_features/t20/features.parquet"
+    gold.get_blob_client(out_path).upload_blob(buf, overwrite=True)
 
-print(f"Written {len(df):,} rows  →  gold/{out_path}")
-print(f"\nColumn dtypes:\n{df.dtypes.to_string()}")
+    print(f"Written {len(df):,} rows  →  gold/{out_path}")
+    print(f"\nColumn dtypes:\n{df.dtypes.to_string()}")
