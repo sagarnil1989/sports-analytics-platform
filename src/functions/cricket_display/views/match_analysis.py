@@ -4,11 +4,15 @@ from .common import (
     download_json, get_named_container_client,
     build_simple_table_page,
 )
+import re as _re
 
 
 def _da_decode_s6(s6_raw: str):
+    # [PLAYERFULLNAME#198836] contains '#' which is the s6 separator.
+    # Normalize these to just the numeric ID before splitting on '#'.
+    s6_clean = _re.sub(r'\[PLAYERFULLNAME#(\d+)\]', r'\1', str(s6_raw or ""))
     batsmen = []
-    for part in str(s6_raw or "").split("#"):
+    for part in s6_clean.split("#"):
         bits = part.split(":")
         if len(bits) >= 3 and bits[0].strip():
             try:
@@ -30,8 +34,7 @@ def _da_decode_s8(s8_raw: str):
 
 
 def _da_looks_like_id(name: str) -> bool:
-    import re as _re
-    return bool(_re.match(r'^\d+\]?$', str(name or "").strip()))
+    return bool(_re.match(r'^\d+$', str(name or "").strip()))
 
 
 def _da_load_row(row: dict):
@@ -70,7 +73,6 @@ def _da_load_row(row: dict):
 def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
     """Per-match detailed analysis: batting/bowling scorecards, phase breakdown, chase."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    import re as _re
 
     try:
         event_id = req.route_params.get("event_id", "")
@@ -94,6 +96,8 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
         ] if p))
 
         # ── filter transition rows (innings-break ghost) ──────────────────────
+        # Ghost snapshot: innings=2 assigned because S3 set, but PG already reset to 0.0
+        # so score still shows 1st innings total (score > 0, over = 0.0).
         def _is_transition(r):
             if r.get("innings") != 2 or not r.get("score"):
                 return False
@@ -107,6 +111,46 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
         inn1_rows = [r for r in all_rows if r.get("innings") == 1]
         inn2_rows = [r for r in all_rows if r.get("innings") == 2]
 
+        # ── authoritative final scores ────────────────────────────────────────
+        # score_summary_events is home-first (raw BetsAPI ss), NOT innings-first.
+        # Determine which of es1/es2 is innings 1 by comparing with last
+        # captured snapshot scores (final score >= last snapshot score always).
+        def _parse_score_part(part):
+            m = _re.match(r'^(\d+)(?:/(\d+))?', part.strip())
+            return (int(m.group(1)), int(m.group(2)) if m.group(2) else None) if m else (None, None)
+
+        final_ss = (tracker.get("score_summary_events") or "").replace("-", ",")
+        parts = [p.strip() for p in final_ss.split(",", 1)] if final_ss else []
+        es1_runs, es1_wkts = _parse_score_part(parts[0]) if parts else (None, None)
+        es2_runs, es2_wkts = _parse_score_part(parts[1]) if len(parts) > 1 else (None, None)
+
+        inn1_last_score = inn1_rows[-1].get("score", 0) if inn1_rows else 0
+        inn2_last_score = inn2_rows[-1].get("score", 0) if inn2_rows else 0
+
+        if es1_runs is not None and es2_runs is not None:
+            d_straight = abs(es1_runs - inn1_last_score) + abs(es2_runs - inn2_last_score)
+            d_swapped  = abs(es2_runs - inn1_last_score) + abs(es1_runs - inn2_last_score)
+            if d_swapped < d_straight:
+                inn1_runs, inn1_wkts = es2_runs, es2_wkts
+                inn2_runs, inn2_wkts = es1_runs, es1_wkts
+            else:
+                inn1_runs, inn1_wkts = es1_runs, es1_wkts
+                inn2_runs, inn2_wkts = es2_runs, es2_wkts
+        else:
+            inn1_runs = es1_runs if es1_runs is not None else inn1_last_score or None
+            inn1_wkts = es1_wkts if es1_wkts is not None else (inn1_rows[-1].get("wickets") if inn1_rows else None)
+            inn2_runs = es2_runs if es2_runs is not None else inn2_last_score or None
+            inn2_wkts = es2_wkts if es2_wkts is not None else (inn2_rows[-1].get("wickets") if inn2_rows else None)
+
+        # Filter mislabeled last-ball-of-inn1 rows from inn2_rows.
+        # The silver parser tags these as innings=2 because the API sets S3 (target)
+        # at the very last ball of innings 1, before PG resets. Their score == inn1 total.
+        if inn1_runs is not None and inn1_wkts is not None:
+            inn2_rows = [r for r in inn2_rows
+                         if not (r.get("score") == inn1_runs and r.get("wickets") == inn1_wkts)]
+
+        target = (inn1_runs + 1) if inn1_runs is not None else None
+
         # ── decode embedded gold S6/S8 per row in parallel ───────────────────
         silver_by_snap: dict = {}
         with ThreadPoolExecutor(max_workers=32) as ex:
@@ -116,7 +160,7 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
                 if dec:
                     silver_by_snap[sid] = dec
 
-        # Build ID → name map
+        # Build ID → name map from all snapshots
         id_to_name: dict = {}
         for sv in silver_by_snap.values():
             id_to_name.update(sv.get("id_map_entry") or {})
@@ -146,9 +190,9 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
                 return 0
 
         def get_over_end_window(inn_rows_local, over_num):
-            target = f"{over_num}.0"
+            target_ov = f"{over_num}.0"
             for r in inn_rows_local:
-                if str(r.get("over") or "").strip() == target:
+                if str(r.get("over") or "").strip() == target_ov:
                     return r.get("ball_window") or []
             best = None
             for r in inn_rows_local:
@@ -158,32 +202,73 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
 
         # ── batting scorecard ─────────────────────────────────────────────────
         def build_batting(inn_rows_local):
-            seen: dict = {}
-            dismissed = []
-            prev_names: set = set()
+            seen: dict = {}      # name → {entry_over, runs, balls, _order}
+            order_ctr  = [0]
+            dismissed  = []
+            prev_list: list = [] # ordered (striker first from s6)
+
             for r in inn_rows_local:
+                # over 0.0 = no balls bowled yet; s6 often has PLAYERFULLNAME placeholders
+                if str(r.get("over") or "").strip() in ("0.0", "0"):
+                    continue
                 sv = silver_by_snap.get(r.get("snapshot_id")) or {}
                 batsmen = sv.get("batsmen") or []
-                curr = {resolve(b["name"]) for b in batsmen if b.get("name")}
-                for name in curr - prev_names:
-                    seen[name] = {"entry_over": r.get("over"), "runs": 0, "balls": 0}
+                if not batsmen:
+                    continue
+
+                curr_list = [resolve(b["name"]) for b in batsmen if b.get("name")]
+                curr_set  = set(curr_list)
+                prev_set  = set(prev_list)
+
+                # New batsmen: add in s6 order (striker is first in list)
+                for name in curr_list:
+                    if name not in prev_set and name not in seen:
+                        seen[name] = {"entry_over": r.get("over"), "runs": 0, "balls": 0,
+                                      "_order": order_ctr[0]}
+                        order_ctr[0] += 1
+
+                # Update stats
                 for b in batsmen:
                     nm = resolve(b.get("name"))
                     if nm in seen:
                         seen[nm]["runs"]  = b.get("runs", 0)
                         seen[nm]["balls"] = b.get("balls", 0)
-                for name in prev_names - curr:
+
+                # Dismissals: players in prev but not curr
+                for name in prev_set - curr_set:
                     if name in seen:
                         e = seen.pop(name)
                         sr = round(e["runs"] / e["balls"] * 100, 1) if e["balls"] else 0
                         dismissed.append({"batsman": name, "runs": e["runs"], "balls": e["balls"],
-                                          "SR": sr, "entry_over": e["entry_over"], "status": "dismissed"})
-                prev_names = curr
+                                          "SR": sr, "entry_over": e["entry_over"],
+                                          "status": "dismissed", "_order": e["_order"]})
+                prev_list = curr_list
+
             for nm, e in seen.items():
                 sr = round(e["runs"] / e["balls"] * 100, 1) if e["balls"] else 0
                 dismissed.append({"batsman": nm, "runs": e["runs"], "balls": e["balls"],
-                                  "SR": sr, "entry_over": e["entry_over"], "status": "not out"})
-            return sorted(dismissed, key=lambda x: ov_sort_key(x.get("entry_over")))
+                                  "SR": sr, "entry_over": e["entry_over"],
+                                  "status": "not out", "_order": e["_order"]})
+
+            # Dedup: same batsman can appear twice if they temporarily vanished from s6
+            # (e.g. incomplete snapshot). Keep earliest order; keep highest-balls stats.
+            merged: dict = {}
+            for entry in dismissed:
+                name = entry["batsman"]
+                if name not in merged:
+                    merged[name] = entry.copy()
+                else:
+                    ex = merged[name]
+                    if entry["_order"] < ex["_order"]:
+                        merged[name]["_order"]     = entry["_order"]
+                        merged[name]["entry_over"] = entry["entry_over"]
+                    if entry["balls"] > ex["balls"]:
+                        merged[name]["runs"]   = entry["runs"]
+                        merged[name]["balls"]  = entry["balls"]
+                        merged[name]["SR"]     = entry["SR"]
+                        merged[name]["status"] = entry["status"]
+
+            return sorted(merged.values(), key=lambda x: x.get("_order", 999))
 
         # ── bowling scorecard ─────────────────────────────────────────────────
         def build_bowling(inn_rows_local, all_rows_local, innings_num):
@@ -198,7 +283,7 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
                 overs_by_num[po["over_num"]] = po
 
             # Recover last over from first rows of next innings S8 carryover
-            next_rows = [r for r in all_rows_local if r.get("innings") == innings_num + 1]
+            next_rows    = [r for r in all_rows_local if r.get("innings") == innings_num + 1]
             existing_max = max(overs_by_num.keys(), default=0)
             for r in next_rows[:20]:
                 sv = silver_by_snap.get(r.get("snapshot_id")) or {}
@@ -214,7 +299,8 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
                 po = overs_by_num[over_num]
                 nm = po["bowler"]
                 if nm not in bowler_agg:
-                    bowler_agg[nm] = {"overs": 0, "runs": 0, "wickets": 0, "first_over": over_num, "over_list": []}
+                    bowler_agg[nm] = {"overs": 0, "runs": 0, "wickets": 0,
+                                      "first_over": over_num, "over_list": []}
                 bowler_agg[nm]["overs"]    += 1
                 bowler_agg[nm]["runs"]     += po["runs"]
                 bowler_agg[nm]["wickets"]  += po["wickets"]
@@ -245,7 +331,7 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
             except Exception:
                 return "Unknown"
 
-        def build_phases(inn_rows_local):
+        def build_phases(inn_rows_local, auth_runs, auth_wkts):
             buckets = {p: {"start_score": None, "end_score": None,
                            "start_wkts": None, "end_wkts": None,
                            "start_over": None, "end_over": None,
@@ -287,43 +373,31 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
                 b = buckets[ph]
                 if b["start_score"] is None:
                     continue
-                runs    = b["end_score"] - b["start_score"]
-                wickets = b["end_wkts"]  - b["start_wkts"]
+                end_score = b["end_score"]
+                end_wkts  = b["end_wkts"]
+                # Correct the Death phase end score with the authoritative final score.
+                # The last captured snapshot may be missing a few balls at innings end.
+                if "Death" in ph and auth_runs is not None and auth_runs >= end_score:
+                    end_score = auth_runs
+                    end_wkts  = auth_wkts if auth_wkts is not None else end_wkts
+                runs    = end_score - b["start_score"]
+                wickets = end_wkts  - b["start_wkts"]
                 br      = b["fours"] * 4 + b["sixes"] * 6
                 ph_ovs  = round(ov_float(b["end_over"]) - ov_float(b["start_over"]), 2)
                 rr      = round(runs / ph_ovs, 2) if ph_ovs > 0 else 0
                 result.append({"phase": ph, "runs": runs, "wickets": wickets, "rr": rr,
                                "fours": b["fours"], "sixes": b["sixes"], "boundary_runs": br,
                                "singles": b["singles"], "doubles": b["doubles"], "dots": b["dots"],
-                               "score_range": f"{b['start_score']}/{b['start_wkts']} → {b['end_score']}/{b['end_wkts']}"})
+                               "score_range": f"{b['start_score']}/{b['start_wkts']} → {end_score}/{end_wkts}"})
             return result
 
         # ── build all sections ────────────────────────────────────────────────
-        bat1 = build_batting(inn1_rows)
-        bat2 = build_batting(inn2_rows)
+        bat1   = build_batting(inn1_rows)
+        bat2   = build_batting(inn2_rows)
         bowl1, overs1 = build_bowling(inn1_rows, all_rows, 1)
         bowl2, overs2 = build_bowling(inn2_rows, all_rows, 2)
-        phase1 = build_phases(inn1_rows)
-        phase2 = build_phases(inn2_rows)
-
-        inn1_final = inn1_rows[-1] if inn1_rows else {}
-        inn2_final = inn2_rows[-1] if inn2_rows else {}
-
-        import re as _re2
-        def _parse_score_part(part):
-            m = _re2.match(r'^(\d+)(?:/(\d+))?', part.strip())
-            return (int(m.group(1)), int(m.group(2)) if m.group(2) else None) if m else (None, None)
-
-        final_ss = (tracker.get("score_summary_events") or "").replace("-", ",")
-        parts = [p.strip() for p in final_ss.split(",", 1)] if final_ss else []
-        es1_runs, es1_wkts = _parse_score_part(parts[0]) if parts else (None, None)
-        es2_runs, es2_wkts = _parse_score_part(parts[1]) if len(parts) > 1 else (None, None)
-
-        inn1_runs  = es1_runs  if es1_runs  is not None else inn1_final.get("score")
-        inn1_wkts  = es1_wkts  if es1_wkts  is not None else inn1_final.get("wickets")
-        inn2_runs  = es2_runs  if es2_runs  is not None else inn2_final.get("score")
-        inn2_wkts  = es2_wkts  if es2_wkts  is not None else inn2_final.get("wickets")
-        target     = (inn1_runs + 1) if inn1_runs is not None else None
+        phase1 = build_phases(inn1_rows, inn1_runs, inn1_wkts)
+        phase2 = build_phases(inn2_rows, inn2_runs, inn2_wkts)
 
         # ── HTML rendering helpers ────────────────────────────────────────────
         def thead(*cols):
@@ -340,7 +414,6 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
             t_cls = f' class="{cls}"' if cls else ""
             return f'<table{t_cls}>{head_html}<tbody>{"".join(body_rows)}</tbody></table>'
 
-        # batting table
         def batting_html(sc, inn_label):
             if not sc:
                 return f"<p>No batting data for {inn_label}.</p>"
@@ -357,11 +430,9 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
                 ))
             return table(thead("Batsman", "Runs", "Balls", "SR", "Entry Over", "Status"), rows_html)
 
-        # over-by-over + bowling table
         def bowling_section_html(bowl_sc, overs_by_num, inn_rows_local, inn_label):
             if not bowl_sc:
                 return f"<p>No bowling data for {inn_label}.</p>"
-            # over table
             ov_rows = []
             for ov_num in sorted(overs_by_num):
                 po = overs_by_num[ov_num]
@@ -373,7 +444,6 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
                 thead("Over", "Bowler", "Runs", "Wkts", "Ball sequence"),
                 ov_rows, cls="over-table",
             )
-            # bowling summary table
             bowl_rows = [
                 trow(escape(b["bowler"]), str(b["overs"]), str(b["runs"]),
                      str(b["wickets"]), f'{b["economy"]:.2f}', escape(b["breakdown"]))
@@ -385,7 +455,6 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
             )
             return f'<h3>Over by Over</h3>{ov_tbl}<h3>Bowling Summary</h3>{bowl_tbl}'
 
-        # phase table
         def phase_html(phases, inn_label):
             if not phases:
                 return f"<p>No phase data for {inn_label}.</p>"
@@ -402,21 +471,20 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
                 rows_html,
             )
 
-        # chase table
         def chase_html():
             if not inn2_rows or not target:
                 return ""
             rows_html = []
             for r in inn2_rows:
-                score = r.get("score") or 0
+                score  = r.get("score") or 0
                 ov_str = str(r.get("over") or "0")
                 try:
-                    p = ov_str.split(".")
+                    p  = ov_str.split(".")
                     bd = int(p[0]) * 6 + (int(p[1]) if len(p) > 1 else 0)
                 except Exception:
                     bd = 0
-                bl = 120 - bd
-                rn = target - score
+                bl  = 120 - bd
+                rn  = target - score
                 crr = round(score / (bd / 6), 2) if bd > 0 else 0
                 rrr = round(rn / bl * 6, 2) if bl > 0 else 0
                 bat_odds = r.get("batting_team_odds")
@@ -427,7 +495,8 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
                     f"{wp:.1f}%" if wp else "—",
                 ))
             return table(
-                thead("Over", "Score", "Wkts", "Needed", "Balls Left", "CRR", "RRR", "Win%"),
+                thead("Over", "Score", "Wkts", "Needed", "Balls Left", "CRR", "RRR",
+                      "Win% (implied)"),
                 rows_html,
             )
 
@@ -543,36 +612,14 @@ def view_match_markets_raw(req: func.HttpRequest) -> func.HttpResponse:
         gold = get_named_container_client("gold")
         page = (
             download_json(gold, f"cricket/matches/latest/event_id={event_id}/match_dashboard.json")
-            or download_required_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
+            or download_json(gold, f"cricket/matches/latest/event_id={event_id}/match_page.json")
         )
+        if not page:
+            return func.HttpResponse(json.dumps({"error": "No gold data for this event"}), status_code=404, mimetype="application/json")
         fi = (page.get("snapshot") or {}).get("fi")
         if not fi:
             return func.HttpResponse(json.dumps({"error": "FI not found in gold data for this event"}), status_code=404, mimetype="application/json")
-
-        payload = call_betsapi(path="/v1/bet365/event", params={"FI": fi})
-        body = (payload.get("response") or {}).get("body") or {}
-        results = body.get("results", [])
-        flat_records = results[0] if results and isinstance(results[0], list) else (results if isinstance(results, list) else [])
-        type_counts: Dict[str, int] = {}
-        for r in flat_records:
-            if isinstance(r, dict):
-                t = r.get("type", "UNKNOWN")
-                type_counts[t] = type_counts.get(t, 0) + 1
-        debug = {
-            "event_id": event_id,
-            "fi": fi,
-            "api_success": payload["response"]["success"],
-            "http_status": payload["response"]["http_status_code"],
-            "total_records": len(flat_records),
-            "record_type_counts": type_counts,
-            "raw_body": body,
-        }
-        return func.HttpResponse(json.dumps(debug, indent=2, default=str), status_code=200, mimetype="application/json")
+        return func.HttpResponse(json.dumps({"event_id": event_id, "fi": fi}, indent=2), status_code=200, mimetype="application/json")
     except Exception as ex:
         logging.exception("Failed to fetch raw markets")
         return func.HttpResponse(json.dumps({"error": str(ex)}), status_code=500, mimetype="application/json")
-
-
-# ------------------------------------------------------------------
-# Admin routes
-# ------------------------------------------------------------------
