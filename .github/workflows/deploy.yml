@@ -215,8 +215,6 @@ jobs:
         with:
           app-name: func-ramanuj-ingestion
           package: src/functions/cricket_ingestion
-          scm-do-build-during-deployment: true
-          enable-oryx-build: true
 
   deploy_display:
     name: "Deploy · func-ramanuj-display"
@@ -248,5 +246,3 @@ jobs:
         with:
           app-name: func-ramanuj-display
           package: src/functions/cricket_display
-          scm-do-build-during-deployment: true
-          enable-oryx-build: true

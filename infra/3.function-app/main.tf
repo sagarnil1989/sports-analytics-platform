@@ -64,8 +64,6 @@ resource "azurerm_linux_function_app" "ingestion" {
 
   app_settings = {
     FUNCTIONS_WORKER_RUNTIME              = "python"
-    SCM_DO_BUILD_DURING_DEPLOYMENT        = "true"
-    ENABLE_ORYX_BUILD                     = "true"
     APPINSIGHTS_INSTRUMENTATIONKEY        = data.azurerm_application_insights.main.instrumentation_key
     APPLICATIONINSIGHTS_CONNECTION_STRING = data.azurerm_application_insights.main.connection_string
 
@@ -135,8 +133,6 @@ resource "azurerm_linux_function_app" "display" {
 
   app_settings = {
     FUNCTIONS_WORKER_RUNTIME              = "python"
-    SCM_DO_BUILD_DURING_DEPLOYMENT        = "true"
-    ENABLE_ORYX_BUILD                     = "true"
     APPINSIGHTS_INSTRUMENTATIONKEY        = data.azurerm_application_insights.main.instrumentation_key
     APPLICATIONINSIGHTS_CONNECTION_STRING = data.azurerm_application_insights.main.connection_string
 
