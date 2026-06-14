@@ -138,8 +138,6 @@ def _process_event(
     inn1_rows = [r for r in rows if r.get("innings") == 1]
     inn2_rows_raw = [r for r in rows if r.get("innings") == 2]
 
-    chasing_team_from_acc = next((r["batting_team"] for r in inn2_rows_raw if r.get("batting_team")), "") or ""
-
     raw_summary = (tracker.get("score_summary_events") or tracker.get("score_summary") or "").replace("-", ",").strip()
     actual_total: Optional[int] = None
     final_innings2_score: Optional[int] = None
@@ -173,7 +171,7 @@ def _process_event(
 
     home_team = tracker_home
     away_team = tracker_away
-    chasing_team = chasing_team_from_acc or (away_team if batting_first_team == home_team else home_team)
+    chasing_team = away_team if batting_first_team == home_team else home_team
 
     inn1_sorted = sorted(inn1_rows, key=lambda r: float(r.get("over") or 0))
 
@@ -229,6 +227,7 @@ def _process_event(
         "event_id": event_id,
         "match_date": match_date,
         "match_name": match_name,
+        "league_name": tracker.get("league_name") or "",
         "is_womens_match": _is_womens_match(match_name),
         "batting_first_team": batting_first_team,
         "chasing_team": chasing_team,

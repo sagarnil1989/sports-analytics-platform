@@ -35,7 +35,13 @@ _load_from_dbfs("hypothesis", f"{_src}/hypothesis.py")
 # COMMAND ----------
 
 from hypothesis import extract_timeout_wicket
+from util import get_named_container_client, upload_json
+
 result = extract_timeout_wicket()
+
+# Write aggregate index so the display function can read it.
+gold = get_named_container_client("gold")
+upload_json(gold, "cricket/hypothesis/timeout_wicket.json", result, overwrite=True)
 
 print(f"Total timeouts detected : {result['total_timeouts_detected']}")
 print(f"Eligible (over data)    : {result['eligible_timeouts']}")

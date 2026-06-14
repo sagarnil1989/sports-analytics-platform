@@ -109,67 +109,46 @@ def view_hypothesis_inn2_over6(req: func.HttpRequest) -> func.HttpResponse:
         )
 
     results = sorted(data.get("results", []), key=lambda r: r.get("match_date") or "", reverse=True)
-    total = data.get("total_matches", 0)
-    eligible = data.get("eligible_matches", 0)
-    fav_won = data.get("favorite_won_count", 0)
-    fav_lost = data.get("favorite_lost_count", 0)
-    no_odds = data.get("no_odds_data_count", 0)
-    win_pct = data.get("favorite_win_pct")
     generated = data.get("generated_at_utc", "")[:19].replace("T", " ")
 
-    # Summary banner
-    if eligible > 0:
-        verdict_color = "#1a7a1a" if (win_pct or 0) >= 60 else ("#cc6600" if (win_pct or 0) >= 50 else "#aa1111")
-        verdict_text = f"{win_pct}% ({fav_won}/{eligible} eligible matches)"
-    else:
-        verdict_color = "#555"
-        verdict_text = "Not enough data yet"
-
-    summary_html = f"""
-    <div style="background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px #ddd;margin-bottom:24px;">
-        <h2 style="margin:0 0 10px;">Hypothesis: Inn2 Over-6 Favourite Wins</h2>
-        <p style="color:#555;margin:0 0 14px;">During a chase, the team with lower match-winner odds <strong>after 6 overs of the 2nd innings</strong> wins the match.</p>
-        <table style="border:none;box-shadow:none;background:transparent;width:auto;">
-            <tr><td style="border:none;padding:4px 16px 4px 0;color:#555;">Total matches</td><td style="border:none;padding:4px 0;font-weight:bold;">{total}</td></tr>
-            <tr><td style="border:none;padding:4px 16px 4px 0;color:#555;">With odds data at over 6</td><td style="border:none;padding:4px 0;font-weight:bold;">{eligible}</td></tr>
-            <tr><td style="border:none;padding:4px 16px 4px 0;color:#555;">No odds data</td><td style="border:none;padding:4px 0;font-weight:bold;">{no_odds}</td></tr>
-            <tr><td style="border:none;padding:4px 16px 4px 0;color:#555;">Favourite won</td><td style="border:none;padding:4px 0;font-weight:bold;color:{verdict_color};">{verdict_text}</td></tr>
-        </table>
-        <p style="color:#999;font-size:12px;margin:12px 0 0;">Generated {generated} UTC</p>
-    </div>
-    """
+    # Build sorted league list for the filter dropdown
+    leagues = sorted({r.get("league_name") or "Unknown" for r in results})
 
     rows_html = ""
     for r in results:
-        event_id = escape(r.get("event_id") or "")
-        match_date = escape(r.get("match_date") or "")
-        match = escape(r.get("match_name") or r.get("event_id", ""))
-        chasing = escape(r.get("chasing_team") or "")
+        event_id    = escape(r.get("event_id") or "")
+        league_name = escape(r.get("league_name") or "Unknown")
+        match_date  = escape(r.get("match_date") or "")
+        match       = escape(r.get("match_name") or r.get("event_id", ""))
+        chasing     = escape(r.get("chasing_team") or "")
         batting_first = escape(r.get("batting_first_team") or "")
-        target = r.get("target") or "?"
+        target      = r.get("target") or "?"
         over_reached = r.get("over_reached") or "?"
 
-        inn1_final = r.get("inn1_final_score")
+        inn1_final     = r.get("inn1_final_score")
         inn1_final_str = r.get("inn1_final_display") or (str(inn1_final) if inn1_final is not None else "?")
         inn1_score = r.get("inn1_score_at_over6")
-        inn1_wkts = r.get("inn1_wickets_at_over6")
-        inn1_str = f"{inn1_score}/{inn1_wkts}" if inn1_score is not None and inn1_wkts is not None else ("?" if inn1_score is None else str(inn1_score))
+        inn1_wkts  = r.get("inn1_wickets_at_over6")
+        inn1_str   = f"{inn1_score}/{inn1_wkts}" if inn1_score is not None and inn1_wkts is not None else ("?" if inn1_score is None else str(inn1_score))
 
         inn2_score = r.get("score_at_over6")
-        inn2_wkts = r.get("wickets_at_over6")
-        inn2_str = f"{inn2_score}/{inn2_wkts}" if inn2_score is not None and inn2_wkts is not None else ("?" if inn2_score is None else str(inn2_score))
+        inn2_wkts  = r.get("wickets_at_over6")
+        inn2_str   = f"{inn2_score}/{inn2_wkts}" if inn2_score is not None and inn2_wkts is not None else ("?" if inn2_score is None else str(inn2_score))
 
-        chasing_odds = r.get("chasing_team_odds_at_over6")
+        chasing_odds      = r.get("chasing_team_odds_at_over6")
         batting_first_odds = r.get("batting_first_team_odds_at_over6")
-        chasing_odds_str = f"{chasing_odds:.2f}" if chasing_odds else "—"
+        chasing_odds_str      = f"{chasing_odds:.2f}" if chasing_odds else "—"
         batting_first_odds_str = f"{batting_first_odds:.2f}" if batting_first_odds else "—"
 
-        fav = escape(r.get("favorite_at_over6") or "—")
-        winner = escape(r.get("actual_winner") or "?")
+        fav         = escape(r.get("favorite_at_over6") or "—")
+        winner      = escape(r.get("actual_winner") or "?")
         fav_won_val = r.get("favorite_won")
         final_score = r.get("final_innings2_score")
-        final_wkts = r.get("final_innings2_wickets")
-        final_str = (f"{final_score}/{final_wkts}" if final_wkts is not None else str(final_score)) if final_score is not None else "?"
+        final_wkts  = r.get("final_innings2_wickets")
+        final_str   = (f"{final_score}/{final_wkts}" if final_wkts is not None else str(final_score)) if final_score is not None else "?"
+
+        # encode favorite_won as data attribute for JS summary recalculation
+        fav_won_attr = "true" if fav_won_val is True else ("false" if fav_won_val is False else "null")
 
         if fav_won_val is True:
             result_cell = '<td style="color:#1a7a1a;font-weight:bold;">✓ Yes</td>'
@@ -178,9 +157,9 @@ def view_hypothesis_inn2_over6(req: func.HttpRequest) -> func.HttpResponse:
         else:
             result_cell = '<td style="color:#888;">— No odds</td>'
 
-        rows_html += f"""<tr>
+        rows_html += f"""<tr data-league="{league_name}" data-favwon="{fav_won_attr}">
             <td>{match_date}<br><small style="color:#888;font-family:monospace;">{event_id}</small></td>
-            <td>{match}</td>
+            <td>{match}<br><small style="color:#888;">{league_name}</small></td>
             <td>{batting_first}<br><small style="color:#888;">vs {chasing} (chasing {target})</small></td>
             <td style="font-family:monospace;font-weight:bold;">{inn1_final_str}</td>
             <td style="font-family:monospace;">{inn1_str} @ ov {over_reached}</td>
@@ -191,6 +170,59 @@ def view_hypothesis_inn2_over6(req: func.HttpRequest) -> func.HttpResponse:
             <td>{winner}<br><small style="color:#888;">final: {final_str}</small></td>
             {result_cell}
         </tr>"""
+
+    league_options = '<option value="ALL">All Leagues</option>' + "".join(
+        f'<option value="{escape(ln)}">{escape(ln)}</option>' for ln in leagues
+    )
+
+    summary_and_filter_html = f"""
+    <div id="summaryBanner" style="background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px #ddd;margin-bottom:16px;">
+        <h2 style="margin:0 0 10px;">Hypothesis: Inn2 Over-6 Favourite Wins</h2>
+        <p style="color:#555;margin:0 0 14px;">During a chase, the team with lower match-winner odds <strong>after 6 overs of the 2nd innings</strong> wins the match.</p>
+        <table style="border:none;box-shadow:none;background:transparent;width:auto;">
+            <tr><td style="border:none;padding:4px 16px 4px 0;color:#555;">Total matches</td><td style="border:none;padding:4px 0;font-weight:bold;" id="statTotal">—</td></tr>
+            <tr><td style="border:none;padding:4px 16px 4px 0;color:#555;">With odds data at over 6</td><td style="border:none;padding:4px 0;font-weight:bold;" id="statEligible">—</td></tr>
+            <tr><td style="border:none;padding:4px 16px 4px 0;color:#555;">No odds data</td><td style="border:none;padding:4px 0;font-weight:bold;" id="statNoOdds">—</td></tr>
+            <tr><td style="border:none;padding:4px 16px 4px 0;color:#555;">Favourite won</td><td style="border:none;padding:4px 0;font-weight:bold;" id="statVerdict">—</td></tr>
+        </table>
+        <p style="color:#999;font-size:12px;margin:12px 0 0;">Generated {generated} UTC</p>
+    </div>
+    <div style="margin-bottom:16px;">
+        <label style="font-weight:600;margin-right:8px;">League:</label>
+        <select id="leagueFilter" onchange="applyFilter()"
+                style="padding:8px 12px;font-size:14px;border:1px solid #ccc;border-radius:6px;">
+            {league_options}
+        </select>
+    </div>
+    <script>
+    function applyFilter() {{
+        var league = document.getElementById('leagueFilter').value;
+        var rows = document.querySelectorAll('#matchTable tr[data-league]');
+        var total = 0, eligible = 0, favWon = 0, favLost = 0;
+        rows.forEach(function(r) {{
+            var show = league === 'ALL' || r.dataset.league === league;
+            r.style.display = show ? '' : 'none';
+            if (show) {{
+                total++;
+                var fw = r.dataset.favwon;
+                if (fw === 'true')  {{ eligible++; favWon++; }}
+                else if (fw === 'false') {{ eligible++; favLost++; }}
+            }}
+        }});
+        var noOdds = total - eligible;
+        var pct = eligible > 0 ? (100 * favWon / eligible).toFixed(1) : null;
+        var verdictColor = !pct ? '#555' : (pct >= 60 ? '#1a7a1a' : (pct >= 50 ? '#cc6600' : '#aa1111'));
+        var verdictText  = pct ? pct + '% (' + favWon + '/' + eligible + ' eligible matches)' : 'Not enough data yet';
+        document.getElementById('statTotal').textContent    = total;
+        document.getElementById('statEligible').textContent = eligible;
+        document.getElementById('statNoOdds').textContent   = noOdds;
+        var sv = document.getElementById('statVerdict');
+        sv.textContent = verdictText;
+        sv.style.color = verdictColor;
+    }}
+    document.addEventListener('DOMContentLoaded', applyFilter);
+    </script>
+    """
 
     headers = [
         "Date / Event ID",
@@ -213,10 +245,9 @@ def view_hypothesis_inn2_over6(req: func.HttpRequest) -> func.HttpResponse:
         back_link="/api/home",
     )
 
-    # Inject summary before the table
     html = table_page.replace(
         '<div class="hint">This page reads a small pre-built gold index file, so it should load quickly.</div>',
-        summary_html,
+        summary_and_filter_html,
     )
 
     return func.HttpResponse(html, mimetype="text/html")

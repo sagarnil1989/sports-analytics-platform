@@ -35,7 +35,13 @@ _load_from_dbfs("hypothesis", f"{_src}/hypothesis.py")
 # COMMAND ----------
 
 from hypothesis import extract_inn2_over6_favorite
+from util import get_named_container_client, upload_json
+
 result = extract_inn2_over6_favorite()
+
+# Write aggregate index so the display function can read it.
+gold = get_named_container_client("gold")
+upload_json(gold, "cricket/hypothesis/inn2_over6_favorite.json", result, overwrite=True)
 
 print(f"Matches processed : {result['total_matches']}")
 print(f"Eligible (odds available): {result['eligible_matches']}")
