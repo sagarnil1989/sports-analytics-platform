@@ -111,9 +111,15 @@ def extract_innings_snapshot(
     # Read score/wickets/over from the matching team_score row.
     # If batting_team was identified from the market, prefer that team's row.
     # Otherwise fall back to the first row with a score (Bet365 puts batting team first).
+    # Never use a PI=0 (fielding) row to establish the batting team or score when the
+    # batting team is unknown — their S5 retains their own previous-innings total, which
+    # is stale at the innings transition and would produce a ghost innings-2 row with the
+    # innings-1 final score.
     for row in team_score_rows:
         row_name = str(row.get("name") or "")
         if batting_team and row_name != batting_team:
+            continue
+        if batting_team is None and str(row.get("pi") or "") == "0":
             continue
         if row.get("runs") is not None:
             if batting_team is None:
@@ -126,6 +132,8 @@ def extract_innings_snapshot(
         for row in team_score_rows:
             over_str = str(row.get("pg_over") or "").strip() or None
             if not over_str:
+                continue
+            if str(row.get("pi") or "") == "0":
                 continue
             current_over = over_str
             batting_team = str(row.get("name") or "")
@@ -242,6 +250,19 @@ def extract_innings_snapshot(
         except ValueError:
             pass
 
+    # Embed raw S6/S7/S8 strings from the batting and bowling team rows so the
+    # display layer can reconstruct per-ball and per-over stats without a
+    # separate silver lookup. These fields are used by match_analysis.py for
+    # batting scorecard, bowling scorecard and phase breakdown.
+    bat_row  = next((r for r in team_score_rows
+                     if str((r.get("raw") or {}).get("PI") or r.get("pi") or "") == "1"), None)
+    bowl_row = next((r for r in team_score_rows
+                     if str((r.get("raw") or {}).get("PI") or r.get("pi") or "") == "0"), None)
+    if bat_row is None:
+        bat_row = next((r for r in team_score_rows if r.get("s6")), None)
+    if bowl_row is None:
+        bowl_row = next((r for r in team_score_rows if r != bat_row), None)
+
     return {
         "over": current_over,
         "over_float": current_over,
@@ -262,6 +283,10 @@ def extract_innings_snapshot(
         "target": target_runs,
         "snapshot_id": match_snapshot.get("snapshot_id"),
         "snapshot_time_utc": match_snapshot.get("snapshot_time_utc"),
+        "s6":      bat_row.get("s6")  if bat_row  else None,
+        "s7_bat":  bat_row.get("s7")  if bat_row  else None,
+        "s8":      bowl_row.get("s8") if bowl_row else None,
+        "s7_bowl": bowl_row.get("s7") if bowl_row else None,
     }
 
 

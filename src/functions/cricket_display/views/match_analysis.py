@@ -3,6 +3,7 @@ from .common import (
     func,
     download_json, get_named_container_client,
     build_simple_table_page,
+    parse_ss_final_scores,
 )
 import re as _re
 
@@ -133,40 +134,43 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
         inn1_rows = [r for r in all_rows if r.get("innings") == 1]
         inn2_rows = [r for r in all_rows if r.get("innings") == 2]
 
+        # ── pre-filter mislabeled end-of-inn1 rows from inn2_rows ────────────
+        # At the final ball of inn1 BetsAPI sets S3 (target) before PG resets,
+        # tagging those rows innings=2 with the inn1 final score and over ~19.x.
+        # They appear first in time-order in inn2_rows and corrupt both the score
+        # resolution heuristic (Issue 5) and the phase boundary inference (Issue 9)
+        # if not removed before those steps run.
+        # inn1_rows are never contaminated so inn1_rows[-1] is a safe estimate.
+        _inn1_pre_score = inn1_rows[-1].get("score") if inn1_rows else None
+        _inn1_pre_wkts  = inn1_rows[-1].get("wickets") if inn1_rows else None
+        if _inn1_pre_score is not None:
+            inn2_rows = [r for r in inn2_rows
+                         if not (r.get("score") == _inn1_pre_score
+                                 and r.get("wickets") == _inn1_pre_wkts)]
+
         # ── authoritative final scores ────────────────────────────────────────
-        # score_summary_events is home-first (raw BetsAPI ss), NOT innings-first.
-        # Determine which of es1/es2 is innings 1 by comparing with last
-        # captured snapshot scores (final score >= last snapshot score always).
-        def _parse_score_part(part):
-            m = _re.match(r'^(\d+)(?:/(\d+))?', part.strip())
-            return (int(m.group(1)), int(m.group(2)) if m.group(2) else None) if m else (None, None)
+        # score_summary_events for completed matches comes from /v1/event/view
+        # which returns scores in innings order (inn1 first, inn2 second) —
+        # the same source used by the matches table Final Score column.
+        # Use parse_ss_final_scores directly, same as the matches table, so
+        # both views show identical scores without a home/away swap heuristic.
+        _fs = parse_ss_final_scores(tracker.get("score_summary_events") or "")
+        inn1_runs = _fs["inn1_runs"]
+        inn1_wkts = _fs["inn1_wickets"]
+        inn2_runs = _fs["inn2_runs"]
+        inn2_wkts = _fs["inn2_wickets"]
 
-        final_ss = (tracker.get("score_summary_events") or "").replace("-", ",")
-        parts = [p.strip() for p in final_ss.split(",", 1)] if final_ss else []
-        es1_runs, es1_wkts = _parse_score_part(parts[0]) if parts else (None, None)
-        es2_runs, es2_wkts = _parse_score_part(parts[1]) if len(parts) > 1 else (None, None)
+        # Fall back to last captured snapshot when score_summary_events is absent
+        # (live match in progress, or old gold data without score_summary_events).
+        if inn1_runs is None:
+            inn1_runs = inn1_rows[-1].get("score") if inn1_rows else None
+            inn1_wkts = inn1_rows[-1].get("wickets") if inn1_rows else None
+        if inn2_runs is None:
+            inn2_runs = inn2_rows[-1].get("score") if inn2_rows else None
+            inn2_wkts = inn2_rows[-1].get("wickets") if inn2_rows else None
 
-        inn1_last_score = inn1_rows[-1].get("score", 0) if inn1_rows else 0
-        inn2_last_score = inn2_rows[-1].get("score", 0) if inn2_rows else 0
-
-        if es1_runs is not None and es2_runs is not None:
-            d_straight = abs(es1_runs - inn1_last_score) + abs(es2_runs - inn2_last_score)
-            d_swapped  = abs(es2_runs - inn1_last_score) + abs(es1_runs - inn2_last_score)
-            if d_swapped < d_straight:
-                inn1_runs, inn1_wkts = es2_runs, es2_wkts
-                inn2_runs, inn2_wkts = es1_runs, es1_wkts
-            else:
-                inn1_runs, inn1_wkts = es1_runs, es1_wkts
-                inn2_runs, inn2_wkts = es2_runs, es2_wkts
-        else:
-            inn1_runs = es1_runs if es1_runs is not None else inn1_last_score or None
-            inn1_wkts = es1_wkts if es1_wkts is not None else (inn1_rows[-1].get("wickets") if inn1_rows else None)
-            inn2_runs = es2_runs if es2_runs is not None else inn2_last_score or None
-            inn2_wkts = es2_wkts if es2_wkts is not None else (inn2_rows[-1].get("wickets") if inn2_rows else None)
-
-        # Filter mislabeled last-ball-of-inn1 rows from inn2_rows.
-        # The silver parser tags these as innings=2 because the API sets S3 (target)
-        # at the very last ball of innings 1, before PG resets. Their score == inn1 total.
+        # Second-pass filter with authoritative scores in case inn1_pre_score
+        # differed from the authoritative inn1_runs (e.g. last snapshot was partial).
         if inn1_runs is not None and inn1_wkts is not None:
             inn2_rows = [r for r in inn2_rows
                          if not (r.get("score") == inn1_runs and r.get("wickets") == inn1_wkts)]

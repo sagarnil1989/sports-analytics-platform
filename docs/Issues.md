@@ -68,11 +68,10 @@ Same root cause and fix as Issue 3.
 **1st innings score shown as 161 instead of 155**
 ✅ Fixed
 
-`score_summary_events` stores scores in home/away order (raw BetsAPI `ss` field), not innings order. The away team batted first in this match, so `parts[0]` (home = 161) was inn2, and `parts[1]` (away = 155) was inn1. The code was blindly using `parts[0]` as innings 1, reversing the scores. This also caused the wrong target (162 instead of 156) in chase analysis, which cascaded into RRR showing 42 instead of 6.
+`score_summary_events` for live snapshots from `/v3/events/inplay` is home/away ordered, not innings-ordered. For this match Gujarat Titans (away) batted first, so home=RCB=inn2 was in `parts[0]` and away=Gujarat=inn1 was in `parts[1]`. The previous swap heuristic (`d_straight` vs `d_swapped`) was also failing because the ghost inn2 rows (Issue 10) had `score=155` which made `inn2_last_score=155`, eliminating the distance advantage for the correct assignment (tie always defaulted wrong).
 
-- **Fix**: After parsing `score_summary_events`, both scores are compared against the last captured snapshot score of each innings. The assignment that minimises total distance is used.
-- **Permanent fix needed**: `gold_rebuild.py` should write a `batting_first_team_name` field so the display can determine innings order definitively instead of using a heuristic.
-- **File**: `views/match_analysis.py` → score resolution block
+- **Root fix**: `score_summary_events` for **completed** matches is populated from `/v1/event/view` which returns scores in innings order. Switched to `parse_ss_final_scores()` directly (same function used by the matches table Final Score column) — no heuristic needed. The second-pass filter (using the now-correct `inn1_runs=155`) also catches any ghost inn2 rows the first-pass filter missed.
+- **File**: `views/match_analysis.py` → score resolution block (replaces distance heuristic)
 
 ---
 
@@ -80,22 +79,25 @@ Same root cause and fix as Issue 3.
 **Death phase end score shows 151/8 instead of 155/8**
 ✅ Fixed
 
-The last captured snapshot before innings end was at 151/8. The final 4 runs (last few balls) had no snapshot. `build_phases` was using the last captured snapshot as the Death phase end score.
+The last captured snapshot before innings end was at 151/8 (final 4 runs had no snapshot). `build_phases` used the last captured snapshot as the Death phase end score. The `build_phases` fix (accepting `auth_runs` / `auth_wkts`) was correct, but it received the wrong `inn1_runs` value (RCB's score instead of 155) because the Issue 5 swap heuristic was failing.
 
-- **Fix**: `build_phases` now accepts `auth_runs` / `auth_wkts` (the authoritative final score from `score_summary_events`). If the Death phase `end_score` is lower than `auth_runs`, it is overridden with the authoritative value.
-- **File**: `views/match_analysis.py` → `build_phases()`
+- **Root fix**: Issue 5 fix (direct `parse_ss_final_scores`) now gives `inn1_runs=155` correctly. `build_phases` receives the right `auth_runs=155` and overrides the 151 Death phase end score.
+- **File**: `views/match_analysis.py` → `build_phases()`, score resolution block
 
 ---
 
 ## Issue 7
-**Bowling — Over 11 completely missing from over-by-over table and bowling summary**
+**Bowling — Over 12 missing from over-by-over table and bowling summary**
 ✅ Fixed
 
-Over 11 data was missing because `build_bowling` relied exclusively on `s8` (previous over: bowler/runs/wickets) embedded in snapshots from the **next** over. If no snapshot at the start of over 12 captured `s8`, over 11 was never recorded.
+Over 12 data was missing because `build_bowling` relied exclusively on `s8` (previous over stats) which only appears at the START of the following over. If no snapshot at the beginning of over 13 captured `s8`, over 12 was never recorded.
 
-- **Root cause**: S8 is a retrospective field — it only appears in fielding-team rows at the start of the following over. One missing snapshot at over 12.0 is enough to lose an entire over.
-- **Fix**: Added S7_bowl (`s7` from fielding team, PI=0) as a fallback source. S7_bowl format: `"Name#over_num#balls#runs#wickets"` — it tracks the **current** over's running stats at every snapshot. Iterating `inn_rows_local` in time order, the last seen value per `over_num` gives the final tally for that over. `build_bowling` now fills any over missing from S8 using this S7_bowl data.
-- **File**: `views/match_analysis.py` → `_da_decode_s7_bowl()`, `_da_load_row()`, `build_bowling()`
+- **Root cause**: S8 is retrospective — it only appears in fielding-team rows at the start of the next over. One missed snapshot at over 13.0 loses an entire over's data.
+- **Fix**: Added S7_bowl (`s7` from fielding team, PI=0) as a fallback. S7_bowl tracks the **current** over's running stats at every snapshot (`"Name#over_num#balls#runs#wickets"`). The last seen value per `over_num` gives the final tally for that over. `build_bowling` fills any gap left by S8 using this data.
+- **Second root cause**: `extract_innings_snapshot` in `tracker_writer.py` never wrote `s7_bowl` to gold tracker rows — so for matches tracked live (not rebuilt), all gold rows had `s7_bowl=None` and the fallback did nothing.
+- **Fix**: `extract_innings_snapshot` now extracts `s6`, `s7_bat`, `s8`, `s7_bowl` from the batting/bowling team_score rows and includes them in every gold tracker row. The duplicate extraction in `gold_rebuild.py` was removed.
+- **Files**: `views/match_analysis.py`, `infra/7.databricks/lib/tracker_writer.py`, `infra/7.databricks/lib/gold_rebuild.py`
+- **Note**: Existing gold data for matches tracked before this fix won't have `s7_bowl`. Trigger `gold_rebuild` for any affected match to backfill it.
 
 ---
 
@@ -116,9 +118,10 @@ At over 0.0 of innings 2, no balls have been bowled yet. The s6 field at this po
 
 In the 2nd innings of event 11963258, data is missing for overs 14.4–14.5. A snapshot exists at 15.1 with score=139, wickets=5, ball_window=`[0, 4, 0, 2, 0, 0]` (newest first). The old code used the last captured snapshot within each phase as the boundary score, so Middle (7-15) was ending at the over 14.3 score rather than 139.
 
-- **Fix**: After the main bucketing loop, `build_phases` now runs a boundary inference pass for each non-Death phase. It finds the first snapshot of the following phase, counts how many legal balls have been bowled in that new over (from the over string), then subtracts those runs (and wickets) from the snapshot score — working back to the true end-of-phase score. The inferred score is only applied when it is higher than the last captured snapshot within the phase, preventing spurious overrides when the boundary snapshot was actually captured.
-- **Handles**: extras (wides, no-balls, leg-byes) in the first few balls of the new over are counted correctly; only legal balls consume the counter.
-- **File**: `views/match_analysis.py` → `build_phases()`
+- **Boundary inference fix**: `build_phases` finds the first snapshot of the next phase and subtracts runs from balls already bowled in the new over to infer the true end-of-phase score. Only applied when the inferred score is higher than the last captured snapshot within the phase.
+- **Second root cause (why inference was still wrong)**: The boundary inference was finding the mislabeled over-19.x rows (from Issue 10, score=inn1_total, tagged innings=2) as the "first Death phase snapshot" instead of the real over-15.x snapshot. Subtracting 5 balls' runs from score=155 gave a completely wrong Middle boundary.
+- **Fix**: The Issue 10 pre-filter now runs **before** `build_phases` (see Issue 5 fix), so `inn2_rows` is clean when boundary inference runs.
+- **File**: `views/match_analysis.py` → `build_phases()`, pre-filter block
 
 ---
 
@@ -127,12 +130,13 @@ In the 2nd innings of event 11963258, data is missing for overs 14.4–14.5. A s
 ✅ Fixed
 
 At the very last ball of innings 1, the BetsAPI sets S3 (target) before PG resets to 0.0. The silver parser detects S3 present → assigns `innings=2`. These rows have over=19.x with the inn1 final score (155/8) and appeared in `inn2_rows`. This caused:
-- Death phase 2nd innings start showing `155/8` instead of the true inn2 start score
-- Chase Analysis row at over 19.5 with RRR=42 (also worsened by Issue 5's wrong target)
+- Score resolution heuristic (Issue 5) to fail — mislabeled rows make `inn2_last_score` = inn1 total, creating a tie in the distance comparison that defaults wrong
+- Phase boundary inference (Issue 9) to pick the mislabeled 19.x row as "first Death snapshot", computing a garbage Middle-Death boundary score
+- Chase Analysis row at over 19.5 with RRR=42
 
-- **Fix applied**: `match_analysis.py` filters `inn2_rows` to exclude any row where `score == inn1_runs AND wickets == inn1_wkts` after the authoritative inn1 score is determined.
-- **Root fix still needed**: `bronze_to_silver.py` innings detection should handle this edge case so mislabeled rows are never written to the gold tracker.
-- **File**: `views/match_analysis.py` → inn2_rows filter block
+- **Display-layer fix**: Pre-filter removes mislabeled rows from `inn2_rows` before score resolution. First pass uses `inn1_rows[-1]` score (last captured snapshot, e.g. 151); second pass uses authoritative `inn1_runs` from `parse_ss_final_scores` (e.g. 155) to catch any the first pass missed.
+- **Root fix (tracker_writer)**: `extract_innings_snapshot` now skips PI=0 (fielding-team) rows when determining batting team and score. At the transition snapshot, the batting team's TE record has `S5=''` (blank) — the function now returns `None` (snapshot skipped) rather than falling through to the fielding team's stale innings-1 total. Ghost rows are never written to the gold tracker for matches tracked after this fix.
+- **Files**: `views/match_analysis.py` → pre-filter block; `infra/7.databricks/lib/tracker_writer.py` → `extract_innings_snapshot()`
 
 ---
 

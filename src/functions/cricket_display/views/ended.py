@@ -64,6 +64,7 @@ def _load_one(eid, gold, blocked, live_eids):
         "match_name":     match_name,
         "score":          score,
         "format":         _detect_format(match_name, str(tracker.get("league_name") or ""), score or ""),
+        "gender":         tracker.get("gender") or "M",
         "stadium":        (tracker.get("stadium_data") or {}).get("name") or None,
         "event_time_utc": tracker.get("match_date_utc"),
         "time_status":    "3",
@@ -155,6 +156,7 @@ def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
                     <td>{escape(str(m.get("match_name") or "-"))}</td>
                     <td>{league_esc}</td>
                     <td><span class="{badge_cls}">{fmt_esc}</span></td>
+                    <td>{escape(str(m.get("gender") or "M"))}</td>
                     <td>{escape(_fmt_score(str(m.get("score") or ""))) or "-"}</td>
                     <td>{escape(str(m.get("stadium") or "-"))}</td>
                     <td>{escape(str(m.get("event_time_utc") or "-"))}</td>
@@ -232,7 +234,7 @@ def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
     <table>
         <thead><tr>
             <th>Event ID</th><th>Bet365 FI</th><th>Match</th><th>League</th>
-            <th>Format</th><th>Final Score</th><th>Stadium</th><th>Date</th>
+            <th>Format</th><th>Gender</th><th>Final Score</th><th>Stadium</th><th>Date</th>
             <th>Heatmap</th><th>Prematch</th><th>Tracker</th><th>Analysis</th>
         </tr></thead>
         <tbody id="matchTable">{rows_html}</tbody>

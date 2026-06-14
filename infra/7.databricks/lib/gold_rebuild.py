@@ -59,6 +59,7 @@ def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = N
 
     silver_score = stadium_data = silver_match_name = None
     silver_league_id = silver_league_name = silver_home_team = silver_away_team = silver_match_date = None
+    silver_fi = None
     for ms_path in reversed(snapshot_paths[-50:]):
         ms = download_json(silver, ms_path)
         if ms:
@@ -78,7 +79,9 @@ def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = N
                 silver_away_team = ms["away_team_name"]
             if not silver_match_date and ms.get("event_time_utc"):
                 silver_match_date = ms["event_time_utc"]
-        if silver_score and stadium_data and silver_match_name and silver_league_id and silver_home_team:
+            if not silver_fi and ms.get("fi"):
+                silver_fi = str(ms["fi"])
+        if silver_score and stadium_data and silver_match_name and silver_league_id and silver_home_team and silver_fi:
             break
     if not stadium_data:
         stadium_data = existing_gold.get("stadium_data") or None
@@ -129,19 +132,6 @@ def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = N
                             point["away_team_odds"] = a
                             break
             if point is not None:
-                ts_rows = team_scores_doc.get("rows", [])
-                bat_row  = next((r for r in ts_rows if str((r.get("raw") or {}).get("PI") or r.get("pi") or "") == "1"), None)
-                bowl_row = next((r for r in ts_rows if str((r.get("raw") or {}).get("PI") or r.get("pi") or "") == "0"), None)
-                if bat_row is None:
-                    bat_row = next((r for r in ts_rows if r.get("s6")), None)
-                if bowl_row is None:
-                    bowl_row = next((r for r in ts_rows if r != bat_row), None)
-                if bat_row:
-                    point["s6"]     = bat_row.get("s6")
-                    point["s7_bat"] = bat_row.get("s7")
-                if bowl_row:
-                    point["s8"]      = bowl_row.get("s8")
-                    point["s7_bowl"] = bowl_row.get("s7")
                 raw_points.append(point)
         except Exception:
             errors += 1
@@ -184,7 +174,7 @@ def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = N
 
     acc_path = f"event_id={event_id}/innings_accumulator.json"
     old_acc  = download_json(silver, acc_path) or {}
-    fi       = str(old_acc.get("fi") or existing_gold.get("fi") or "")
+    fi       = str(silver_fi or old_acc.get("fi") or existing_gold.get("fi") or "")
     new_acc  = {
         **old_acc,
         "event_id": event_id,
