@@ -8,6 +8,6 @@ data "azurerm_storage_account" "data_lake" {
 }
 
 data "azurerm_linux_function_app" "function_app" {
-  name                = local.config.function_app_name
+  name                = local.config.ingestion_function_app_name
   resource_group_name = data.azurerm_resource_group.main.name
 }
