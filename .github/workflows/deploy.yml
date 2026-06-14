@@ -211,6 +211,14 @@ jobs:
               "tenantId": "${{ vars.AZURE_TENANT_ID }}"
             }
 
+      - name: Clear WEBSITE_RUN_FROM_PACKAGE
+        run: |
+          az functionapp config appsettings delete \
+            --name func-ramanuj-ingestion \
+            --resource-group rg-ramanuj \
+            --setting-names WEBSITE_RUN_FROM_PACKAGE WEBSITE_ENABLE_SYNC_UPDATE_SITE \
+            2>/dev/null || true
+
       - uses: Azure/functions-action@v1
         with:
           app-name: func-ramanuj-ingestion
@@ -241,6 +249,14 @@ jobs:
               "subscriptionId": "${{ vars.AZURE_SUBSCRIPTION_ID }}",
               "tenantId": "${{ vars.AZURE_TENANT_ID }}"
             }
+
+      - name: Clear WEBSITE_RUN_FROM_PACKAGE
+        run: |
+          az functionapp config appsettings delete \
+            --name func-ramanuj-display \
+            --resource-group rg-ramanuj \
+            --setting-names WEBSITE_RUN_FROM_PACKAGE WEBSITE_ENABLE_SYNC_UPDATE_SITE \
+            2>/dev/null || true
 
       - uses: Azure/functions-action@v1
         with:
