@@ -73,7 +73,7 @@ resource "azurerm_linux_function_app" "ingestion" {
 
     DATA_STORAGE_CONNECTION_STRING = data.azurerm_storage_account.data_lake.primary_connection_string
 
-    BETS_API_TOKEN    = data.azurerm_key_vault_secret.bet365_api_token.value
+    BETS_API_TOKEN    = "@Microsoft.KeyVault(VaultName=${data.azurerm_key_vault.main.name};SecretName=BET365-API-TOKEN)"
     BETS_API_BASE_URL = local.config.bet365_base_url
     SPORT_ID          = local.config.sport_id
 
@@ -144,7 +144,7 @@ resource "azurerm_linux_function_app" "display" {
 
     DATA_LAKE_BLOB_ENDPOINT = data.azurerm_storage_account.data_lake.primary_blob_endpoint
 
-    BETS_API_TOKEN    = data.azurerm_key_vault_secret.bet365_api_token.value
+    BETS_API_TOKEN    = "@Microsoft.KeyVault(VaultName=${data.azurerm_key_vault.main.name};SecretName=BET365-API-TOKEN)"
     BETS_API_BASE_URL = local.config.bet365_base_url
 
     AZURE_FUNCTIONS_WORKER_PROCESS_TERMINATE_TIMEOUT = local.config.azure_functions_worker_process_terminate_timeout

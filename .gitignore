@@ -5,6 +5,7 @@
 crash.log
 *.tfvars
 *.tfplan
+tfplan
 local.settings.json
 local.settings.template.json
 *.DS_Store

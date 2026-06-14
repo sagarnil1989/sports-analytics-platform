@@ -9,13 +9,11 @@ resource "azurerm_data_factory_linked_service_key_vault" "main" {
   key_vault_id    = data.azurerm_key_vault.main.id
 }
 
-# Grant ADF managed identity Get permission on Key Vault secrets (Access Policy model)
-resource "azurerm_key_vault_access_policy" "adf" {
-  key_vault_id = data.azurerm_key_vault.main.id
-  tenant_id    = local.config.tenant_id
-  object_id    = data.azurerm_data_factory.main.identity[0].principal_id
-
-  secret_permissions = ["Get"]
+# Grant ADF managed identity read access to Key Vault secrets (RBAC model).
+resource "azurerm_role_assignment" "adf_kv_secrets_user" {
+  scope                = data.azurerm_key_vault.main.id
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = data.azurerm_data_factory.main.identity[0].principal_id
 }
 
 # ---------------------------------------------------------------------------
