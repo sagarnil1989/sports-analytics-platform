@@ -26,228 +26,27 @@ env:
 jobs:
 
 # ──────────────────────────────────────────────────────────────
-# PHASE 1 — PLAN (sequential, automatic)
-# Runs all terraform plans and uploads each as an artifact.
-# No changes are made to Azure at this stage.
+# APPROVAL GATE
+# Pauses here and notifies the reviewer(s) configured on the
+# "production" environment. Approve before any apply runs.
 # ──────────────────────────────────────────────────────────────
 
-  plan_1_bootstrap:
-    name: "Plan 1 · Bootstrap"
-    runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.skip_infra != 'true' }}
-    defaults:
-      run:
-        working-directory: infra/1.bootstrap
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "~1.9"
-      - name: Init
-        run: terraform init -backend-config="resource_group_name=$TF_BACKEND_RG" -backend-config="storage_account_name=$TF_BACKEND_SA" -backend-config="container_name=$TF_BACKEND_CONTAINER"
-      - name: Plan
-        run: terraform plan -out=tfplan -lock=false
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tfplan-1-bootstrap
-          path: infra/1.bootstrap/tfplan
-          retention-days: 5
-
-  plan_2_datalake:
-    name: "Plan 2 · Data Lake"
-    needs: plan_1_bootstrap
-    runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.skip_infra != 'true' }}
-    defaults:
-      run:
-        working-directory: infra/2.datalake
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "~1.9"
-      - name: Init
-        run: terraform init -backend-config="resource_group_name=$TF_BACKEND_RG" -backend-config="storage_account_name=$TF_BACKEND_SA" -backend-config="container_name=$TF_BACKEND_CONTAINER"
-      - name: Plan
-        run: terraform plan -out=tfplan -lock=false
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tfplan-2-datalake
-          path: infra/2.datalake/tfplan
-          retention-days: 5
-
-  plan_3_function_app:
-    name: "Plan 3 · Function App"
-    needs: plan_2_datalake
-    runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.skip_infra != 'true' }}
-    defaults:
-      run:
-        working-directory: infra/3.function-app
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "~1.9"
-      - name: Init
-        run: terraform init -backend-config="resource_group_name=$TF_BACKEND_RG" -backend-config="storage_account_name=$TF_BACKEND_SA" -backend-config="container_name=$TF_BACKEND_CONTAINER"
-      - name: Plan
-        run: terraform plan -out=tfplan -lock=false
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tfplan-3-function-app
-          path: infra/3.function-app/tfplan
-          retention-days: 5
-
-  plan_5_static_web:
-    name: "Plan 5 · Static Web App"
-    needs: plan_3_function_app
-    runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.skip_infra != 'true' }}
-    defaults:
-      run:
-        working-directory: infra/5.static-web-app
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "~1.9"
-      - name: Init
-        run: terraform init -backend-config="resource_group_name=$TF_BACKEND_RG" -backend-config="storage_account_name=$TF_BACKEND_SA" -backend-config="container_name=$TF_BACKEND_CONTAINER"
-      - name: Plan
-        run: terraform plan -out=tfplan -lock=false
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tfplan-5-static-web
-          path: infra/5.static-web-app/tfplan
-          retention-days: 5
-
-  plan_6_adf:
-    name: "Plan 6 · ADF"
-    needs: plan_5_static_web
-    runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.skip_infra != 'true' }}
-    defaults:
-      run:
-        working-directory: infra/6.adf
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "~1.9"
-      - name: Init
-        run: terraform init -backend-config="resource_group_name=$TF_BACKEND_RG" -backend-config="storage_account_name=$TF_BACKEND_SA" -backend-config="container_name=$TF_BACKEND_CONTAINER"
-      - name: Plan
-        run: terraform plan -out=tfplan -lock=false
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tfplan-6-adf
-          path: infra/6.adf/tfplan
-          retention-days: 5
-
-  plan_7_databricks:
-    name: "Plan 7 · Databricks"
-    needs: plan_6_adf
-    runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.skip_infra != 'true' }}
-    defaults:
-      run:
-        working-directory: infra/7.databricks
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "~1.9"
-      - name: Init
-        run: terraform init -backend-config="resource_group_name=$TF_BACKEND_RG" -backend-config="storage_account_name=$TF_BACKEND_SA" -backend-config="container_name=$TF_BACKEND_CONTAINER"
-      - name: Plan
-        run: terraform plan -out=tfplan -lock=false
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tfplan-7-databricks
-          path: infra/7.databricks/tfplan
-          retention-days: 5
-
-  plan_8_adf_config:
-    name: "Plan 8 · ADF Config"
-    needs: plan_7_databricks
-    runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.skip_infra != 'true' }}
-    defaults:
-      run:
-        working-directory: infra/8.adf-config
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "~1.9"
-      - name: Init
-        run: terraform init -backend-config="resource_group_name=$TF_BACKEND_RG" -backend-config="storage_account_name=$TF_BACKEND_SA" -backend-config="container_name=$TF_BACKEND_CONTAINER"
-      - name: Plan
-        run: terraform plan -out=tfplan -lock=false
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tfplan-8-adf-config
-          path: infra/8.adf-config/tfplan
-          retention-days: 5
-
-  plan_9_ml:
-    name: "Plan 9 · ML"
-    needs: plan_8_adf_config
-    runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.skip_infra != 'true' }}
-    defaults:
-      run:
-        working-directory: infra/9.ml
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "~1.9"
-      - name: Init
-        run: terraform init -backend-config="resource_group_name=$TF_BACKEND_RG" -backend-config="storage_account_name=$TF_BACKEND_SA" -backend-config="container_name=$TF_BACKEND_CONTAINER"
-      - name: Plan
-        run: terraform plan -out=tfplan -lock=false
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tfplan-9-ml
-          path: infra/9.ml/tfplan
-          retention-days: 5
-
-# ──────────────────────────────────────────────────────────────
-# PHASE 2 — APPROVAL GATE
-# Pauses after all plans complete. GitHub notifies the required
-# reviewer(s) configured on the "production" environment.
-# Review the plan outputs in the Phase 1 job logs, then
-# approve or reject here before any apply runs.
-# ──────────────────────────────────────────────────────────────
-
-  infra_approve:
-    name: "Approve infra changes"
-    needs:
-      - plan_1_bootstrap
-      - plan_2_datalake
-      - plan_3_function_app
-      - plan_5_static_web
-      - plan_6_adf
-      - plan_7_databricks
-      - plan_8_adf_config
-      - plan_9_ml
+  approve:
+    name: "Approve deployment"
     runs-on: ubuntu-latest
     environment: production
-    if: ${{ always() && !failure() && !cancelled() }}
+    if: ${{ github.event.inputs.skip_infra != 'true' }}
     steps:
-      - name: Plans reviewed and approved
-        run: echo "All Terraform plans approved. Proceeding with apply."
+      - name: Approved
+        run: echo "Deployment approved. All components will now plan and apply in parallel."
 
 # ──────────────────────────────────────────────────────────────
-# PHASE 3 — APPLY (sequential, after approval)
-# Downloads the plan artifact produced in Phase 1 and applies it.
+# INFRA — all modules run in parallel, each does plan → apply.
 # ──────────────────────────────────────────────────────────────
 
-  apply_1_bootstrap:
-    name: "Apply 1 · Bootstrap"
-    needs: infra_approve
+  infra_1_bootstrap:
+    name: "Infra 1 · Bootstrap"
+    needs: approve
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -259,16 +58,14 @@ jobs:
           terraform_version: "~1.9"
       - name: Init
         run: terraform init -backend-config="resource_group_name=$TF_BACKEND_RG" -backend-config="storage_account_name=$TF_BACKEND_SA" -backend-config="container_name=$TF_BACKEND_CONTAINER"
-      - uses: actions/download-artifact@v4
-        with:
-          name: tfplan-1-bootstrap
-          path: infra/1.bootstrap
+      - name: Plan
+        run: terraform plan -out=tfplan -lock=false
       - name: Apply
         run: terraform apply -auto-approve -lock=false tfplan
 
-  apply_2_datalake:
-    name: "Apply 2 · Data Lake"
-    needs: apply_1_bootstrap
+  infra_2_datalake:
+    name: "Infra 2 · Data Lake"
+    needs: approve
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -280,16 +77,14 @@ jobs:
           terraform_version: "~1.9"
       - name: Init
         run: terraform init -backend-config="resource_group_name=$TF_BACKEND_RG" -backend-config="storage_account_name=$TF_BACKEND_SA" -backend-config="container_name=$TF_BACKEND_CONTAINER"
-      - uses: actions/download-artifact@v4
-        with:
-          name: tfplan-2-datalake
-          path: infra/2.datalake
+      - name: Plan
+        run: terraform plan -out=tfplan -lock=false
       - name: Apply
         run: terraform apply -auto-approve -lock=false tfplan
 
-  apply_3_function_app:
-    name: "Apply 3 · Function App"
-    needs: apply_2_datalake
+  infra_3_function_app:
+    name: "Infra 3 · Function App"
+    needs: approve
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -301,16 +96,14 @@ jobs:
           terraform_version: "~1.9"
       - name: Init
         run: terraform init -backend-config="resource_group_name=$TF_BACKEND_RG" -backend-config="storage_account_name=$TF_BACKEND_SA" -backend-config="container_name=$TF_BACKEND_CONTAINER"
-      - uses: actions/download-artifact@v4
-        with:
-          name: tfplan-3-function-app
-          path: infra/3.function-app
+      - name: Plan
+        run: terraform plan -out=tfplan -lock=false
       - name: Apply
         run: terraform apply -auto-approve -lock=false tfplan
 
-  apply_5_static_web:
-    name: "Apply 5 · Static Web App"
-    needs: apply_3_function_app
+  infra_5_static_web:
+    name: "Infra 5 · Static Web App"
+    needs: approve
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -322,16 +115,14 @@ jobs:
           terraform_version: "~1.9"
       - name: Init
         run: terraform init -backend-config="resource_group_name=$TF_BACKEND_RG" -backend-config="storage_account_name=$TF_BACKEND_SA" -backend-config="container_name=$TF_BACKEND_CONTAINER"
-      - uses: actions/download-artifact@v4
-        with:
-          name: tfplan-5-static-web
-          path: infra/5.static-web-app
+      - name: Plan
+        run: terraform plan -out=tfplan -lock=false
       - name: Apply
         run: terraform apply -auto-approve -lock=false tfplan
 
-  apply_6_adf:
-    name: "Apply 6 · ADF"
-    needs: apply_5_static_web
+  infra_6_adf:
+    name: "Infra 6 · ADF"
+    needs: approve
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -343,16 +134,14 @@ jobs:
           terraform_version: "~1.9"
       - name: Init
         run: terraform init -backend-config="resource_group_name=$TF_BACKEND_RG" -backend-config="storage_account_name=$TF_BACKEND_SA" -backend-config="container_name=$TF_BACKEND_CONTAINER"
-      - uses: actions/download-artifact@v4
-        with:
-          name: tfplan-6-adf
-          path: infra/6.adf
+      - name: Plan
+        run: terraform plan -out=tfplan -lock=false
       - name: Apply
         run: terraform apply -auto-approve -lock=false tfplan
 
-  apply_7_databricks:
-    name: "Apply 7 · Databricks"
-    needs: apply_6_adf
+  infra_7_databricks:
+    name: "Infra 7 · Databricks"
+    needs: approve
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -364,16 +153,14 @@ jobs:
           terraform_version: "~1.9"
       - name: Init
         run: terraform init -backend-config="resource_group_name=$TF_BACKEND_RG" -backend-config="storage_account_name=$TF_BACKEND_SA" -backend-config="container_name=$TF_BACKEND_CONTAINER"
-      - uses: actions/download-artifact@v4
-        with:
-          name: tfplan-7-databricks
-          path: infra/7.databricks
+      - name: Plan
+        run: terraform plan -out=tfplan -lock=false
       - name: Apply
         run: terraform apply -auto-approve -lock=false tfplan
 
-  apply_8_adf_config:
-    name: "Apply 8 · ADF Config"
-    needs: apply_7_databricks
+  infra_8_adf_config:
+    name: "Infra 8 · ADF Config"
+    needs: approve
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -385,16 +172,14 @@ jobs:
           terraform_version: "~1.9"
       - name: Init
         run: terraform init -backend-config="resource_group_name=$TF_BACKEND_RG" -backend-config="storage_account_name=$TF_BACKEND_SA" -backend-config="container_name=$TF_BACKEND_CONTAINER"
-      - uses: actions/download-artifact@v4
-        with:
-          name: tfplan-8-adf-config
-          path: infra/8.adf-config
+      - name: Plan
+        run: terraform plan -out=tfplan -lock=false
       - name: Apply
         run: terraform apply -auto-approve -lock=false tfplan
 
-  apply_9_ml:
-    name: "Apply 9 · ML"
-    needs: apply_8_adf_config
+  infra_9_ml:
+    name: "Infra 9 · ML"
+    needs: approve
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -406,26 +191,20 @@ jobs:
           terraform_version: "~1.9"
       - name: Init
         run: terraform init -backend-config="resource_group_name=$TF_BACKEND_RG" -backend-config="storage_account_name=$TF_BACKEND_SA" -backend-config="container_name=$TF_BACKEND_CONTAINER"
-      - uses: actions/download-artifact@v4
-        with:
-          name: tfplan-9-ml
-          path: infra/9.ml
+      - name: Plan
+        run: terraform plan -out=tfplan -lock=false
       - name: Apply
         run: terraform apply -auto-approve -lock=false tfplan
 
 # ──────────────────────────────────────────────────────────────
-# FUNCTION APPS — deploy after function-app infra apply is done.
-# Both run in parallel; each is independent of the other.
+# FUNCTION APPS — deploy in parallel once function-app infra is done.
 # ──────────────────────────────────────────────────────────────
 
   deploy_ingestion:
     name: "Deploy · func-ramanuj-ingestion"
-    needs: apply_3_function_app
+    needs: infra_3_function_app
     runs-on: ubuntu-latest
     if: ${{ always() && !failure() && !cancelled() && github.event.inputs.skip_functions != 'true' }}
-    defaults:
-      run:
-        working-directory: src/functions/cricket_ingestion
     steps:
       - uses: actions/checkout@v4
 
@@ -434,6 +213,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
+        working-directory: src/functions/cricket_ingestion
         run: pip install -r requirements.txt --target=".python_packages/lib/site-packages"
 
       - uses: azure/login@v2
@@ -455,12 +235,9 @@ jobs:
 
   deploy_display:
     name: "Deploy · func-ramanuj-display"
-    needs: apply_3_function_app
+    needs: infra_3_function_app
     runs-on: ubuntu-latest
     if: ${{ always() && !failure() && !cancelled() && github.event.inputs.skip_functions != 'true' }}
-    defaults:
-      run:
-        working-directory: src/functions/cricket_display
     steps:
       - uses: actions/checkout@v4
 
@@ -469,6 +246,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
+        working-directory: src/functions/cricket_display
         run: pip install -r requirements.txt --target=".python_packages/lib/site-packages"
 
       - uses: azure/login@v2

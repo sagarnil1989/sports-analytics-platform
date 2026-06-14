@@ -12,7 +12,7 @@
 | [4](#issue-4) | JO Holder appears twice in batting scorecard | Detailed Analysis | ✅ Fixed |
 | [5](#issue-5) | 1st innings score wrong — 161 shown instead of 155 | Detailed Analysis | ✅ Fixed |
 | [6](#issue-6) | Death phase end score 151/8 instead of 155/8 | Detailed Analysis | ✅ Fixed |
-| [7](#issue-7) | Bowling — Over 11 completely missing | Detailed Analysis | 🔴 Open |
+| [7](#issue-7) | Bowling — Over 11 completely missing | Detailed Analysis | ✅ Fixed |
 | [8](#issue-8) | `0]` shown as 1st batsman in 2nd innings | Detailed Analysis | ✅ Fixed |
 | [9](#issue-9) | Phase boundary score wrong when snapshot missing | Detailed Analysis | 🔴 Open |
 | [10](#issue-10) | Inn 2 row at over 19.5 showing innings 1 data | Detailed Analysis | ✅ Fixed |
@@ -90,12 +90,13 @@ The last captured snapshot before innings end was at 151/8. The final 4 runs (la
 
 ## Issue 7
 **Bowling — Over 11 completely missing from over-by-over table and bowling summary**
-🔴 Open — needs bronze investigation
+✅ Fixed
 
-Over 11 (11.0–11.5) exists in the gold tracker rows but does not appear in the bowling section. Each over's bowling data comes from the `s8` field (previous over: bowler / runs / wickets) embedded in snapshots from the NEXT over. If no snapshot at the start of over 12 has `s8` populated, over 11 is never recorded.
+Over 11 data was missing because `build_bowling` relied exclusively on `s8` (previous over: bowler/runs/wickets) embedded in snapshots from the **next** over. If no snapshot at the start of over 12 captured `s8`, over 11 was never recorded.
 
-- **To investigate**: In bronze for event 11963258, find the TE records at over `12.0`–`12.2` and check whether `S8` is present. If absent, the data was never captured in the feed at that moment.
-- **Files**: Bronze snapshots for event 11963258, `infra/7.databricks/lib/gold_rebuild.py` (S8 embedding step)
+- **Root cause**: S8 is a retrospective field — it only appears in fielding-team rows at the start of the following over. One missing snapshot at over 12.0 is enough to lose an entire over.
+- **Fix**: Added S7_bowl (`s7` from fielding team, PI=0) as a fallback source. S7_bowl format: `"Name#over_num#balls#runs#wickets"` — it tracks the **current** over's running stats at every snapshot. Iterating `inn_rows_local` in time order, the last seen value per `over_num` gives the final tally for that over. `build_bowling` now fills any over missing from S8 using this S7_bowl data.
+- **File**: `views/match_analysis.py` → `_da_decode_s7_bowl()`, `_da_load_row()`, `build_bowling()`
 
 ---
 

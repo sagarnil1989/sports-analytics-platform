@@ -33,6 +33,26 @@ def _da_decode_s8(s8_raw: str):
     return None
 
 
+def _da_decode_s7_bowl(s7_raw: str):
+    """Parse S7 from the bowling/fielding team (PI=0).
+    Format: 'Name#over_num#balls#runs#wickets'
+    over_num uses the same cricket convention as S8 (first over = 1).
+    """
+    parts = str(s7_raw or "").split("#")
+    if len(parts) >= 5 and parts[0].strip():
+        try:
+            return {
+                "name":     parts[0].strip(),
+                "over_num": int(parts[1]),
+                "balls":    int(parts[2]),
+                "runs":     int(parts[3]),
+                "wickets":  int(parts[4]),
+            }
+        except (ValueError, IndexError):
+            pass
+    return None
+
+
 def _da_looks_like_id(name: str) -> bool:
     return bool(_re.match(r'^\d+$', str(name or "").strip()))
 
@@ -45,12 +65,13 @@ def _da_load_row(row: dict):
     s8      = row.get("s8")
     s7_bowl = row.get("s7_bowl")
 
-    if not s6 and not s8:
+    if not s6 and not s8 and not s7_bowl:
         return snap_id, None
 
-    batsmen_raw  = _da_decode_s6(s6)
-    prev_over    = _da_decode_s8(s8)
-    striker_real = str(s7_bat or "").split("#")[0].strip() or None
+    batsmen_raw    = _da_decode_s6(s6)
+    prev_over      = _da_decode_s8(s8)
+    curr_over_bowl = _da_decode_s7_bowl(s7_bowl)
+    striker_real   = str(s7_bat or "").split("#")[0].strip() or None
 
     id_map_entry: dict = {}
     if striker_real and batsmen_raw and _da_looks_like_id(batsmen_raw[0].get("name")):
@@ -60,12 +81,13 @@ def _da_load_row(row: dict):
     if striker_real and batsmen and _da_looks_like_id(batsmen[0].get("name")):
         batsmen[0]["name"] = striker_real
 
-    current_bowler = str(s7_bowl or "").split("#")[0].strip() or None
+    current_bowler = curr_over_bowl["name"] if curr_over_bowl else None
 
     return snap_id, {
         "batsmen":        batsmen,
         "current_bowler": current_bowler,
         "prev_over":      prev_over,
+        "curr_over_bowl": curr_over_bowl,
         "id_map_entry":   id_map_entry,
     }
 
@@ -293,6 +315,27 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
                     if ov_num not in overs_by_num and ov_num > existing_max:
                         overs_by_num[ov_num] = po
                     break
+
+            # S7_bowl fallback: fills in overs where S8 was never captured.
+            # S7_bowl tracks the CURRENT over's running stats at each snapshot.
+            # Iterating in row order means the last update per over_num holds
+            # the final ball count for that over — identical data to what S8
+            # would have reported at the start of the next over.
+            s7_last: dict = {}
+            for r in inn_rows_local:
+                sv = silver_by_snap.get(r.get("snapshot_id")) or {}
+                cob = sv.get("curr_over_bowl")
+                if not cob or not cob.get("name"):
+                    continue
+                s7_last[cob["over_num"]] = cob
+            for ov_num, cob in s7_last.items():
+                if ov_num not in overs_by_num:
+                    overs_by_num[ov_num] = {
+                        "over_num": ov_num,
+                        "bowler":   cob["name"],
+                        "runs":     cob["runs"],
+                        "wickets":  cob["wickets"],
+                    }
 
             bowler_agg: dict = {}
             for over_num in sorted(overs_by_num):
