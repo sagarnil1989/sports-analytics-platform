@@ -197,9 +197,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        working-directory: src/functions/cricket_ingestion
-        run: pip install -r requirements.txt --target=".python_packages/lib/site-packages"
+      - name: Install Azure Functions Core Tools
+        run: npm install -g azure-functions-core-tools@4 --unsafe-perm true
 
       - uses: azure/login@v2
         with:
@@ -211,18 +210,9 @@ jobs:
               "tenantId": "${{ vars.AZURE_TENANT_ID }}"
             }
 
-      - name: Clear WEBSITE_RUN_FROM_PACKAGE
-        run: |
-          az functionapp config appsettings delete \
-            --name func-ramanuj-ingestion \
-            --resource-group rg-ramanuj \
-            --setting-names WEBSITE_RUN_FROM_PACKAGE WEBSITE_ENABLE_SYNC_UPDATE_SITE \
-            2>/dev/null || true
-
-      - uses: Azure/functions-action@v1
-        with:
-          app-name: func-ramanuj-ingestion
-          package: src/functions/cricket_ingestion
+      - name: Deploy func-ramanuj-ingestion
+        working-directory: src/functions/cricket_ingestion
+        run: func azure functionapp publish func-ramanuj-ingestion --python
 
   deploy_display:
     name: "Deploy · func-ramanuj-display"
@@ -236,9 +226,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        working-directory: src/functions/cricket_display
-        run: pip install -r requirements.txt --target=".python_packages/lib/site-packages"
+      - name: Install Azure Functions Core Tools
+        run: npm install -g azure-functions-core-tools@4 --unsafe-perm true
 
       - uses: azure/login@v2
         with:
@@ -250,15 +239,6 @@ jobs:
               "tenantId": "${{ vars.AZURE_TENANT_ID }}"
             }
 
-      - name: Clear WEBSITE_RUN_FROM_PACKAGE
-        run: |
-          az functionapp config appsettings delete \
-            --name func-ramanuj-display \
-            --resource-group rg-ramanuj \
-            --setting-names WEBSITE_RUN_FROM_PACKAGE WEBSITE_ENABLE_SYNC_UPDATE_SITE \
-            2>/dev/null || true
-
-      - uses: Azure/functions-action@v1
-        with:
-          app-name: func-ramanuj-display
-          package: src/functions/cricket_display
+      - name: Deploy func-ramanuj-display
+        working-directory: src/functions/cricket_display
+        run: func azure functionapp publish func-ramanuj-display --python
