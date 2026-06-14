@@ -26,32 +26,6 @@ env:
 jobs:
 
 # ──────────────────────────────────────────────────────────────
-# DETECT — which paths changed in this push?
-# On workflow_dispatch (manual run) we always treat everything
-# as changed so the skip_* inputs are the only gate.
-# ──────────────────────────────────────────────────────────────
-
-  changes:
-    name: "Detect changed paths"
-    runs-on: ubuntu-latest
-    outputs:
-      infra:     ${{ steps.filter.outputs.infra     == 'true' || github.event_name == 'workflow_dispatch' }}
-      ingestion: ${{ steps.filter.outputs.ingestion == 'true' || github.event_name == 'workflow_dispatch' }}
-      display:   ${{ steps.filter.outputs.display   == 'true' || github.event_name == 'workflow_dispatch' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            infra:
-              - 'infra/**'
-            ingestion:
-              - 'src/functions/cricket_ingestion/**'
-            display:
-              - 'src/functions/cricket_display/**'
-
-# ──────────────────────────────────────────────────────────────
 # PHASE 1 — PLAN (sequential, automatic)
 # Runs all terraform plans and uploads each as an artifact.
 # No changes are made to Azure at this stage.
@@ -59,9 +33,8 @@ jobs:
 
   plan_1_bootstrap:
     name: "Plan 1 · Bootstrap"
-    needs: changes
     runs-on: ubuntu-latest
-    if: ${{ needs.changes.outputs.infra == 'true' && github.event.inputs.skip_infra != 'true' }}
+    if: ${{ github.event.inputs.skip_infra != 'true' }}
     defaults:
       run:
         working-directory: infra/1.bootstrap
@@ -82,9 +55,9 @@ jobs:
 
   plan_2_datalake:
     name: "Plan 2 · Data Lake"
-    needs: [changes, plan_1_bootstrap]
+    needs: plan_1_bootstrap
     runs-on: ubuntu-latest
-    if: ${{ needs.changes.outputs.infra == 'true' && github.event.inputs.skip_infra != 'true' }}
+    if: ${{ github.event.inputs.skip_infra != 'true' }}
     defaults:
       run:
         working-directory: infra/2.datalake
@@ -105,9 +78,9 @@ jobs:
 
   plan_3_function_app:
     name: "Plan 3 · Function App"
-    needs: [changes, plan_2_datalake]
+    needs: plan_2_datalake
     runs-on: ubuntu-latest
-    if: ${{ needs.changes.outputs.infra == 'true' && github.event.inputs.skip_infra != 'true' }}
+    if: ${{ github.event.inputs.skip_infra != 'true' }}
     defaults:
       run:
         working-directory: infra/3.function-app
@@ -128,9 +101,9 @@ jobs:
 
   plan_5_static_web:
     name: "Plan 5 · Static Web App"
-    needs: [changes, plan_3_function_app]
+    needs: plan_3_function_app
     runs-on: ubuntu-latest
-    if: ${{ needs.changes.outputs.infra == 'true' && github.event.inputs.skip_infra != 'true' }}
+    if: ${{ github.event.inputs.skip_infra != 'true' }}
     defaults:
       run:
         working-directory: infra/5.static-web-app
@@ -151,9 +124,9 @@ jobs:
 
   plan_6_adf:
     name: "Plan 6 · ADF"
-    needs: [changes, plan_5_static_web]
+    needs: plan_5_static_web
     runs-on: ubuntu-latest
-    if: ${{ needs.changes.outputs.infra == 'true' && github.event.inputs.skip_infra != 'true' }}
+    if: ${{ github.event.inputs.skip_infra != 'true' }}
     defaults:
       run:
         working-directory: infra/6.adf
@@ -174,9 +147,9 @@ jobs:
 
   plan_7_databricks:
     name: "Plan 7 · Databricks"
-    needs: [changes, plan_6_adf]
+    needs: plan_6_adf
     runs-on: ubuntu-latest
-    if: ${{ needs.changes.outputs.infra == 'true' && github.event.inputs.skip_infra != 'true' }}
+    if: ${{ github.event.inputs.skip_infra != 'true' }}
     defaults:
       run:
         working-directory: infra/7.databricks
@@ -197,9 +170,9 @@ jobs:
 
   plan_8_adf_config:
     name: "Plan 8 · ADF Config"
-    needs: [changes, plan_7_databricks]
+    needs: plan_7_databricks
     runs-on: ubuntu-latest
-    if: ${{ needs.changes.outputs.infra == 'true' && github.event.inputs.skip_infra != 'true' }}
+    if: ${{ github.event.inputs.skip_infra != 'true' }}
     defaults:
       run:
         working-directory: infra/8.adf-config
@@ -220,9 +193,9 @@ jobs:
 
   plan_9_ml:
     name: "Plan 9 · ML"
-    needs: [changes, plan_8_adf_config]
+    needs: plan_8_adf_config
     runs-on: ubuntu-latest
-    if: ${{ needs.changes.outputs.infra == 'true' && github.event.inputs.skip_infra != 'true' }}
+    if: ${{ github.event.inputs.skip_infra != 'true' }}
     defaults:
       run:
         working-directory: infra/9.ml
@@ -442,20 +415,14 @@ jobs:
 
 # ──────────────────────────────────────────────────────────────
 # FUNCTION APPS — deploy after function-app infra apply is done.
-# Each only runs when its own source path changed (or manual trigger).
 # Both run in parallel; each is independent of the other.
 # ──────────────────────────────────────────────────────────────
 
   deploy_ingestion:
     name: "Deploy · func-ramanuj-ingestion"
-    needs: [changes, apply_3_function_app]
+    needs: apply_3_function_app
     runs-on: ubuntu-latest
-    if: >-
-      ${{
-        always() && !failure() &&
-        needs.changes.outputs.ingestion == 'true' &&
-        github.event.inputs.skip_functions != 'true'
-      }}
+    if: ${{ always() && !failure() && !cancelled() && github.event.inputs.skip_functions != 'true' }}
     defaults:
       run:
         working-directory: src/functions/cricket_ingestion
@@ -488,14 +455,9 @@ jobs:
 
   deploy_display:
     name: "Deploy · func-ramanuj-display"
-    needs: [changes, apply_3_function_app]
+    needs: apply_3_function_app
     runs-on: ubuntu-latest
-    if: >-
-      ${{
-        always() && !failure() &&
-        needs.changes.outputs.display == 'true' &&
-        github.event.inputs.skip_functions != 'true'
-      }}
+    if: ${{ always() && !failure() && !cancelled() && github.event.inputs.skip_functions != 'true' }}
     defaults:
       run:
         working-directory: src/functions/cricket_display
