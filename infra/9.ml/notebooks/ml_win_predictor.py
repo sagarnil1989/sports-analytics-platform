@@ -247,6 +247,21 @@ def parse_inn1_display(tracker, inn1_bat_team):
         parts = [parts[1].strip(), parts[0].strip()]
     return _fmt_score_part(parts[0])
 
+def parse_inn2_display(tracker, inn1_bat_team):
+    """Return display string for inn2 final score with overs, e.g. '87/10 (18.3 ov)'."""
+    raw = (tracker.get("score_summary_events")
+           or tracker.get("score_summary_bet365")
+           or tracker.get("score_summary") or "")
+    raw = raw.replace("-", ",").strip()
+    if not raw or "," not in raw:
+        return None
+    parts = raw.split(",", 1)
+    home = str(tracker.get("home_team_name") or "").strip()
+    away = str(tracker.get("away_team_name") or "").strip()
+    if inn1_bat_team and away and inn1_bat_team == away:
+        parts = [parts[1].strip(), parts[0].strip()]
+    return _fmt_score_part(parts[1])
+
 def batting_dominance(event_id, silver_client):
     """max_SR minus avg_SR across inn1 batsmen (min 5 balls faced)."""
     import re as _re
@@ -351,6 +366,7 @@ for t in t20_trackers:
     inn1_total_score   = auth_inn1 if auth_inn1 is not None else (inn1_final.get("score") or 0)
     inn1_total_wickets = inn1_final.get("wickets") or 0
     inn1_score_display = parse_inn1_display(t, inn1_bat_team) or str(inn1_total_score)
+    inn2_score_display = parse_inn2_display(t, inn1_bat_team) or (str(auth_inn2) if auth_inn2 is not None else None)
 
     # Phase state snapshots for composite features
     pp_state  = state_after_n_overs(inn1_rows, 6)   # end of powerplay
@@ -399,6 +415,9 @@ for t in t20_trackers:
         "inn1_total_score":   inn1_total_score,
         "inn1_total_wickets": inn1_total_wickets,
         "inn1_score_display": inn1_score_display,
+        # innings 2 final (authoritative from score_summary)
+        "inn2_total_score":   auth_inn2,
+        "inn2_score_display": inn2_score_display,
         # phase snapshots (used by composite features)
         "inn1_pp_score":    inn1_pp_score,
         "inn1_pp_wickets":  inn1_pp_wickets,
@@ -811,6 +830,7 @@ def xgb_train_pruned(model_name, feature_cols, train_df, test_df):
         "inn2_ov6_score", "inn2_ov6_wickets",
         "inn2_ov10_score", "inn2_ov10_wickets",
         "inn2_ov16_score", "inn2_ov16_wickets",
+        "inn2_total_score", "inn2_score_display",
     ] if c in test_df.columns]
 
     # Test predictions
@@ -822,7 +842,8 @@ def xgb_train_pruned(model_name, feature_cols, train_df, test_df):
         for p, pred in zip(y_proba, y_pred)
     ]
     preds["correct"] = (y_pred == y_test).map({True: True, False: False})
-    preds_records = preds.rename(columns={"inn1_total_score": "inn1_score"}).to_dict("records")
+    preds_records = preds.rename(columns={"inn1_total_score": "inn1_score",
+                                          "inn2_total_score": "inn2_score"}).to_dict("records")
 
     # Train predictions
     score_ctx_train = [c for c in score_ctx if c in train_df.columns]
@@ -834,7 +855,8 @@ def xgb_train_pruned(model_name, feature_cols, train_df, test_df):
         for p, pred in zip(y_train_proba, y_train_pred)
     ]
     train_preds["correct"] = (y_train_pred == y_train.to_numpy())
-    train_preds_records = train_preds.rename(columns={"inn1_total_score": "inn1_score"}).to_dict("records")
+    train_preds_records = train_preds.rename(columns={"inn1_total_score": "inn1_score",
+                                                       "inn2_total_score": "inn2_score"}).to_dict("records")
 
     return m2, acc, auc, train_acc, train_auc, fi_df, kept, preds_records, train_preds_records
 

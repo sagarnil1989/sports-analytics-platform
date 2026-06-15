@@ -1,11 +1,9 @@
 """Inn1 score predictor page — MAE/RMSE per model + per-match test predictions."""
-from .common import json, logging, os, escape, func, get_named_container_client
+from .common import json, logging, escape, func, get_named_container_client
 
 
 def view_ml_score_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
-    conn_str = os.environ["DATA_STORAGE_CONNECTION_STRING"]
-    from azure.storage.blob import BlobServiceClient
-    gold = BlobServiceClient.from_connection_string(conn_str).get_container_client("gold")
+    gold = get_named_container_client("gold")
 
     try:
         raw     = gold.get_blob_client("cricket/ml_features/t20/score_predictor_summary.json").download_blob().readall()

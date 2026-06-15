@@ -1,19 +1,13 @@
 from .common import (
-    json, logging, os, escape, Any, Dict, List, Optional,
-    func, ResourceNotFoundError,
-    call_betsapi, download_json, download_required_json, format_unix_ts,
-    get_named_container_client, safe_float, upload_json, utc_now,
-    extract_bet365_current_markets,
-    collect_known_leagues, load_allowed_league_ids, save_league_preferences,
-    extract_innings_snapshot,
+    json, logging, escape, Any, Dict, List, Optional,
+    func,
+    get_named_container_client,
     build_simple_table_page,
 )
 
 
 def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
-    conn_str = os.environ["DATA_STORAGE_CONNECTION_STRING"]
-    from azure.storage.blob import BlobServiceClient
-    gold = BlobServiceClient.from_connection_string(conn_str).get_container_client("gold")
+    gold = get_named_container_client("gold")
 
     try:
         raw = gold.get_blob_client("cricket/ml_features/t20/win_predictor_summary.json").download_blob().readall()
@@ -160,15 +154,20 @@ def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
 
         # ── score context columns per model ───────────────────────
         _score_ctx = {
-            "innings1-only":   [("Inn1 final", "inn1_score", None)],
+            "innings1-only":   [("Inn1 final", "inn1_score", None),
+                                ("Inn2 final", "inn2_score", None)],
             "innings2-2over":  [("Inn1 final", "inn1_score", None),
-                                ("Inn2 @ ov2", "inn2_ov2_score", "inn2_ov2_wickets")],
+                                ("Inn2 @ ov2", "inn2_ov2_score", "inn2_ov2_wickets"),
+                                ("Inn2 final", "inn2_score", None)],
             "innings2-6over":  [("Inn1 final", "inn1_score", None),
-                                ("Inn2 @ ov6", "inn2_ov6_score", "inn2_ov6_wickets")],
+                                ("Inn2 @ ov6", "inn2_ov6_score", "inn2_ov6_wickets"),
+                                ("Inn2 final", "inn2_score", None)],
             "innings2-10over": [("Inn1 final", "inn1_score", None),
-                                ("Inn2 @ ov10", "inn2_ov10_score", "inn2_ov10_wickets")],
+                                ("Inn2 @ ov10", "inn2_ov10_score", "inn2_ov10_wickets"),
+                                ("Inn2 final", "inn2_score", None)],
             "innings2-16over": [("Inn1 final", "inn1_score", None),
-                                ("Inn2 @ ov16", "inn2_ov16_score", "inn2_ov16_wickets")],
+                                ("Inn2 @ ov16", "inn2_ov16_score", "inn2_ov16_wickets"),
+                                ("Inn2 final", "inn2_score", None)],
         }
 
         def _pred_table(preds, ctx, split_label, split_color):
