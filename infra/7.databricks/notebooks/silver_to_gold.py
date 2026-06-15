@@ -6,7 +6,7 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("event_id", "NEED_TO_FILL")
+dbutils.widgets.text("event_id", "")
 
 # COMMAND ----------
 
