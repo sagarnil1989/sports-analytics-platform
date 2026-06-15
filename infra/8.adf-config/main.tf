@@ -214,6 +214,58 @@ resource "azurerm_data_factory_trigger_schedule" "build_ended_match" {
 # Both activities receive the same event_id parameter.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# ADF — pipeline: build prematch pages (daily scheduled)
+#
+# Runs the gold_build_prematch_pages Databricks notebook which reads
+# bronze prematch snapshots and writes per-match gold pages consumed by
+# the display function (/api/prematch/{event_id}/view).
+#
+# Schedule: daily at 07:00 UTC — after bronze_capture_cricket_prematch_odds
+# has collected the morning snapshot (runs ~06:10 UTC).
+# ---------------------------------------------------------------------------
+
+resource "azurerm_data_factory_pipeline" "build_prematch_pages" {
+  name            = "pl_build_prematch_pages"
+  data_factory_id = data.azurerm_data_factory.main.id
+  description     = "Daily: rebuild gold prematch pages from latest bronze snapshots."
+
+  activities_json = jsonencode([
+    {
+      name = "gold_build_prematch_pages"
+      type = "DatabricksNotebook"
+      policy = {
+        timeout = "0.02:00:00"
+      }
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/gold_build_prematch_pages"
+      }
+    }
+  ])
+
+  depends_on = [azurerm_data_factory_linked_service_azure_databricks.main]
+}
+
+resource "azurerm_data_factory_trigger_schedule" "build_prematch_pages" {
+  name            = "trigger_build_prematch_pages"
+  data_factory_id = data.azurerm_data_factory.main.id
+  pipeline_name   = azurerm_data_factory_pipeline.build_prematch_pages.name
+
+  interval  = 1
+  frequency = "Day"
+
+  schedule {
+    hours   = [7]   # 07:00 UTC — after morning prematch capture (~06:10 UTC)
+    minutes = [0]
+  }
+
+  activated = true
+}
+
 resource "azurerm_data_factory_pipeline" "backfill" {
   name            = "pl_backfill"
   data_factory_id = data.azurerm_data_factory.main.id

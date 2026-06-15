@@ -119,46 +119,6 @@ resource "azurerm_data_factory_pipeline" "ml_retrain" {
         notebookPath = "/cricket-pipeline/ml/inn1_score_predictor"
       }
     },
-    {
-      name = "RunHypothesisInn2Over6"
-      type = "DatabricksNotebook"
-      policy = {
-        timeout = "0.01:00:00"
-      }
-      dependsOn = [
-        {
-          activity             = "RunMLFeatureExtraction"
-          dependencyConditions = ["Succeeded"]
-        }
-      ]
-      linkedServiceName = {
-        referenceName = "ls_databricks"
-        type          = "LinkedServiceReference"
-      }
-      typeProperties = {
-        notebookPath = "/cricket-pipeline/hypothesis/inn2_over6"
-      }
-    },
-    {
-      name = "RunHypothesisTimeoutWicket"
-      type = "DatabricksNotebook"
-      policy = {
-        timeout = "0.01:00:00"
-      }
-      dependsOn = [
-        {
-          activity             = "RunMLFeatureExtraction"
-          dependencyConditions = ["Succeeded"]
-        }
-      ]
-      linkedServiceName = {
-        referenceName = "ls_databricks"
-        type          = "LinkedServiceReference"
-      }
-      typeProperties = {
-        notebookPath = "/cricket-pipeline/hypothesis/timeout_wicket"
-      }
-    }
   ])
 }
 
@@ -173,6 +133,70 @@ resource "azurerm_data_factory_trigger_schedule" "ml_retrain" {
   schedule {
     days_of_week = ["Sunday"]
     hours        = [3]    # 03:00 UTC — quiet period, no live IPL matches
+    minutes      = [0]
+  }
+
+  activated = true
+}
+
+# ---------------------------------------------------------------------------
+# ADF — pipeline: hypothesis (weekly, same cadence as ml_retrain)
+#
+# Runs both hypothesis notebooks in parallel after each other.
+# Deliberately separate from pl_ml_retrain so ML failures don't block
+# hypothesis refresh and vice versa.
+#
+# Schedule: weekly, Sunday 03:00 UTC
+# ---------------------------------------------------------------------------
+
+resource "azurerm_data_factory_pipeline" "hypothesis" {
+  name            = "pl_hypothesis"
+  data_factory_id = data.azurerm_data_factory.main.id
+  description     = "Weekly hypothesis refresh: inn2_over6 and timeout_wicket notebooks run in parallel."
+
+  activities_json = jsonencode([
+    {
+      name = "RunHypothesisInn2Over6"
+      type = "DatabricksNotebook"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      linkedServiceName = {
+        referenceName = "ls_databricks"
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/hypothesis/inn2_over6"
+      }
+    },
+    {
+      name = "RunHypothesisTimeoutWicket"
+      type = "DatabricksNotebook"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      linkedServiceName = {
+        referenceName = "ls_databricks"
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/hypothesis/timeout_wicket"
+      }
+    }
+  ])
+}
+
+resource "azurerm_data_factory_trigger_schedule" "hypothesis" {
+  name            = "trigger_hypothesis"
+  data_factory_id = data.azurerm_data_factory.main.id
+  pipeline_name   = azurerm_data_factory_pipeline.hypothesis.name
+
+  interval  = 1
+  frequency = "Week"
+
+  schedule {
+    days_of_week = ["Sunday"]
+    hours        = [3]
     minutes      = [0]
   }
 
