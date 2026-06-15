@@ -55,63 +55,18 @@ def block_event_ids(event_ids: set) -> None:
     )
 
 
+_KNOWN_LEAGUES_PATH = "cricket/config/known_leagues.json"
+
+
 def collect_known_leagues() -> List[Dict[str, Any]]:
-    """Gather all leagues seen across live, prematch, ended, league, innings-tracker, and upcoming indexes."""
+    """Return leagues from gold/cricket/config/known_leagues.json.
+
+    This file is maintained by the ingestion function (capture_inplay and
+    capture_prematch) which writes to gold after each discovery run.
+    Each entry carries league_id, league_name, sources (live/upcoming),
+    first_seen_utc, and last_seen_utc.
+    """
     gold = get_named_container_client("gold")
-    leagues: Dict[str, Dict[str, Any]] = {}
-
-    def _date10(val: Any) -> Optional[str]:
-        """Extract YYYY-MM-DD from an ISO datetime string, or return None."""
-        s = str(val or "").strip()
-        return s[:10] if len(s) >= 10 and s[4] == "-" else None
-
-    def merge(lid: Optional[str], lname: Optional[str], source: str, event_date: Optional[str] = None) -> None:
-        lid = str(lid or "").strip()
-        if not lid:
-            return
-        if lid not in leagues:
-            leagues[lid] = {"league_id": lid, "league_name": lname or lid, "sources": [], "first_match_date": None, "last_match_date": None}
-        if source not in leagues[lid]["sources"]:
-            leagues[lid]["sources"].append(source)
-        if lname and lname != lid and not leagues[lid].get("league_name"):
-            leagues[lid]["league_name"] = lname
-        if event_date:
-            cur_first = leagues[lid]["first_match_date"]
-            cur_last  = leagues[lid]["last_match_date"]
-            if cur_first is None or event_date < cur_first:
-                leagues[lid]["first_match_date"] = event_date
-            if cur_last is None or event_date > cur_last:
-                leagues[lid]["last_match_date"] = event_date
-
-    for idx_path, source in [
-        ("cricket/matches/latest/index.json", "live"),
-        ("cricket/prematch/latest/index.json", "prematch"),
-        ("cricket/ended/latest/index.json", "ended"),
-    ]:
-        try:
-            idx = download_json(gold, idx_path) or {}
-            for m in (idx.get("matches") or []):
-                merge(m.get("league_id"), m.get("league_name"), source, _date10(m.get("event_time_utc")))
-        except Exception:
-            pass
-
-    for idx_path, source in [
-        ("cricket/leagues/index.json", "live_leagues"),
-        ("cricket/prematch/leagues/index.json", "prematch_leagues"),
-    ]:
-        try:
-            idx = download_json(gold, idx_path) or {}
-            for lg in (idx.get("leagues") or []):
-                merge(lg.get("league_id"), lg.get("league_name"), source)
-        except Exception:
-            pass
-
-    try:
-        tracker_idx = download_json(gold, "index/innings_tracker.json") or {}
-        for m in (tracker_idx.get("matches") or []):
-            merge(m.get("league_id"), m.get("league_name"), "innings_tracker",
-                  _date10(m.get("match_date_utc") or m.get("event_time_utc")))
-    except Exception:
-        pass
-
-    return sorted(leagues.values(), key=lambda x: x.get("league_name") or "")
+    data = download_json(gold, _KNOWN_LEAGUES_PATH) or {}
+    leagues = [lg for lg in (data.get("leagues") or []) if lg.get("league_id")]
+    return sorted(leagues, key=lambda x: x.get("league_name") or "")

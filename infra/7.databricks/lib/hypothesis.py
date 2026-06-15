@@ -21,9 +21,20 @@ from util import (
 )
 
 
-def _is_t20_match(match_name: str) -> bool:
-    n = match_name.lower()
-    return "t20" in n or "twenty20" in n or "t-20" in n
+def _is_t20_tracker(tracker: Dict[str, Any]) -> bool:
+    """Detect T20 by max over in tracker rows (15–20), not match name.
+
+    IPL, BBL etc. don't include 't20' in their match names so name-matching
+    silently excludes them. Over-count is the ground truth.
+    """
+    rows = tracker.get("rows") or []
+    max_over = 0
+    for r in rows:
+        try:
+            max_over = max(max_over, int(str(r.get("over") or "0").split(".")[0]))
+        except Exception:
+            pass
+    return 15 <= max_over <= 20
 
 
 def _is_womens_match(match_name: str) -> bool:
@@ -60,7 +71,7 @@ def extract_inn2_over6_favorite(event_id: Optional[str] = None) -> Dict[str, Any
         event_ids_to_process = []
         for eid in all_ids:
             tracker = download_json(gold, f"event_id={eid}/innings_tracker.json") or {}
-            if _is_t20_match(tracker.get("match_name") or ""):
+            if _is_t20_tracker(tracker):
                 event_ids_to_process.append(eid)
 
     logging.info(json.dumps({"event": "hypothesis_inn2_over6_start", "event_count": len(event_ids_to_process)}))
@@ -272,7 +283,7 @@ def extract_timeout_wicket(event_id: Optional[str] = None) -> Dict[str, Any]:
         event_ids_to_process = []
         for eid in all_ids:
             tracker_check = download_json(gold, f"event_id={eid}/innings_tracker.json") or {}
-            if _is_t20_match(tracker_check.get("match_name") or ""):
+            if _is_t20_tracker(tracker_check):
                 event_ids_to_process.append(eid)
 
     all_timeouts: List[Dict[str, Any]] = []

@@ -54,8 +54,8 @@ def view_admin_leagues(req: func.HttpRequest) -> func.HttpResponse:
             lname = escape(str(lg.get("league_name") or lid))
             sources_list = lg.get("sources", [])
             sources = ", ".join(sources_list)
-            first_date = escape(str(lg.get("first_match_date") or "-"))
-            last_date  = escape(str(lg.get("last_match_date") or "-"))
+            first_date = escape((str(lg.get("first_seen_utc") or lg.get("first_match_date") or "-"))[:10])
+            last_date  = escape((str(lg.get("last_seen_utc")  or lg.get("last_match_date")  or "-"))[:10])
             is_allowed = str(lg.get("league_id") or "") in allowed
             is_new = sources_list == ["upcoming"]  # seen only in upcoming, never captured
             checked = "checked" if is_allowed else ""

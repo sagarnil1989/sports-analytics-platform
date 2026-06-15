@@ -46,7 +46,7 @@ def build_simple_table_page(title: str, headers: List[str], rows_html: str, back
         {back_html}
         <h1>{escape(title)}</h1>
         <div class="hint">This page reads a small pre-built gold index file, so it should load quickly.</div>
-        <table>
+        <table id="matchTable">
             <thead><tr>{''.join(f'<th>{escape(h)}</th>' for h in headers)}</tr></thead>
             <tbody>{rows_html}</tbody>
         </table>

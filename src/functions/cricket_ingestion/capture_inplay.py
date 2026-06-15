@@ -9,6 +9,7 @@ from util import (
     download_json,
     extract_results,
     get_bronze_container_client,
+    get_named_container_client,
     get_env,
     get_int_env,
     ts_compact,
@@ -16,6 +17,36 @@ from util import (
     utc_now,
 )
 from league_config import load_allowed_league_ids
+
+_KNOWN_LEAGUES_PATH = "cricket/config/known_leagues.json"
+
+
+def _upsert_known_leagues_gold(matches: List[Dict[str, Any]], source: str) -> None:
+    """Merge leagues seen in matches into gold/cricket/config/known_leagues.json."""
+    gold = get_named_container_client("gold")
+    existing = download_json(gold, _KNOWN_LEAGUES_PATH) or {}
+    leagues: Dict[str, Dict[str, Any]] = {
+        str(lg["league_id"]): lg
+        for lg in (existing.get("leagues") or [])
+        if lg.get("league_id")
+    }
+    now_str = utc_now().isoformat()
+    for m in matches:
+        lid = str(m.get("league_id") or "").strip()
+        lname = str(m.get("league_name") or "").strip()
+        if not lid:
+            continue
+        if lid not in leagues:
+            leagues[lid] = {"league_id": lid, "league_name": lname or lid, "sources": [], "first_seen_utc": now_str, "last_seen_utc": now_str}
+        if source not in leagues[lid]["sources"]:
+            leagues[lid]["sources"].append(source)
+        if lname and not leagues[lid].get("league_name"):
+            leagues[lid]["league_name"] = lname
+        leagues[lid]["last_seen_utc"] = now_str
+    upload_json(gold, _KNOWN_LEAGUES_PATH, {
+        "updated_at_utc": now_str,
+        "leagues": sorted(leagues.values(), key=lambda x: x.get("league_name") or ""),
+    }, overwrite=True)
 
 SNAPSHOT_HEARTBEAT_SECONDS = 300  # force-write every 5 min even if payload unchanged
 
@@ -199,6 +230,8 @@ def bronze_discover_cricket_inplay() -> None:
         "source_raw_path": f"bronze/{raw_path}",
     }
     upload_json(container, "betsapi/control/active_inplay_fi/latest.json", control_payload, overwrite=True)
+
+    _upsert_known_leagues_gold(active_matches, source="live")
 
     logging.info(json.dumps({
         "event": "bronze_discover_cricket_inplay_completed",
