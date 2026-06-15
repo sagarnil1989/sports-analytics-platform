@@ -157,30 +157,48 @@ resource "azurerm_data_factory_pipeline" "hypothesis" {
   activities_json = jsonencode([
     {
       name = "RunHypothesisInn2Over6"
-      type = "DatabricksNotebook"
+      type = "Custom"
       policy = {
         timeout = "0.01:00:00"
       }
       linkedServiceName = {
-        referenceName = "ls_databricks"
+        referenceName = "ls_azure_batch"
         type          = "LinkedServiceReference"
       }
       typeProperties = {
-        notebookPath = "/cricket-pipeline/hypothesis/inn2_over6"
+        command = "python3 hypothesis_inn2_over6.py"
+        resourceLinkedService = {
+          referenceName = "ls_batch_scripts_storage"
+          type          = "LinkedServiceReference"
+        }
+        folderPath         = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI = "https://${local.config.key_vault_name}.vault.azure.net/"
+        }
       }
     },
     {
       name = "RunHypothesisTimeoutWicket"
-      type = "DatabricksNotebook"
+      type = "Custom"
       policy = {
         timeout = "0.01:00:00"
       }
       linkedServiceName = {
-        referenceName = "ls_databricks"
+        referenceName = "ls_azure_batch"
         type          = "LinkedServiceReference"
       }
       typeProperties = {
-        notebookPath = "/cricket-pipeline/hypothesis/timeout_wicket"
+        command = "python3 hypothesis_timeout_wicket.py"
+        resourceLinkedService = {
+          referenceName = "ls_batch_scripts_storage"
+          type          = "LinkedServiceReference"
+        }
+        folderPath         = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI = "https://${local.config.key_vault_name}.vault.azure.net/"
+        }
       }
     }
   ])

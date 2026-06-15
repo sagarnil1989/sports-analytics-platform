@@ -3,6 +3,7 @@ import azure.functions as func
 from capture_inplay import bronze_discover_cricket_inplay, bronze_capture_cricket_inplay_snapshot
 from capture_prematch import bronze_discover_cricket_upcoming, bronze_capture_cricket_prematch_odds
 from capture_ended import bronze_capture_ended_event_view
+from prematch_page_builder import gold_build_prematch_pages
 
 app = func.FunctionApp()
 
@@ -21,17 +22,22 @@ def capture_cricket_inplay_snapshot(timer: func.TimerRequest) -> None:
     bronze_capture_cricket_inplay_snapshot()
 
 
-@app.timer_trigger(schedule="0 0 6 * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
+@app.timer_trigger(schedule="0 */30 * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
 def discover_cricket_upcoming(timer: func.TimerRequest) -> None:
-    """Runs at 06:00 UTC daily. Writes upcoming match control file to bronze."""
+    """Runs every 30 min (:00 and :30). Writes upcoming match control file to bronze."""
     bronze_discover_cricket_upcoming()
 
 
-@app.timer_trigger(schedule="0 10 6 * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
+@app.timer_trigger(schedule="0 10,40 * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
 def capture_cricket_prematch_odds(timer: func.TimerRequest) -> None:
-    """Runs at 06:10 UTC daily — after upcoming discover. Writes prematch odds snapshots to bronze.
-    ADF pipeline pl_build_prematch_pages then reads bronze and writes gold/cricket/prematch/."""
+    """Runs every 30 min (:10 and :40) — 10 min after each discover. Writes prematch odds snapshots to bronze."""
     bronze_capture_cricket_prematch_odds()
+
+
+@app.timer_trigger(schedule="0 20,50 * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
+def build_prematch_pages(timer: func.TimerRequest) -> None:
+    """Runs every 30 min (:20 and :50) — 10 min after capture. Builds gold/cricket/prematch/ index."""
+    gold_build_prematch_pages()
 
 
 @app.timer_trigger(schedule="0 30 2 * * *", arg_name="timer", run_on_startup=False, use_monitor=False)

@@ -6,27 +6,18 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~> 4.0"
     }
-    azapi = {
-      source  = "azure/azapi"
-      version = "~> 2.0"
-    }
   }
 
   backend "azurerm" {
     resource_group_name  = "rg-tf-state"
     storage_account_name = "tfstateramanuj"
     container_name       = "tfstate"
-    key                  = "8.adf-config.tfstate"
+    key                  = "4.azure-batch.tfstate"
   }
 }
 
 provider "azurerm" {
   features {}
-  tenant_id       = local.config.tenant_id
-  subscription_id = local.config.subscription_id
-}
-
-provider "azapi" {
   tenant_id       = local.config.tenant_id
   subscription_id = local.config.subscription_id
 }

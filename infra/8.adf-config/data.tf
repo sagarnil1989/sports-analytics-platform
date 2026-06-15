@@ -16,3 +16,13 @@ data "azurerm_databricks_workspace" "main" {
   name                = "dbw-${local.config.project}"
   resource_group_name = data.azurerm_resource_group.main.name
 }
+
+data "azurerm_storage_account" "data_lake" {
+  name                = local.config.data_lake_storage_account_name
+  resource_group_name = data.azurerm_resource_group.main.name
+}
+
+data "azurerm_batch_account" "main" {
+  name                = "batch${local.config.project}"
+  resource_group_name = data.azurerm_resource_group.main.name
+}

@@ -3,6 +3,61 @@
 # Allows ADF to read the Databricks PAT from Key Vault at runtime.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# ADF — Blob Storage linked service (script distribution for Batch)
+#
+# ADF Custom activity downloads all blobs from folderPath in this LS
+# into the Batch task working directory before running the command.
+# ---------------------------------------------------------------------------
+
+resource "azurerm_data_factory_linked_service_azure_blob_storage" "scripts" {
+  name              = "ls_batch_scripts_storage"
+  data_factory_id   = data.azurerm_data_factory.main.id
+  connection_string = data.azurerm_storage_account.data_lake.primary_connection_string
+}
+
+# ---------------------------------------------------------------------------
+# ADF — Azure Batch linked service
+#
+# azurerm provider has no dedicated resource for this; use azapi.
+# Authentication: Batch account key stored directly (key is in TF state but
+# this is an internal pipeline-only account with no external exposure).
+# ---------------------------------------------------------------------------
+
+resource "azapi_resource" "adf_ls_azure_batch" {
+  type      = "Microsoft.DataFactory/factories/linkedservices@2018-06-01"
+  name      = "ls_azure_batch"
+  parent_id = data.azurerm_data_factory.main.id
+
+  body = jsonencode({
+    properties = {
+      type = "AzureBatch"
+      typeProperties = {
+        accountName = data.azurerm_batch_account.main.name
+        batchUri    = "https://${data.azurerm_batch_account.main.name}.${data.azurerm_resource_group.main.location}.batch.azure.com"
+        poolName    = local.batch_pool
+        accessKey = {
+          type  = "SecureString"
+          value = data.azurerm_batch_account.main.primary_access_key
+        }
+        linkedServiceName = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+      }
+    }
+  })
+
+  schema_validation_enabled = false
+
+  depends_on = [azurerm_data_factory_linked_service_azure_blob_storage.scripts]
+}
+
+# ---------------------------------------------------------------------------
+# ADF — Key Vault linked service
+# Allows ADF to read the Databricks PAT from Key Vault at runtime.
+# ---------------------------------------------------------------------------
+
 resource "azurerm_data_factory_linked_service_key_vault" "main" {
   name            = "ls_keyvault"
   data_factory_id = data.azurerm_data_factory.main.id
@@ -90,21 +145,30 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
   activities_json = jsonencode([
     {
       name = "bronze_to_silver"
-      type = "DatabricksNotebook"
+      type = "Custom"
       policy = {
         timeout = "0.04:00:00"
       }
       linkedServiceName = {
-        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        referenceName = "ls_azure_batch"
         type          = "LinkedServiceReference"
       }
       typeProperties = {
-        notebookPath = "/cricket-pipeline/bronze_to_silver"
+        command = "python3 bronze_to_silver.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath         = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI = local.kv_uri
+        }
       }
     },
     {
       name = "silver_to_gold"
-      type = "DatabricksNotebook"
+      type = "Custom"
       policy = {
         timeout = "0.04:00:00"
       }
@@ -115,16 +179,25 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
         }
       ]
       linkedServiceName = {
-        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        referenceName = "ls_azure_batch"
         type          = "LinkedServiceReference"
       }
       typeProperties = {
-        notebookPath = "/cricket-pipeline/silver_to_gold"
+        command = "python3 silver_to_gold.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath         = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI = local.kv_uri
+        }
       }
     },
     {
       name = "discover_cricket_ended"
-      type = "DatabricksNotebook"
+      type = "Custom"
       policy = {
         timeout = "0.01:00:00"
       }
@@ -135,16 +208,25 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
         }
       ]
       linkedServiceName = {
-        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        referenceName = "ls_azure_batch"
         type          = "LinkedServiceReference"
       }
       typeProperties = {
-        notebookPath = "/cricket-pipeline/discover_cricket_ended"
+        command = "python3 discover_cricket_ended.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath         = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI = local.kv_uri
+        }
       }
     },
     {
       name = "hypothesis_inn2_over6"
-      type = "DatabricksNotebook"
+      type = "Custom"
       policy = {
         timeout = "0.01:00:00"
       }
@@ -155,16 +237,25 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
         }
       ]
       linkedServiceName = {
-        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        referenceName = "ls_azure_batch"
         type          = "LinkedServiceReference"
       }
       typeProperties = {
-        notebookPath = "/cricket-pipeline/hypothesis/inn2_over6"
+        command = "python3 hypothesis_inn2_over6.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath         = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI = local.kv_uri
+        }
       }
     },
     {
       name = "hypothesis_timeout_wicket"
-      type = "DatabricksNotebook"
+      type = "Custom"
       policy = {
         timeout = "0.01:00:00"
       }
@@ -175,16 +266,25 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
         }
       ]
       linkedServiceName = {
-        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        referenceName = "ls_azure_batch"
         type          = "LinkedServiceReference"
       }
       typeProperties = {
-        notebookPath = "/cricket-pipeline/hypothesis/timeout_wicket"
+        command = "python3 hypothesis_timeout_wicket.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath         = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI = local.kv_uri
+        }
       }
     }
   ])
 
-  depends_on = [azurerm_data_factory_linked_service_azure_databricks.main]
+  depends_on = [azapi_resource.adf_ls_azure_batch]
 }
 
 resource "azurerm_data_factory_trigger_schedule" "build_ended_match" {
@@ -214,58 +314,6 @@ resource "azurerm_data_factory_trigger_schedule" "build_ended_match" {
 # Both activities receive the same event_id parameter.
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# ADF — pipeline: build prematch pages (daily scheduled)
-#
-# Runs the gold_build_prematch_pages Databricks notebook which reads
-# bronze prematch snapshots and writes per-match gold pages consumed by
-# the display function (/api/prematch/{event_id}/view).
-#
-# Schedule: daily at 07:00 UTC — after bronze_capture_cricket_prematch_odds
-# has collected the morning snapshot (runs ~06:10 UTC).
-# ---------------------------------------------------------------------------
-
-resource "azurerm_data_factory_pipeline" "build_prematch_pages" {
-  name            = "pl_build_prematch_pages"
-  data_factory_id = data.azurerm_data_factory.main.id
-  description     = "Daily: rebuild gold prematch pages from latest bronze snapshots."
-
-  activities_json = jsonencode([
-    {
-      name = "gold_build_prematch_pages"
-      type = "DatabricksNotebook"
-      policy = {
-        timeout = "0.02:00:00"
-      }
-      linkedServiceName = {
-        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
-        type          = "LinkedServiceReference"
-      }
-      typeProperties = {
-        notebookPath = "/cricket-pipeline/gold_build_prematch_pages"
-      }
-    }
-  ])
-
-  depends_on = [azurerm_data_factory_linked_service_azure_databricks.main]
-}
-
-resource "azurerm_data_factory_trigger_schedule" "build_prematch_pages" {
-  name            = "trigger_build_prematch_pages"
-  data_factory_id = data.azurerm_data_factory.main.id
-  pipeline_name   = azurerm_data_factory_pipeline.build_prematch_pages.name
-
-  interval  = 1
-  frequency = "Day"
-
-  schedule {
-    hours   = [7]   # 07:00 UTC — after morning prematch capture (~06:10 UTC)
-    minutes = [0]
-  }
-
-  activated = true
-}
-
 resource "azurerm_data_factory_pipeline" "backfill" {
   name            = "pl_backfill"
   data_factory_id = data.azurerm_data_factory.main.id
@@ -278,24 +326,31 @@ resource "azurerm_data_factory_pipeline" "backfill" {
   activities_json = jsonencode([
     {
       name = "bronze_to_silver"
-      type = "DatabricksNotebook"
+      type = "Custom"
       policy = {
         timeout = "0.04:00:00"
       }
       linkedServiceName = {
-        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        referenceName = "ls_azure_batch"
         type          = "LinkedServiceReference"
       }
       typeProperties = {
-        notebookPath   = "/cricket-pipeline/bronze_to_silver"
-        baseParameters = {
-          event_id = "@pipeline().parameters.event_id"
+        command = "python3 bronze_to_silver.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath         = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI = local.kv_uri
+          EVENT_ID      = "@pipeline().parameters.event_id"
         }
       }
     },
     {
       name = "silver_to_gold"
-      type = "DatabricksNotebook"
+      type = "Custom"
       policy = {
         timeout = "0.04:00:00"
       }
@@ -306,18 +361,25 @@ resource "azurerm_data_factory_pipeline" "backfill" {
         }
       ]
       linkedServiceName = {
-        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        referenceName = "ls_azure_batch"
         type          = "LinkedServiceReference"
       }
       typeProperties = {
-        notebookPath   = "/cricket-pipeline/silver_to_gold"
-        baseParameters = {
-          event_id = "@pipeline().parameters.event_id"
+        command = "python3 silver_to_gold.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath         = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI = local.kv_uri
+          EVENT_ID      = "@pipeline().parameters.event_id"
         }
       }
     }
   ])
 
-  depends_on = [azurerm_data_factory_linked_service_azure_databricks.main]
+  depends_on = [azapi_resource.adf_ls_azure_batch]
 }
 
