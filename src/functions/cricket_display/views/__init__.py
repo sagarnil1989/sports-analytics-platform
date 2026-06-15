@@ -14,12 +14,6 @@ from .ended import (
     view_ended_matches,
     view_ended_matches_html,
 )
-from .live_matches import (
-    view_leagues,
-    view_leagues_html,
-    view_league_matches,
-    view_league_matches_html,
-)
 from .innings_tracker import (
     view_silver_innings_tracker_html,
 )
@@ -59,7 +53,6 @@ __all__ = [
     "view_save_prematch_results", "view_prematch_match_html", "view_prematch_leagues",
     "view_prematch_leagues_html", "view_prematch_league_matches", "view_prematch_league_matches_html",
     "view_ended_matches", "view_ended_matches_html",
-    "view_leagues", "view_leagues_html", "view_league_matches", "view_league_matches_html",
     "view_silver_innings_tracker_html",
     "view_admin_leagues", "view_admin_league_toggle", "view_admin_rebuild_innings",
     "view_detailed_analysis_html",

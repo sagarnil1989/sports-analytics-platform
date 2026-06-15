@@ -12,10 +12,6 @@ from views import (
     view_prematch_league_matches_html,
     view_ended_matches,
     view_ended_matches_html,
-    view_leagues,
-    view_leagues_html,
-    view_league_matches,
-    view_league_matches_html,
     view_silver_innings_tracker_html,
     view_admin_leagues,
     view_admin_league_toggle,
@@ -104,30 +100,6 @@ def get_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="matches/{event_id}/innings-tracker/view", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
     return view_silver_innings_tracker_html(req)
-
-
-# ---------------------------------------------------------------------------
-# HTTP routes — Leagues
-# ---------------------------------------------------------------------------
-
-@app.route(route="leagues", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
-def get_leagues(req: func.HttpRequest) -> func.HttpResponse:
-    return view_leagues(req)
-
-
-@app.route(route="leagues/view", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
-def get_leagues_html(req: func.HttpRequest) -> func.HttpResponse:
-    return view_leagues_html(req)
-
-
-@app.route(route="leagues/{league_id}/matches", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
-def get_league_matches(req: func.HttpRequest) -> func.HttpResponse:
-    return view_league_matches(req)
-
-
-@app.route(route="leagues/{league_id}/matches/view", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
-def get_league_matches_html(req: func.HttpRequest) -> func.HttpResponse:
-    return view_league_matches_html(req)
 
 
 # ---------------------------------------------------------------------------

@@ -152,7 +152,7 @@ resource "azurerm_linux_function_app" "display" {
 
 resource "azurerm_role_assignment" "display_function_gold_reader" {
   scope                = "${data.azurerm_storage_account.data_lake.id}/blobServices/default/containers/gold"
-  role_definition_name = "Storage Blob Data Reader"
+  role_definition_name = "Storage Blob Data Contributor"
   principal_id         = azurerm_linux_function_app.display.identity[0].principal_id
 }
 
