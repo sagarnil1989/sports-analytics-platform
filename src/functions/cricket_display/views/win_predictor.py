@@ -5,9 +5,41 @@ from .common import (
     build_simple_table_page,
 )
 
+_CONFIG_BLOB = "cricket/ml_features/t20/win_predictor_config.json"
+
+
+def _load_config(gold) -> dict:
+    try:
+        return json.loads(gold.get_blob_client(_CONFIG_BLOB).download_blob().readall())
+    except Exception:
+        return {}
+
+
+def view_ml_win_predictor_config_post(req: func.HttpRequest) -> func.HttpResponse:
+    gold = get_named_container_client("gold")
+    try:
+        body = req.get_json()
+        cutoff = str(body.get("train_cutoff", "")).strip()
+        if len(cutoff) != 10 or cutoff[4] != "-" or cutoff[7] != "-":
+            return func.HttpResponse(
+                json.dumps({"ok": False, "error": "Invalid date format — use YYYY-MM-DD"}),
+                mimetype="application/json", status_code=400,
+            )
+        cfg = _load_config(gold)
+        cfg["train_cutoff"] = cutoff
+        gold.get_blob_client(_CONFIG_BLOB).upload_blob(
+            json.dumps(cfg, indent=2).encode(), overwrite=True
+        )
+        return func.HttpResponse(json.dumps({"ok": True, "train_cutoff": cutoff}), mimetype="application/json")
+    except Exception as e:
+        return func.HttpResponse(json.dumps({"ok": False, "error": str(e)}), mimetype="application/json", status_code=500)
+
 
 def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
     gold = get_named_container_client("gold")
+
+    config = _load_config(gold)
+    saved_cutoff = config.get("train_cutoff", "")
 
     try:
         raw = gold.get_blob_client("cricket/ml_features/t20/win_predictor_summary.json").download_blob().readall()
@@ -342,6 +374,16 @@ def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
         nav {{ margin-bottom:24px; font-size:14px; }}
         nav a {{ color:#0066cc; text-decoration:none; margin-right:16px; }}
         nav a:hover {{ text-decoration:underline; }}
+        .cutoff-card {{ background:white; border:1px solid #e0e0e0; border-radius:8px;
+                        padding:16px 20px; margin-bottom:24px; box-shadow:0 1px 4px #ccc;
+                        display:flex; align-items:center; gap:16px; flex-wrap:wrap; }}
+        .cutoff-label {{ font-size:13px; color:#555; }}
+        .cutoff-input {{ font-size:14px; padding:6px 10px; border:1px solid #ccc;
+                         border-radius:4px; font-family:monospace; }}
+        .cutoff-btn {{ background:#0066cc; color:white; border:none; border-radius:4px;
+                       padding:7px 18px; font-size:14px; cursor:pointer; }}
+        .cutoff-btn:hover {{ background:#0052a3; }}
+        .cutoff-status {{ font-size:13px; margin-left:4px; }}
     </style>
 </head>
 <body>
@@ -354,6 +396,35 @@ def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
     </nav>
     <h1>ML Win Predictor</h1>
     <p style="color:#666">T20 match outcome prediction — three models trained with progressively more match information</p>
+
+    <div class="cutoff-card">
+        <span class="cutoff-label"><strong>Train / test cutoff date</strong><br>
+            Matches before this date → training set. On or after → test set.<br>
+            Save here, then re-run <code>pl_ml_retrain</code> in ADF to rebuild models.</span>
+        <input type="date" id="cutoffInput" class="cutoff-input" value="{escape(saved_cutoff)}">
+        <button class="cutoff-btn" onclick="saveCutoff()">Save</button>
+        <span id="cutoffStatus" class="cutoff-status"></span>
+    </div>
+    <script>
+    function saveCutoff() {{
+        var d = document.getElementById('cutoffInput').value;
+        var s = document.getElementById('cutoffStatus');
+        if (!d) {{ s.style.color='#c00'; s.textContent='Pick a date first.'; return; }}
+        s.style.color='#888'; s.textContent='Saving…';
+        fetch('/api/ml/win-predictor/config', {{
+            method: 'POST',
+            headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{train_cutoff: d}})
+        }})
+        .then(r => r.json())
+        .then(j => {{
+            if (j.ok) {{ s.style.color='#2d7a2d'; s.textContent='Saved ✓ — re-run pl_ml_retrain to apply.'; }}
+            else       {{ s.style.color='#c00';    s.textContent='Error: ' + (j.error || 'unknown'); }}
+        }})
+        .catch(e => {{ s.style.color='#c00'; s.textContent='Network error: ' + e; }});
+    }}
+    </script>
+
     {body}
 </body>
 </html>"""

@@ -63,8 +63,23 @@ gold   = svc.get_container_client("gold")
 silver = svc.get_container_client("silver")
 
 from datetime import datetime, timedelta, timezone
-TRAIN_CUTOFF          = (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%d")
 IMPORTANCE_THRESHOLD  = 0.005   # drop features below 0.5% of total importance
+
+# Load fixed cutoff from config blob set via the web UI.
+# Falls back to rolling 3-day window if no config has been saved yet.
+try:
+    _cfg = json.loads(gold.get_blob_client(
+        "cricket/ml_features/t20/win_predictor_config.json"
+    ).download_blob().readall())
+    TRAIN_CUTOFF = _cfg.get("train_cutoff") or ""
+except Exception:
+    TRAIN_CUTOFF = ""
+
+if not TRAIN_CUTOFF:
+    TRAIN_CUTOFF = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+    print(f"No config found — using rolling cutoff: {TRAIN_CUTOFF}")
+else:
+    print(f"Using fixed cutoff from config: {TRAIN_CUTOFF}")
 
 def _dl(path):
     try:

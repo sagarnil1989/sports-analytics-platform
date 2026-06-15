@@ -19,6 +19,7 @@ from views import (
     view_detailed_analysis_html,
     view_home,
     view_ml_win_predictor_html,
+    view_ml_win_predictor_config_post,
     view_ml_feature_matrix_html,
     view_ml_score_predictor_html,
     view_ml_score_matrix_html,
@@ -147,6 +148,11 @@ def root(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="ml/win-predictor", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
     return view_ml_win_predictor_html(req)
+
+
+@app.route(route="ml/win-predictor/config", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+def post_ml_win_predictor_config(req: func.HttpRequest) -> func.HttpResponse:
+    return view_ml_win_predictor_config_post(req)
 
 
 @app.route(route="ml/feature-matrix", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)

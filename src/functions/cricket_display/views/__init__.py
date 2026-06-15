@@ -30,6 +30,7 @@ from .home import (
 )
 from .win_predictor import (
     view_ml_win_predictor_html,
+    view_ml_win_predictor_config_post,
 )
 from .feature_matrix import (
     view_ml_feature_matrix_html,
@@ -58,6 +59,7 @@ __all__ = [
     "view_detailed_analysis_html",
     "view_home",
     "view_ml_win_predictor_html",
+    "view_ml_win_predictor_config_post",
     "view_ml_feature_matrix_html",
     "view_ml_score_predictor_html",
     "view_ml_score_matrix_html",
