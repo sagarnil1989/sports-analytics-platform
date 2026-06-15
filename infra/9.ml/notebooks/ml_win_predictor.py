@@ -77,17 +77,14 @@ def _dl(path):
 # STEP 1 — Load all T20 gold trackers
 # ═══════════════════════════════════════════════════════════════════
 
-prefix = "cricket/innings_tracker/"
-blobs  = [b.name for b in gold.list_blobs(name_starts_with=prefix)
-          if b.name.endswith("innings_1_from_silver.json")]
+blobs = [b.name for b in gold.list_blobs(name_starts_with="event_id=")
+         if b.name.endswith("/innings_tracker.json")]
 
 def _dl_tracker(path):
     t = _dl(path)
     if t is not None and not t.get("event_id"):
-        # event_id lives in the blob path, not inside the JSON
-        parts = path.split("/")
-        ep = next((p for p in parts if p.startswith("event_id=")), None)
-        if ep:
+        ep = path.split("/")[0]  # "event_id=XXXXX"
+        if ep.startswith("event_id="):
             t["event_id"] = ep.replace("event_id=", "")
     return t
 

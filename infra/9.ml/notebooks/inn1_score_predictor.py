@@ -64,13 +64,20 @@ def _dl(path):
 # STEP 1 — Load all T20 gold trackers
 # ═══════════════════════════════════════════════════════════════════
 
-prefix = "cricket/innings_tracker/"
-blobs  = [b.name for b in gold.list_blobs(name_starts_with=prefix)
-          if b.name.endswith("innings_1_from_silver.json")]
+blobs = [b.name for b in gold.list_blobs(name_starts_with="event_id=")
+         if b.name.endswith("/innings_tracker.json")]
+
+def _dl_tracker(path):
+    t = _dl(path)
+    if t is not None and not t.get("event_id"):
+        ep = path.split("/")[0]  # "event_id=XXXXX"
+        if ep.startswith("event_id="):
+            t["event_id"] = ep.replace("event_id=", "")
+    return t
 
 trackers = []
 with ThreadPoolExecutor(max_workers=32) as ex:
-    futs = {ex.submit(_dl, b): b for b in blobs}
+    futs = {ex.submit(_dl_tracker, b): b for b in blobs}
     for fut in as_completed(futs):
         t = fut.result()
         if t:
