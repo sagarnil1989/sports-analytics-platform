@@ -7,15 +7,16 @@ _LEAGUE_PREFS_PATH = "cricket/config/league_preferences.json"
 _BLOCKED_EVENTS_PATH = "cricket/config/blocked_event_ids.json"
 
 
-def load_allowed_league_ids() -> set:
-    """Return set of league_id strings explicitly allowed for capture.
+def load_disabled_league_ids() -> set:
+    """Return set of league_id strings explicitly disabled for capture.
 
-    Opt-in model: any league NOT in this set is skipped at bronze capture time.
-    An empty set means no leagues are allowed yet.
+    Opt-out model: all leagues are captured by default.
+    A league is skipped only if its ID appears in this set.
+    An empty set means all leagues are captured.
     """
     gold = get_named_container_client("gold")
     prefs = download_json(gold, _LEAGUE_PREFS_PATH) or {}
-    return set(str(lid) for lid in prefs.get("allowed_league_ids", []))
+    return set(str(lid) for lid in prefs.get("disabled_league_ids", []))
 
 
 def load_blocked_event_ids() -> set:

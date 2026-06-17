@@ -20,7 +20,7 @@ from storage import (
     utc_now,
 )
 from bet365_parser import extract_bet365_current_markets
-from league_config import collect_known_leagues, load_allowed_league_ids, save_league_preferences
+from league_config import collect_known_leagues, load_disabled_league_ids, save_league_preferences
 from innings_tracker_writer import extract_innings_snapshot
 
 

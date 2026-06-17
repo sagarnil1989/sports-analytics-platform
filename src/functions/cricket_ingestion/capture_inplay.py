@@ -16,7 +16,7 @@ from util import (
     upload_json,
     utc_now,
 )
-from league_config import load_allowed_league_ids
+from league_config import load_disabled_league_ids
 
 _KNOWN_LEAGUES_PATH = "cricket/config/known_leagues.json"
 
@@ -273,7 +273,7 @@ def bronze_capture_cricket_inplay_snapshot() -> None:
         return
 
     active_matches = control["active_matches"]
-    allowed_leagues = load_allowed_league_ids()
+    disabled_leagues = load_disabled_league_ids()
 
     events_inplay_payload = call_betsapi(path="/v3/events/inplay", params={"sport_id": sport_id})
 
@@ -282,7 +282,7 @@ def bronze_capture_cricket_inplay_snapshot() -> None:
         if _time.monotonic() - run_start > budget_seconds:
             logging.warning(json.dumps({"event": "bronze_capture_budget_reached", "captured": captured, "remaining": len(active_matches) - captured - skipped}))
             break
-        if str(match.get("league_id") or "") not in allowed_leagues:
+        if str(match.get("league_id") or "") in disabled_leagues:
             logging.info(json.dumps({"event": "bronze_inplay_snapshot_skipped_league", "league_id": match.get("league_id"), "league_name": match.get("league_name")}))
             skipped += 1
             continue

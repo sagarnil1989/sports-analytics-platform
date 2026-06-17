@@ -17,7 +17,7 @@ from util import (
     upload_json,
     utc_now,
 )
-from league_config import load_allowed_league_ids
+from league_config import load_disabled_league_ids
 
 _KNOWN_LEAGUES_PATH = "cricket/config/known_leagues.json"
 
@@ -154,10 +154,10 @@ def bronze_capture_cricket_prematch_odds() -> None:
         logging.info(json.dumps({"event": "bronze_capture_cricket_prematch_odds_skipped", "reason": "no_upcoming_matches"}))
         return
 
-    allowed_leagues = load_allowed_league_ids()
+    disabled_leagues = load_disabled_league_ids()
     upcoming_matches = [
         m for m in control.get("upcoming_matches", [])
-        if m.get("fi") and str(m.get("league_id") or "") in allowed_leagues
+        if m.get("fi") and str(m.get("league_id") or "") not in disabled_leagues
     ]
     if max_per_run > 0:
         upcoming_matches = upcoming_matches[:max_per_run]

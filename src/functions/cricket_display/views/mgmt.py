@@ -2,7 +2,7 @@ from .common import (
     json, logging, os, escape, Any, Dict, List, Optional,
     func, ResourceNotFoundError,
     download_json, get_named_container_client, upload_json,
-    collect_known_leagues, load_allowed_league_ids, save_league_preferences,
+    collect_known_leagues, load_disabled_league_ids, save_league_preferences,
     build_simple_table_page,
 )
 
@@ -40,13 +40,13 @@ def view_admin_reprocess_silver(req: func.HttpRequest) -> func.HttpResponse:
 
 def view_admin_leagues(req: func.HttpRequest) -> func.HttpResponse:
     try:
-        allowed = load_allowed_league_ids()
+        disabled = load_disabled_league_ids()
         leagues = collect_known_leagues()
-        # Two-pass stable sort: first by date desc, then by group asc — preserves date order within each group.
-        # Groups: 0 = allowed (capturing), 1 = new/upcoming-only, 2 = disabled
+        # Two-pass stable sort: first by date desc, then by group asc.
+        # Groups: 0 = capturing (not disabled), 1 = disabled
         leagues.sort(key=lambda x: x.get("last_match_date") or "", reverse=True)
         leagues.sort(key=lambda x: (
-            0 if str(x.get("league_id") or "") in allowed else (1 if x.get("sources") == ["upcoming"] else 2)
+            1 if str(x.get("league_id") or "") in disabled else 0
         ))
         rows_html = ""
         for lg in leagues:
@@ -56,22 +56,18 @@ def view_admin_leagues(req: func.HttpRequest) -> func.HttpResponse:
             sources = ", ".join(sources_list)
             first_date = escape((str(lg.get("first_seen_utc") or lg.get("first_match_date") or "-"))[:10])
             last_date  = escape((str(lg.get("last_seen_utc")  or lg.get("last_match_date")  or "-"))[:10])
-            is_allowed = str(lg.get("league_id") or "") in allowed
-            is_new = sources_list == ["upcoming"]  # seen only in upcoming, never captured
-            checked = "checked" if is_allowed else ""
-            if is_allowed:
+            is_disabled = str(lg.get("league_id") or "") in disabled
+            checked = "" if is_disabled else "checked"
+            if is_disabled:
+                bg = ' style="background:#fff5f5"'
+                status = "Disabled — toggle to capture"
+            else:
                 bg = ' style="background:#f0fff0"'
                 status = "Capturing"
-            elif is_new:
-                bg = ' style="background:#fffbe6"'
-                status = "⚠️ New — not yet enabled"
-            else:
-                bg = ""
-                status = "Disabled — toggle to enable"
             rows_html += f"""
             <tr{bg}>
                 <td>{lid}</td>
-                <td><b>{lname}</b>{'&nbsp;<span style="font-size:11px;background:#f5a623;color:white;padding:1px 5px;border-radius:3px;">NEW</span>' if is_new else ''}</td>
+                <td><b>{lname}</b></td>
                 <td style="color:#666;font-size:12px;">{escape(sources)}</td>
                 <td style="font-size:12px;">{first_date}</td>
                 <td style="font-size:12px;">{last_date}</td>
@@ -110,7 +106,7 @@ def view_admin_leagues(req: func.HttpRequest) -> func.HttpResponse:
 <body>
     <p><a href="/api/home">← Home</a></p>
     <h1>League Filter</h1>
-    <p class="hint">New leagues are <b>disabled by default</b> — toggle ON to start capturing.<br>
+    <p class="hint">All leagues are <b>captured by default</b> — toggle OFF to stop capturing a league.<br>
     Changes apply from the next capture cycle (within 5 seconds for live, 1 minute for prematch).</p>
     <p id="save-status" style="color:#28a745;font-weight:bold;display:none;">Saved.</p>
     <table>
@@ -119,31 +115,31 @@ def view_admin_leagues(req: func.HttpRequest) -> func.HttpResponse:
     </table>
     <script>
         async function toggle(checkbox, leagueId) {{
-            const include = checkbox.checked;
+            const enabled = checkbox.checked;
             const statusEl = document.getElementById('status-' + leagueId);
             statusEl.textContent = 'Saving...';
             statusEl.style.color = '#888';
             try {{
                 const resp = await fetch('/api/mgmt/leagues/toggle', {{
                     method: 'POST', headers: {{'Content-Type': 'application/json'}},
-                    body: JSON.stringify({{league_id: leagueId, include: include}})
+                    body: JSON.stringify({{league_id: leagueId, include: enabled}})
                 }});
                 const data = await resp.json();
                 if (data.ok) {{
-                    statusEl.textContent = include ? 'Included' : 'Excluded — not captured';
-                    statusEl.style.color = include ? '#28a745' : '#dc3545';
+                    statusEl.textContent = enabled ? 'Capturing' : 'Disabled — toggle to capture';
+                    statusEl.style.color = enabled ? '#28a745' : '#dc3545';
                     document.getElementById('save-status').style.display = 'block';
                     const row = checkbox.closest('tr');
-                    row.style.background = include ? '#f0fff0' : '';
+                    row.style.background = enabled ? '#f0fff0' : '#fff5f5';
                 }} else {{
                     statusEl.textContent = 'Error: ' + (data.error || 'unknown');
                     statusEl.style.color = '#dc3545';
-                    checkbox.checked = !include;
+                    checkbox.checked = !enabled;
                 }}
             }} catch(e) {{
                 statusEl.textContent = 'Network error';
                 statusEl.style.color = '#dc3545';
-                checkbox.checked = !include;
+                checkbox.checked = !enabled;
             }}
         }}
     </script>
@@ -162,13 +158,13 @@ def view_admin_league_toggle(req: func.HttpRequest) -> func.HttpResponse:
         include = bool(body.get("include", True))
         if not league_id:
             return func.HttpResponse(json.dumps({"ok": False, "error": "league_id required"}), status_code=400, mimetype="application/json")
-        allowed = load_allowed_league_ids()
+        disabled = load_disabled_league_ids()
         if include:
-            allowed.add(league_id)
+            disabled.discard(league_id)   # toggled ON → remove from disabled set
         else:
-            allowed.discard(league_id)
-        save_league_preferences(allowed)
-        return func.HttpResponse(json.dumps({"ok": True, "league_id": league_id, "included": include, "total_allowed": len(allowed)}), status_code=200, mimetype="application/json")
+            disabled.add(league_id)       # toggled OFF → add to disabled set
+        save_league_preferences(disabled)
+        return func.HttpResponse(json.dumps({"ok": True, "league_id": league_id, "included": include, "total_disabled": len(disabled)}), status_code=200, mimetype="application/json")
     except Exception as ex:
         logging.exception("Failed to toggle league")
         return func.HttpResponse(json.dumps({"ok": False, "error": str(ex)}), status_code=500, mimetype="application/json")
