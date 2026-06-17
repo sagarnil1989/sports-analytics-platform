@@ -29,7 +29,7 @@ resource "azapi_resource" "adf_ls_azure_batch" {
   name      = "ls_azure_batch"
   parent_id = data.azurerm_data_factory.main.id
 
-  body = jsonencode({
+  body = {
     properties = {
       type = "AzureBatch"
       typeProperties = {
@@ -46,7 +46,7 @@ resource "azapi_resource" "adf_ls_azure_batch" {
         }
       }
     }
-  })
+  }
 
   schema_validation_enabled = false
 
