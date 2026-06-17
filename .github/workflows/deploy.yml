@@ -184,6 +184,7 @@ jobs:
 
   infra_9_ml:
     name: "Infra 9 · ML"
+    needs: infra_8_adf_config
     runs-on: ubuntu-latest
     if: ${{ github.event.inputs.skip_infra != 'true' }}
     defaults:

@@ -21,9 +21,10 @@ from azure.identity import ManagedIdentityCredential
 from azure.keyvault.secrets import SecretClient
 from azure.storage.blob import BlobServiceClient
 
-_kv_uri = os.environ["KEY_VAULT_URI"]
-_cred   = ManagedIdentityCredential()
-_kv     = SecretClient(vault_url=_kv_uri, credential=_cred)
+_kv_uri    = os.environ["KEY_VAULT_URI"]
+_client_id = os.environ.get("MANAGED_IDENTITY_CLIENT_ID")
+_cred      = ManagedIdentityCredential(client_id=_client_id)
+_kv        = SecretClient(vault_url=_kv_uri, credential=_cred)
 
 conn_str      = _kv.get_secret("DATA-STORAGE-CONNECTION-STRING").value
 sport_id      = _kv.get_secret("SPORT-ID").value

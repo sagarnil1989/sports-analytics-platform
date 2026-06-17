@@ -18,9 +18,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from azure.identity import ManagedIdentityCredential
 from azure.keyvault.secrets import SecretClient
 
-_kv_uri = os.environ["KEY_VAULT_URI"]
-_cred   = ManagedIdentityCredential()
-_kv     = SecretClient(vault_url=_kv_uri, credential=_cred)
+_kv_uri    = os.environ["KEY_VAULT_URI"]
+_client_id = os.environ.get("MANAGED_IDENTITY_CLIENT_ID")
+_cred      = ManagedIdentityCredential(client_id=_client_id)
+_kv        = SecretClient(vault_url=_kv_uri, credential=_cred)
 
 os.environ["DATA_STORAGE_CONNECTION_STRING"] = _kv.get_secret("DATA-STORAGE-CONNECTION-STRING").value
 os.environ["SPORT_ID"]                       = _kv.get_secret("SPORT-ID").value

@@ -174,7 +174,8 @@ resource "azurerm_data_factory_pipeline" "hypothesis" {
         folderPath         = "batch-scripts"
         retentionTimeInDays = 1
         extendedProperties = {
-          KEY_VAULT_URI = "https://${local.config.key_vault_name}.vault.azure.net/"
+          KEY_VAULT_URI              = "https://${local.config.key_vault_name}.vault.azure.net/"
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
         }
       }
     },
@@ -197,7 +198,8 @@ resource "azurerm_data_factory_pipeline" "hypothesis" {
         folderPath         = "batch-scripts"
         retentionTimeInDays = 1
         extendedProperties = {
-          KEY_VAULT_URI = "https://${local.config.key_vault_name}.vault.azure.net/"
+          KEY_VAULT_URI              = "https://${local.config.key_vault_name}.vault.azure.net/"
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
         }
       }
     }

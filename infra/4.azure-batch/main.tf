@@ -1,3 +1,23 @@
+resource "azurerm_resource_provider_registration" "batch" {
+  name = "Microsoft.Batch"
+}
+
+# ---------------------------------------------------------------------------
+# User-assigned managed identity for the Batch pool
+#
+# Azure Batch pools only support user-assigned managed identity (not
+# system-assigned). This identity is granted access to Storage and Key Vault
+# so that tasks can authenticate without storing credentials.
+# ---------------------------------------------------------------------------
+
+resource "azurerm_user_assigned_identity" "batch_pool" {
+  name                = "id-batch-${local.config.project}"
+  resource_group_name = data.azurerm_resource_group.main.name
+  location            = data.azurerm_resource_group.main.location
+
+  tags = local.config.tags
+}
+
 # ---------------------------------------------------------------------------
 # Azure Batch account
 # No auto-storage — ADF Custom activity handles script distribution via
@@ -11,6 +31,8 @@ resource "azurerm_batch_account" "main" {
   pool_allocation_mode = "BatchService"
 
   tags = local.config.tags
+
+  depends_on = [azurerm_resource_provider_registration.batch]
 }
 
 # ---------------------------------------------------------------------------
@@ -26,7 +48,7 @@ resource "azurerm_batch_pool" "main" {
   resource_group_name = data.azurerm_resource_group.main.name
   account_name        = azurerm_batch_account.main.name
   display_name        = "Cricket Pipeline Pool"
-  vm_size             = "Standard_B2s"
+  vm_size             = "Standard_A2_v2"
   node_agent_sku_id   = "batch.node.ubuntu 22.04"
 
   storage_image_reference {
@@ -37,7 +59,8 @@ resource "azurerm_batch_pool" "main" {
   }
 
   identity {
-    type = "SystemAssigned"
+    type         = "UserAssigned"
+    identity_ids = [azurerm_user_assigned_identity.batch_pool.id]
   }
 
   # Scale to 0 at idle; scale up to 1 when there are pending tasks.
@@ -59,8 +82,8 @@ resource "azurerm_batch_pool" "main" {
 
     user_identity {
       auto_user {
-        scope           = "pool"
-        elevation_level = "admin"
+        scope           = "Pool"
+        elevation_level = "Admin"
       }
     }
   }
@@ -70,19 +93,19 @@ resource "azurerm_batch_pool" "main" {
 # Role assignments — Batch pool managed identity
 #
 # Tasks within the pool authenticate to Storage and Key Vault using
-# the pool's system-assigned managed identity.
+# the pool's user-assigned managed identity.
 # ---------------------------------------------------------------------------
 
 resource "azurerm_role_assignment" "batch_pool_storage" {
   scope                = data.azurerm_storage_account.data_lake.id
   role_definition_name = "Storage Blob Data Contributor"
-  principal_id         = azurerm_batch_pool.main.identity[0].principal_id
+  principal_id         = azurerm_user_assigned_identity.batch_pool.principal_id
 }
 
 resource "azurerm_role_assignment" "batch_pool_kv" {
   scope                = data.azurerm_key_vault.main.id
   role_definition_name = "Key Vault Secrets User"
-  principal_id         = azurerm_batch_pool.main.identity[0].principal_id
+  principal_id         = azurerm_user_assigned_identity.batch_pool.principal_id
 }
 
 # ---------------------------------------------------------------------------
@@ -118,48 +141,43 @@ resource "azurerm_storage_container" "scripts" {
 # ---------------------------------------------------------------------------
 
 resource "azurerm_storage_blob" "script_bronze_to_silver" {
-  name                   = "bronze_to_silver.py"
-  storage_account_name   = data.azurerm_storage_account.data_lake.name
-  storage_container_name = azurerm_storage_container.scripts.name
-  type                   = "Block"
-  source                 = "${path.module}/scripts/bronze_to_silver.py"
-  content_md5            = filemd5("${path.module}/scripts/bronze_to_silver.py")
+  name                 = "bronze_to_silver.py"
+  storage_container_id = azurerm_storage_container.scripts.id
+  type                 = "Block"
+  source               = "${path.module}/scripts/bronze_to_silver.py"
+  content_md5          = filemd5("${path.module}/scripts/bronze_to_silver.py")
 }
 
 resource "azurerm_storage_blob" "script_silver_to_gold" {
-  name                   = "silver_to_gold.py"
-  storage_account_name   = data.azurerm_storage_account.data_lake.name
-  storage_container_name = azurerm_storage_container.scripts.name
-  type                   = "Block"
-  source                 = "${path.module}/scripts/silver_to_gold.py"
-  content_md5            = filemd5("${path.module}/scripts/silver_to_gold.py")
+  name                 = "silver_to_gold.py"
+  storage_container_id = azurerm_storage_container.scripts.id
+  type                 = "Block"
+  source               = "${path.module}/scripts/silver_to_gold.py"
+  content_md5          = filemd5("${path.module}/scripts/silver_to_gold.py")
 }
 
 resource "azurerm_storage_blob" "script_discover_cricket_ended" {
-  name                   = "discover_cricket_ended.py"
-  storage_account_name   = data.azurerm_storage_account.data_lake.name
-  storage_container_name = azurerm_storage_container.scripts.name
-  type                   = "Block"
-  source                 = "${path.module}/scripts/discover_cricket_ended.py"
-  content_md5            = filemd5("${path.module}/scripts/discover_cricket_ended.py")
+  name                 = "discover_cricket_ended.py"
+  storage_container_id = azurerm_storage_container.scripts.id
+  type                 = "Block"
+  source               = "${path.module}/scripts/discover_cricket_ended.py"
+  content_md5          = filemd5("${path.module}/scripts/discover_cricket_ended.py")
 }
 
 resource "azurerm_storage_blob" "script_hypothesis_inn2_over6" {
-  name                   = "hypothesis_inn2_over6.py"
-  storage_account_name   = data.azurerm_storage_account.data_lake.name
-  storage_container_name = azurerm_storage_container.scripts.name
-  type                   = "Block"
-  source                 = "${path.module}/scripts/hypothesis_inn2_over6.py"
-  content_md5            = filemd5("${path.module}/scripts/hypothesis_inn2_over6.py")
+  name                 = "hypothesis_inn2_over6.py"
+  storage_container_id = azurerm_storage_container.scripts.id
+  type                 = "Block"
+  source               = "${path.module}/scripts/hypothesis_inn2_over6.py"
+  content_md5          = filemd5("${path.module}/scripts/hypothesis_inn2_over6.py")
 }
 
 resource "azurerm_storage_blob" "script_hypothesis_timeout_wicket" {
-  name                   = "hypothesis_timeout_wicket.py"
-  storage_account_name   = data.azurerm_storage_account.data_lake.name
-  storage_container_name = azurerm_storage_container.scripts.name
-  type                   = "Block"
-  source                 = "${path.module}/scripts/hypothesis_timeout_wicket.py"
-  content_md5            = filemd5("${path.module}/scripts/hypothesis_timeout_wicket.py")
+  name                 = "hypothesis_timeout_wicket.py"
+  storage_container_id = azurerm_storage_container.scripts.id
+  type                 = "Block"
+  source               = "${path.module}/scripts/hypothesis_timeout_wicket.py"
+  content_md5          = filemd5("${path.module}/scripts/hypothesis_timeout_wicket.py")
 }
 
 # ---------------------------------------------------------------------------
@@ -169,55 +187,49 @@ resource "azurerm_storage_blob" "script_hypothesis_timeout_wicket" {
 # ---------------------------------------------------------------------------
 
 resource "azurerm_storage_blob" "lib_util" {
-  name                   = "util.py"
-  storage_account_name   = data.azurerm_storage_account.data_lake.name
-  storage_container_name = azurerm_storage_container.scripts.name
-  type                   = "Block"
-  source                 = "${local.src_path}/util.py"
-  content_md5            = filemd5("${local.src_path}/util.py")
+  name                 = "util.py"
+  storage_container_id = azurerm_storage_container.scripts.id
+  type                 = "Block"
+  source               = "${local.src_path}/util.py"
+  content_md5          = filemd5("${local.src_path}/util.py")
 }
 
 resource "azurerm_storage_blob" "lib_league_config" {
-  name                   = "league_config.py"
-  storage_account_name   = data.azurerm_storage_account.data_lake.name
-  storage_container_name = azurerm_storage_container.scripts.name
-  type                   = "Block"
-  source                 = "${local.src_path}/league_config.py"
-  content_md5            = filemd5("${local.src_path}/league_config.py")
+  name                 = "league_config.py"
+  storage_container_id = azurerm_storage_container.scripts.id
+  type                 = "Block"
+  source               = "${local.src_path}/league_config.py"
+  content_md5          = filemd5("${local.src_path}/league_config.py")
 }
 
 resource "azurerm_storage_blob" "lib_snapshot_parser" {
-  name                   = "snapshot_parser.py"
-  storage_account_name   = data.azurerm_storage_account.data_lake.name
-  storage_container_name = azurerm_storage_container.scripts.name
-  type                   = "Block"
-  source                 = "${local.lib_path}/snapshot_parser.py"
-  content_md5            = filemd5("${local.lib_path}/snapshot_parser.py")
+  name                 = "snapshot_parser.py"
+  storage_container_id = azurerm_storage_container.scripts.id
+  type                 = "Block"
+  source               = "${local.lib_path}/snapshot_parser.py"
+  content_md5          = filemd5("${local.lib_path}/snapshot_parser.py")
 }
 
 resource "azurerm_storage_blob" "lib_gold_rebuild" {
-  name                   = "gold_rebuild.py"
-  storage_account_name   = data.azurerm_storage_account.data_lake.name
-  storage_container_name = azurerm_storage_container.scripts.name
-  type                   = "Block"
-  source                 = "${local.lib_path}/gold_rebuild.py"
-  content_md5            = filemd5("${local.lib_path}/gold_rebuild.py")
+  name                 = "gold_rebuild.py"
+  storage_container_id = azurerm_storage_container.scripts.id
+  type                 = "Block"
+  source               = "${local.lib_path}/gold_rebuild.py"
+  content_md5          = filemd5("${local.lib_path}/gold_rebuild.py")
 }
 
 resource "azurerm_storage_blob" "lib_hypothesis" {
-  name                   = "hypothesis.py"
-  storage_account_name   = data.azurerm_storage_account.data_lake.name
-  storage_container_name = azurerm_storage_container.scripts.name
-  type                   = "Block"
-  source                 = "${local.lib_path}/hypothesis.py"
-  content_md5            = filemd5("${local.lib_path}/hypothesis.py")
+  name                 = "hypothesis.py"
+  storage_container_id = azurerm_storage_container.scripts.id
+  type                 = "Block"
+  source               = "${local.lib_path}/hypothesis.py"
+  content_md5          = filemd5("${local.lib_path}/hypothesis.py")
 }
 
 resource "azurerm_storage_blob" "lib_tracker_writer" {
-  name                   = "tracker_writer.py"
-  storage_account_name   = data.azurerm_storage_account.data_lake.name
-  storage_container_name = azurerm_storage_container.scripts.name
-  type                   = "Block"
-  source                 = "${local.lib_path}/tracker_writer.py"
-  content_md5            = filemd5("${local.lib_path}/tracker_writer.py")
+  name                 = "tracker_writer.py"
+  storage_container_id = azurerm_storage_container.scripts.id
+  type                 = "Block"
+  source               = "${local.lib_path}/tracker_writer.py"
+  content_md5          = filemd5("${local.lib_path}/tracker_writer.py")
 }

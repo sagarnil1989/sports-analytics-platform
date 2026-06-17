@@ -162,7 +162,8 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
         folderPath         = "batch-scripts"
         retentionTimeInDays = 1
         extendedProperties = {
-          KEY_VAULT_URI = local.kv_uri
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
         }
       }
     },
@@ -191,7 +192,8 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
         folderPath         = "batch-scripts"
         retentionTimeInDays = 1
         extendedProperties = {
-          KEY_VAULT_URI = local.kv_uri
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
         }
       }
     },
@@ -220,7 +222,8 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
         folderPath         = "batch-scripts"
         retentionTimeInDays = 1
         extendedProperties = {
-          KEY_VAULT_URI = local.kv_uri
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
         }
       }
     },
@@ -249,7 +252,8 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
         folderPath         = "batch-scripts"
         retentionTimeInDays = 1
         extendedProperties = {
-          KEY_VAULT_URI = local.kv_uri
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
         }
       }
     },
@@ -278,7 +282,8 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
         folderPath         = "batch-scripts"
         retentionTimeInDays = 1
         extendedProperties = {
-          KEY_VAULT_URI = local.kv_uri
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
         }
       }
     }
@@ -343,8 +348,9 @@ resource "azurerm_data_factory_pipeline" "backfill" {
         folderPath         = "batch-scripts"
         retentionTimeInDays = 1
         extendedProperties = {
-          KEY_VAULT_URI = local.kv_uri
-          EVENT_ID      = "@pipeline().parameters.event_id"
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          EVENT_ID                   = "@pipeline().parameters.event_id"
         }
       }
     },
@@ -373,8 +379,9 @@ resource "azurerm_data_factory_pipeline" "backfill" {
         folderPath         = "batch-scripts"
         retentionTimeInDays = 1
         extendedProperties = {
-          KEY_VAULT_URI = local.kv_uri
-          EVENT_ID      = "@pipeline().parameters.event_id"
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          EVENT_ID                   = "@pipeline().parameters.event_id"
         }
       }
     }
