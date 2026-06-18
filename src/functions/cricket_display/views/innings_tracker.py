@@ -5,7 +5,7 @@ from .common import (
     get_named_container_client, parse_ss_final_scores,
     safe_float, upload_json, utc_now,
     extract_bet365_current_markets,
-    collect_known_leagues, load_allowed_league_ids, save_league_preferences,
+    collect_known_leagues, load_disabled_league_ids, save_league_preferences,
     extract_innings_snapshot,
     build_simple_table_page,
 )
@@ -279,7 +279,9 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
 
             venue_line = ""
             if venue:
-                venue_line = f'<div class="sb-venue">📍 {venue}</div>'
+                venue_line = f'<div class="sb-venue">📍 {venue} — <a href="/api/mgmt/stadium-override?event_id={escape(str(event_id))}">Edit</a></div>'
+            else:
+                venue_line = f'<div class="sb-venue" style="color:#aaa;">📍 Stadium unknown — <a href="/api/mgmt/stadium-override?event_id={escape(str(event_id))}">Add override</a></div>'
 
             scoreboard_html = f"""
             <div class="scoreboard">

@@ -11,7 +11,7 @@ KV secrets read at startup:
   SPORT-ID
 """
 
-import os, sys, json, time
+import os, sys, json, time, threading
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
@@ -193,11 +193,29 @@ def process_snapshot(item):
 
 
 print(f"\nProcessing {len(work_items)} snapshots with {PARALLEL_WORKERS} parallel workers...")
+script_start_utc = datetime.now(timezone.utc)
 run_start = time.monotonic()
 done = failed = 0
 failed_items = []
 succeeded_by_event = defaultdict(int)
 failed_eids        = set()
+complete_written   = 0
+
+# Per-event lock so only one thread writes the complete marker
+_event_locks: dict[str, threading.Lock] = {eid: threading.Lock() for eid in expected_by_event}
+
+def _maybe_write_complete_marker(eid: str, success_count: int) -> None:
+    """Write the complete marker for an event if all its snapshots have succeeded."""
+    global complete_written
+    if success_count != expected_by_event[eid]:
+        return
+    now_iso = datetime.now(timezone.utc).isoformat()
+    silver.get_blob_client(f"control/complete/event_id={eid}.json").upload_blob(
+        json.dumps({"completed_at_utc": now_iso, "snapshot_count": success_count}),
+        overwrite=True,
+    )
+    complete_written += 1
+    print(f"  [marker] event_id={eid}  snapshots={success_count}")
 
 with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as pool:
     futures = {pool.submit(process_snapshot, item): item for item in work_items}
@@ -206,7 +224,16 @@ with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as pool:
         try:
             eid, sid = future.result()
             done += 1
-            succeeded_by_event[eid] += 1
+            # Update per-event count under lock and immediately write marker if complete
+            with _event_locks[eid]:
+                succeeded_by_event[eid] += 1
+                current_count = succeeded_by_event[eid]
+                already_failed = eid in failed_eids
+            if not already_failed:
+                try:
+                    _maybe_write_complete_marker(eid, current_count)
+                except Exception as marker_ex:
+                    print(f"  [marker ERROR] event_id={eid}: {marker_ex}")
             if done % 50 == 0 or done == len(work_items):
                 elapsed = time.monotonic() - run_start
                 rate    = done / elapsed if elapsed > 0 else 0
@@ -214,16 +241,21 @@ with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as pool:
                 print(f"  {done}/{len(work_items)}  |  {rate:.1f}/s  |  ETA {eta_s/60:.1f} min  |  failed {failed}")
         except Exception as ex:
             failed += 1
-            failed_eids.add(item[1])
+            eid_failed = item[1]
+            with _event_locks.get(eid_failed, threading.Lock()):
+                failed_eids.add(eid_failed)
             failed_items.append((item[1], item[2], str(ex)))
 
 elapsed = time.monotonic() - run_start
+script_finished_utc = datetime.now(timezone.utc)
 print(f"\n── Done ──")
 print(f"  processed : {done}")
 print(f"  failed    : {failed}")
 print(f"  total time: {elapsed/60:.1f} min  ({elapsed:.0f}s)")
 if elapsed > 0:
     print(f"  avg rate  : {done/elapsed:.1f} snapshots/s")
+print(f"\n  complete markers written : {complete_written}")
+print(f"  events with failures (not marked complete) : {len(failed_eids)}")
 
 if failed_items:
     print(f"\nFailed snapshots:")
@@ -231,25 +263,35 @@ if failed_items:
         print(f"  event_id={eid}  snapshot_id={sid}  error={err}")
 
 # ---------------------------------------------------------------------------
-# Step 5: Write event-level complete markers
+# Step 5: Write run log to gold
 # ---------------------------------------------------------------------------
 
-complete_written = 0
-now_iso = datetime.now(timezone.utc).isoformat()
-
-for eid, success_count in succeeded_by_event.items():
-    if eid in failed_eids:
-        continue
-    if success_count != expected_by_event[eid]:
-        continue
-    silver.get_blob_client(f"control/complete/event_id={eid}.json").upload_blob(
-        json.dumps({"completed_at_utc": now_iso, "snapshot_count": success_count}),
-        overwrite=True,
+try:
+    gold = svc.get_container_client("gold")
+    log_date   = script_start_utc.strftime("%Y%m%d")
+    log_time   = script_start_utc.strftime("%H%M%S")
+    log_path   = f"logs/pl_build_ended_match/{log_date}/{log_time}_bronze_to_silver.json"
+    run_log    = {
+        "script":                   "bronze_to_silver",
+        "run_date":                 script_start_utc.strftime("%Y-%m-%d"),
+        "started_at_utc":           script_start_utc.isoformat(),
+        "finished_at_utc":          script_finished_utc.isoformat(),
+        "duration_seconds":         round(elapsed, 2),
+        "status":                   "failed" if failed > 0 else "ok",
+        "events_processed":         event_count,
+        "snapshots_processed":      done,
+        "snapshots_failed":         failed,
+        "complete_markers_written": complete_written,
+        "events_with_failures":     len(failed_eids),
+        "skipped_complete":         skipped_complete,
+        "skipped_active":           skipped_active,
+    }
+    gold.get_blob_client(log_path).upload_blob(
+        json.dumps(run_log, indent=2).encode(), overwrite=True
     )
-    complete_written += 1
-
-print(f"\n  complete markers written : {complete_written}")
-print(f"  events with failures (not marked complete) : {len(failed_eids)}")
+    print(f"\n  run log written: {log_path}")
+except Exception as log_ex:
+    print(f"\n  [log write failed — non-fatal]: {log_ex}")
 
 if failed > 0:
     sys.exit(1)

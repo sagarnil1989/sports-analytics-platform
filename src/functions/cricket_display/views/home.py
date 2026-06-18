@@ -29,6 +29,7 @@ def view_home(req: func.HttpRequest) -> func.HttpResponse:
         <div class="card"><a href="/api/ml/score-predictor">Inn1 Score Predictor</a><p>Predicts final innings-1 score at over 6, 10 and 16 — MAE, RMSE, R² and per-match test predictions</p></div>
         <div class="card"><a href="/api/ml/score-matrix">Score Feature Matrix</a><p>All matches × score-predictor features — three cutoff tabs (over 6 / 10 / 16), train/test highlighted</p></div>
         <div class="card"><a href="/api/mgmt/leagues/view">League Filter</a><p>Select which leagues to capture — excluded leagues skip bronze, silver and gold entirely</p></div>
+        <div class="card"><a href="/api/mgmt/stadium-override">Stadium Overrides</a><p>Manually set a stadium name for a match when venue data is missing</p></div>
         <h3 style="margin:20px 0 4px; color:#555; font-size:15px; text-transform:uppercase; letter-spacing:1px;">Hypothesis</h3>
         <div class="card"><a href="/api/hypothesis/inn2-over6">Inn2 Over-6 Favourite Wins</a><p>Does the match-winner odds favourite after 6 overs of the chase always win? T20 only — with score, odds and actual result.</p></div>
         <div class="card"><a href="/api/hypothesis/timeout-wicket">Wicket After Strategic Timeout</a><p>After a strategic timeout (game paused &gt;2 min), does a wicket always fall in the very next over? T20 only — timeout detected from gaps in game state.</p></div>

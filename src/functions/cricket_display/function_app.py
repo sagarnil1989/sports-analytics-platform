@@ -16,6 +16,9 @@ from views import (
     view_admin_leagues,
     view_admin_league_toggle,
     view_admin_rebuild_innings,
+    view_admin_stadium_override_get,
+    view_admin_stadium_override_save,
+    view_admin_match_override_save,
     view_detailed_analysis_html,
     view_home,
     view_ml_win_predictor_html,
@@ -129,6 +132,21 @@ def post_admin_league_toggle(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="mgmt/rebuild-innings/{event_id}", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_admin_rebuild_innings(req: func.HttpRequest) -> func.HttpResponse:
     return view_admin_rebuild_innings(req)
+
+
+@app.route(route="mgmt/stadium-override", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_admin_stadium_override(req: func.HttpRequest) -> func.HttpResponse:
+    return view_admin_stadium_override_get(req)
+
+
+@app.route(route="mgmt/stadium-override", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+def post_admin_stadium_override(req: func.HttpRequest) -> func.HttpResponse:
+    return view_admin_stadium_override_save(req)
+
+
+@app.route(route="mgmt/match-override", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+def post_admin_match_override(req: func.HttpRequest) -> func.HttpResponse:
+    return view_admin_match_override_save(req)
 
 
 # ---------------------------------------------------------------------------

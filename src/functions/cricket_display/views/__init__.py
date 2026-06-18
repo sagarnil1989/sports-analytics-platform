@@ -21,6 +21,9 @@ from .mgmt import (
     view_admin_leagues,
     view_admin_league_toggle,
     view_admin_rebuild_innings,
+    view_admin_stadium_override_get,
+    view_admin_stadium_override_save,
+    view_admin_match_override_save,
 )
 from .match_analysis import (
     view_detailed_analysis_html,
@@ -56,6 +59,8 @@ __all__ = [
     "view_ended_matches", "view_ended_matches_html",
     "view_silver_innings_tracker_html",
     "view_admin_leagues", "view_admin_league_toggle", "view_admin_rebuild_innings",
+    "view_admin_stadium_override_get", "view_admin_stadium_override_save",
+    "view_admin_match_override_save",
     "view_detailed_analysis_html",
     "view_home",
     "view_ml_win_predictor_html",

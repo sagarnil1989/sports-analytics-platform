@@ -11,7 +11,7 @@ KV secrets read at startup:
   BET365-API-TOKEN
 """
 
-import os, sys, json
+import os, sys, json, time
 import requests as _requests
 from datetime import datetime, timezone
 
@@ -34,7 +34,9 @@ svc    = BlobServiceClient.from_connection_string(conn_str)
 bronze = svc.get_container_client("bronze")
 gold   = svc.get_container_client("gold")
 
-now = datetime.now(timezone.utc)
+now              = datetime.now(timezone.utc)
+script_start_utc = now
+run_start        = time.monotonic()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -259,6 +261,9 @@ ended_index = {
 }
 _ul(bronze, "cricket/ended/latest/index.json", ended_index)
 
+elapsed             = time.monotonic() - run_start
+script_finished_utc = datetime.now(timezone.utc)
+
 print(f"\n── Done ──")
 print(f"  Ended matches written    : {len(matches)}")
 print(f"  Scores from event_final  : {score_patched}")
@@ -266,3 +271,26 @@ print(f"  Skipped (live)           : {skipped_live}")
 print(f"  Skipped (blocked)        : {skipped_blocked}")
 print(f"  Skipped (no fi)          : {skipped_no_fi}")
 print(f"  Skipped (no name)        : {skipped_no_name}")
+
+try:
+    log_date = script_start_utc.strftime("%Y%m%d")
+    log_time = script_start_utc.strftime("%H%M%S")
+    log_path = f"logs/pl_build_ended_match/{log_date}/{log_time}_discover_cricket_ended.json"
+    run_log  = {
+        "script":                    "discover_cricket_ended",
+        "run_date":                  script_start_utc.strftime("%Y-%m-%d"),
+        "started_at_utc":            script_start_utc.isoformat(),
+        "finished_at_utc":           script_finished_utc.isoformat(),
+        "duration_seconds":          round(elapsed, 2),
+        "status":                    "ok",
+        "ended_matches_written":     len(matches),
+        "scores_from_event_final":   score_patched,
+        "skipped_live":              skipped_live,
+        "skipped_blocked":           skipped_blocked,
+        "skipped_no_fi":             skipped_no_fi,
+        "skipped_no_name":           skipped_no_name,
+    }
+    _ul(gold, log_path, run_log)
+    print(f"\n  run log written: {log_path}")
+except Exception as log_ex:
+    print(f"\n  [log write failed — non-fatal]: {log_ex}")

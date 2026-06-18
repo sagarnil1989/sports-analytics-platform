@@ -67,11 +67,7 @@ resource "azurerm_batch_pool" "main" {
   auto_scale {
     evaluation_interval = "PT5M"
     formula             = <<-EOT
-      startingNumberOfVMs = 0;
-      maxNumberofVMs = 1;
-      pendingTaskSamplePercent = $PendingTasks.GetSamplePercent(180 * TimeInterval_Second);
-      pendingTaskSamples = pendingTaskSamplePercent < 70 ? startingNumberOfVMs : avg($PendingTasks.GetSample(180 * TimeInterval_Second));
-      $TargetDedicatedNodes = min(maxNumberofVMs, pendingTaskSamples);
+      $TargetDedicatedNodes = ($PendingTasks.GetSample(1) > 0) ? 1 : 0;
       $NodeDeallocationOption = taskcompletion;
     EOT
   }

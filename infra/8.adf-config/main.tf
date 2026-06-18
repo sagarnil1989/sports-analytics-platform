@@ -147,7 +147,7 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
       name = "bronze_to_silver"
       type = "Custom"
       policy = {
-        timeout = "0.04:00:00"
+        timeout = "0.08:00:00"
       }
       linkedServiceName = {
         referenceName = "ls_azure_batch"

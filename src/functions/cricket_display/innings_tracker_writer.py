@@ -304,15 +304,24 @@ def gold_write_innings_tracker_from_silver(
     league_name = acc.get("league_name") or header.get("league_name")
     venue = acc.get("venue") or header.get("venue")
     stadium_data = acc.get("stadium_data") or header.get("stadium_data")
-    if not stadium_data:
-        stadium_overrides = download_json(gold_container, "overrides/stadium_overrides.json") or {}
-        override_name = stadium_overrides.get(event_id)
-        if override_name:
-            stadium_data = {"name": override_name}
     score_obj = match_page.get("score") or {}
     score_summary = score_obj.get("summary_from_events") or score_obj.get("summary_from_bet365") or ""
     _combined = f"{match_name or ''} {league_name or ''}".lower()
     gender = "W" if ("women" in _combined or "(w)" in _combined) else "M"
+
+    # Apply manual overrides from match_overrides.json — these win over raw data
+    _ov = (download_json(gold_container, "overrides/match_overrides.json") or {}).get(event_id) or {}
+    if _ov.get("match_name"):
+        match_name = _ov["match_name"]
+    if _ov.get("league_name"):
+        league_name = _ov["league_name"]
+    if _ov.get("gender"):
+        gender = _ov["gender"]
+    if _ov.get("stadium"):
+        stadium_data = {"name": _ov["stadium"]}
+    elif not stadium_data and not _ov.get("stadium"):
+        pass  # leave stadium_data as None — no override set
+
     tracker = {
         "event_id": event_id,
         "fi": acc.get("fi") or header.get("fi") or "",
