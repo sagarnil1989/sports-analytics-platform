@@ -140,7 +140,7 @@ resource "azurerm_data_factory_linked_service_azure_databricks" "main" {
 resource "azurerm_data_factory_pipeline" "build_ended_match" {
   name            = "pl_build_ended_match"
   data_factory_id = data.azurerm_data_factory.main.id
-  description     = "Daily: silver parse → gold rebuild → ended index. Each activity depends on the previous succeeding."
+  description     = "Daily (Batch): landing index → silver parse → gold rebuild → ended index → update watermark. Hypothesis runs separately via pl_hypothesis."
 
   activities_json = jsonencode([
     {
@@ -159,7 +159,7 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
           referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
           type          = "LinkedServiceReference"
         }
-        folderPath         = "batch-scripts"
+        folderPath          = "batch-scripts"
         retentionTimeInDays = 1
         extendedProperties = {
           KEY_VAULT_URI              = local.kv_uri
@@ -190,7 +190,7 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
           referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
           type          = "LinkedServiceReference"
         }
-        folderPath         = "batch-scripts"
+        folderPath          = "batch-scripts"
         retentionTimeInDays = 1
         extendedProperties = {
           KEY_VAULT_URI              = local.kv_uri
@@ -221,7 +221,7 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
           referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
           type          = "LinkedServiceReference"
         }
-        folderPath         = "batch-scripts"
+        folderPath          = "batch-scripts"
         retentionTimeInDays = 1
         extendedProperties = {
           KEY_VAULT_URI              = local.kv_uri
@@ -252,7 +252,7 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
           referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
           type          = "LinkedServiceReference"
         }
-        folderPath         = "batch-scripts"
+        folderPath          = "batch-scripts"
         retentionTimeInDays = 1
         extendedProperties = {
           KEY_VAULT_URI              = local.kv_uri
@@ -262,10 +262,11 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
       }
     },
     {
-      name = "hypothesis_inn2_over6"
+      # Advance the watermark only after all processing has succeeded.
+      name = "update_watermark"
       type = "Custom"
       policy = {
-        timeout = "0.01:00:00"
+        timeout = "0.00:10:00"
       }
       dependsOn = [
         {
@@ -278,12 +279,89 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
         type          = "LinkedServiceReference"
       }
       typeProperties = {
+        command = "python3 update_watermark.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath          = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
+        }
+      }
+    },
+    {
+      # Runs on failure: delete landing/{run_id}/index.json so the next run
+      # re-scans from the unchanged watermark. Depends on update_watermark with
+      # ["Failed","Skipped"] so it fires whenever any upstream step failed.
+      name = "cleanup_landing"
+      type = "Custom"
+      policy = {
+        timeout = "0.00:10:00"
+      }
+      dependsOn = [
+        {
+          activity             = "update_watermark"
+          dependencyConditions = ["Failed", "Skipped"]
+        }
+      ]
+      linkedServiceName = {
+        referenceName = "ls_azure_batch"
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        command = "python3 cleanup_landing.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath          = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
+        }
+      }
+    }
+  ])
+
+  depends_on = [azapi_resource.adf_ls_azure_batch]
+}
+
+# ---------------------------------------------------------------------------
+# ADF — pipeline: pl_hypothesis (Batch, manual trigger)
+#
+# Runs both hypothesis scripts in parallel against already-built gold data.
+# Run this AFTER pl_build_ended_match has succeeded.
+# ---------------------------------------------------------------------------
+
+resource "azurerm_data_factory_pipeline" "hypothesis" {
+  name            = "pl_hypothesis"
+  data_factory_id = data.azurerm_data_factory.main.id
+  description     = "Manual (Batch): runs both hypothesis scripts in parallel. Use after pl_build_ended_match has completed."
+
+  activities_json = jsonencode([
+    {
+      name = "hypothesis_inn2_over6"
+      type = "Custom"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      linkedServiceName = {
+        referenceName = "ls_azure_batch"
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
         command = "python3 hypothesis_inn2_over6.py"
         resourceLinkedService = {
           referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
           type          = "LinkedServiceReference"
         }
-        folderPath         = "batch-scripts"
+        folderPath          = "batch-scripts"
         retentionTimeInDays = 1
         extendedProperties = {
           KEY_VAULT_URI              = local.kv_uri
@@ -298,12 +376,6 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
       policy = {
         timeout = "0.01:00:00"
       }
-      dependsOn = [
-        {
-          activity             = "discover_cricket_ended"
-          dependencyConditions = ["Succeeded"]
-        }
-      ]
       linkedServiceName = {
         referenceName = "ls_azure_batch"
         type          = "LinkedServiceReference"
@@ -314,7 +386,7 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
           referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
           type          = "LinkedServiceReference"
         }
-        folderPath         = "batch-scripts"
+        folderPath          = "batch-scripts"
         retentionTimeInDays = 1
         extendedProperties = {
           KEY_VAULT_URI              = local.kv_uri
@@ -371,7 +443,7 @@ resource "azurerm_data_factory_trigger_schedule" "build_ended_match" {
 resource "azurerm_data_factory_pipeline" "build_ended_match_databricks" {
   name            = "pl_build_ended_match_databricks"
   data_factory_id = data.azurerm_data_factory.main.id
-  description     = "Daily (Databricks): landing index → silver parse → gold rebuild → ended index. Mirror of pl_build_ended_match."
+  description     = "Daily (Databricks): landing index → silver parse → gold rebuild → ended index → update watermark. Mirror of pl_build_ended_match. Hypothesis runs separately via pl_hypothesis_databricks."
 
   activities_json = jsonencode([
     {
@@ -464,14 +536,14 @@ resource "azurerm_data_factory_pipeline" "build_ended_match_databricks" {
       }
     },
     {
-      name = "hypothesis_inn2_over6"
+      name = "update_watermark"
       type = "DatabricksNotebook"
       linkedServiceName = {
         referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
         type          = "LinkedServiceReference"
       }
       policy = {
-        timeout = "0.01:00:00"
+        timeout = "0.00:10:00"
       }
       dependsOn = [
         {
@@ -480,30 +552,31 @@ resource "azurerm_data_factory_pipeline" "build_ended_match_databricks" {
         }
       ]
       typeProperties = {
-        notebookPath = "/cricket-pipeline/hypothesis/inn2_over6"
+        notebookPath = "/cricket-pipeline/update_watermark"
         baseParameters = {
-          run_id = { value = "@pipeline().RunId", type = "Expression" }
+          run_id   = { value = "@pipeline().RunId", type = "Expression" }
+          event_id = ""
         }
       }
     },
     {
-      name = "hypothesis_timeout_wicket"
+      name = "cleanup_landing"
       type = "DatabricksNotebook"
       linkedServiceName = {
         referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
         type          = "LinkedServiceReference"
       }
       policy = {
-        timeout = "0.01:00:00"
+        timeout = "0.00:10:00"
       }
       dependsOn = [
         {
-          activity             = "discover_cricket_ended"
-          dependencyConditions = ["Succeeded"]
+          activity             = "update_watermark"
+          dependencyConditions = ["Failed", "Skipped"]
         }
       ]
       typeProperties = {
-        notebookPath = "/cricket-pipeline/hypothesis/timeout_wicket"
+        notebookPath = "/cricket-pipeline/cleanup_landing"
         baseParameters = {
           run_id = { value = "@pipeline().RunId", type = "Expression" }
         }
@@ -533,7 +606,7 @@ resource "azurerm_data_factory_trigger_schedule" "build_ended_match_databricks" 
 resource "azurerm_data_factory_pipeline" "backfill" {
   name            = "pl_backfill"
   data_factory_id = data.azurerm_data_factory.main.id
-  description     = "Manual backfill: silver then gold. Pass event_id for one match, or leave empty for full backfill."
+  description     = "Manual backfill (Batch): landing index → silver parse → gold rebuild → update watermark. Pass event_id for one match, or empty for full backfill."
 
   parameters = {
     event_id = ""
@@ -541,11 +614,43 @@ resource "azurerm_data_factory_pipeline" "backfill" {
 
   activities_json = jsonencode([
     {
+      name = "index_new_snapshots"
+      type = "Custom"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      linkedServiceName = {
+        referenceName = "ls_azure_batch"
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        command = "python3 index_new_snapshots.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath          = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
+          EVENT_ID                   = "@pipeline().parameters.event_id"
+        }
+      }
+    },
+    {
       name = "bronze_to_silver"
       type = "Custom"
       policy = {
         timeout = "0.04:00:00"
       }
+      dependsOn = [
+        {
+          activity             = "index_new_snapshots"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
       linkedServiceName = {
         referenceName = "ls_azure_batch"
         type          = "LinkedServiceReference"
@@ -556,11 +661,12 @@ resource "azurerm_data_factory_pipeline" "backfill" {
           referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
           type          = "LinkedServiceReference"
         }
-        folderPath         = "batch-scripts"
+        folderPath          = "batch-scripts"
         retentionTimeInDays = 1
         extendedProperties = {
           KEY_VAULT_URI              = local.kv_uri
           MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
           EVENT_ID                   = "@pipeline().parameters.event_id"
         }
       }
@@ -587,17 +693,268 @@ resource "azurerm_data_factory_pipeline" "backfill" {
           referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
           type          = "LinkedServiceReference"
         }
-        folderPath         = "batch-scripts"
+        folderPath          = "batch-scripts"
         retentionTimeInDays = 1
         extendedProperties = {
           KEY_VAULT_URI              = local.kv_uri
           MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
           EVENT_ID                   = "@pipeline().parameters.event_id"
+        }
+      }
+    },
+    {
+      # update_watermark is a no-op when EVENT_ID is set (backfill mode).
+      name = "update_watermark"
+      type = "Custom"
+      policy = {
+        timeout = "0.00:10:00"
+      }
+      dependsOn = [
+        {
+          activity             = "silver_to_gold"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      linkedServiceName = {
+        referenceName = "ls_azure_batch"
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        command = "python3 update_watermark.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath          = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
+          EVENT_ID                   = "@pipeline().parameters.event_id"
+        }
+      }
+    },
+    {
+      name = "cleanup_landing"
+      type = "Custom"
+      policy = {
+        timeout = "0.00:10:00"
+      }
+      dependsOn = [
+        {
+          activity             = "update_watermark"
+          dependencyConditions = ["Failed", "Skipped"]
+        }
+      ]
+      linkedServiceName = {
+        referenceName = "ls_azure_batch"
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        command = "python3 cleanup_landing.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath          = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
         }
       }
     }
   ])
 
   depends_on = [azapi_resource.adf_ls_azure_batch]
+}
+
+# ---------------------------------------------------------------------------
+# ADF — pipeline: backfill (Databricks version)
+# Manual trigger only. Same logic as pl_backfill but runs on Databricks.
+# ---------------------------------------------------------------------------
+
+resource "azurerm_data_factory_pipeline" "backfill_databricks" {
+  name            = "pl_backfill_databricks"
+  data_factory_id = data.azurerm_data_factory.main.id
+  description     = "Manual backfill (Databricks): landing index → silver parse → gold rebuild → update watermark. Mirror of pl_backfill."
+
+  parameters = {
+    event_id = ""
+  }
+
+  activities_json = jsonencode([
+    {
+      name = "index_new_snapshots"
+      type = "DatabricksNotebook"
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/index_new_snapshots"
+        baseParameters = {
+          run_id   = { value = "@pipeline().RunId", type = "Expression" }
+          event_id = { value = "@pipeline().parameters.event_id", type = "Expression" }
+        }
+      }
+    },
+    {
+      name = "bronze_to_silver"
+      type = "DatabricksNotebook"
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      policy = {
+        timeout = "0.04:00:00"
+      }
+      dependsOn = [
+        {
+          activity             = "index_new_snapshots"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/bronze_to_silver"
+        baseParameters = {
+          run_id   = { value = "@pipeline().RunId", type = "Expression" }
+          event_id = { value = "@pipeline().parameters.event_id", type = "Expression" }
+        }
+      }
+    },
+    {
+      name = "silver_to_gold"
+      type = "DatabricksNotebook"
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      policy = {
+        timeout = "0.04:00:00"
+      }
+      dependsOn = [
+        {
+          activity             = "bronze_to_silver"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/silver_to_gold"
+        baseParameters = {
+          run_id   = { value = "@pipeline().RunId", type = "Expression" }
+          event_id = { value = "@pipeline().parameters.event_id", type = "Expression" }
+        }
+      }
+    },
+    {
+      name = "update_watermark"
+      type = "DatabricksNotebook"
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      policy = {
+        timeout = "0.00:10:00"
+      }
+      dependsOn = [
+        {
+          activity             = "silver_to_gold"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/update_watermark"
+        baseParameters = {
+          run_id   = { value = "@pipeline().RunId", type = "Expression" }
+          event_id = { value = "@pipeline().parameters.event_id", type = "Expression" }
+        }
+      }
+    },
+    {
+      name = "cleanup_landing"
+      type = "DatabricksNotebook"
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      policy = {
+        timeout = "0.00:10:00"
+      }
+      dependsOn = [
+        {
+          activity             = "update_watermark"
+          dependencyConditions = ["Failed", "Skipped"]
+        }
+      ]
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/cleanup_landing"
+        baseParameters = {
+          run_id = { value = "@pipeline().RunId", type = "Expression" }
+        }
+      }
+    }
+  ])
+
+  depends_on = [azurerm_data_factory_linked_service_azure_databricks.main]
+}
+
+# ---------------------------------------------------------------------------
+# ADF — pipeline: hypothesis (Databricks, manual trigger)
+#
+# Runs the two hypothesis notebooks in parallel after a completed
+# pl_build_ended_match run. Intended as a standalone re-run when only
+# hypothesis logic needs refreshing without re-processing bronze/silver/gold.
+# ---------------------------------------------------------------------------
+
+resource "azurerm_data_factory_pipeline" "hypothesis_databricks" {
+  name            = "pl_hypothesis_databricks"
+  data_factory_id = data.azurerm_data_factory.main.id
+  description     = "Manual (Databricks): runs both hypothesis notebooks in parallel. Use after pl_build_ended_match has completed."
+
+  activities_json = jsonencode([
+    {
+      name = "hypothesis_inn2_over6"
+      type = "DatabricksNotebook"
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/hypothesis/inn2_over6"
+        baseParameters = {
+          run_id = { value = "@pipeline().RunId", type = "Expression" }
+        }
+      }
+    },
+    {
+      name = "hypothesis_timeout_wicket"
+      type = "DatabricksNotebook"
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/hypothesis/timeout_wicket"
+        baseParameters = {
+          run_id = { value = "@pipeline().RunId", type = "Expression" }
+        }
+      }
+    }
+  ])
+
+  depends_on = [azurerm_data_factory_linked_service_azure_databricks.main]
 }
 

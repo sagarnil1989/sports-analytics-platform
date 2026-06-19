@@ -182,3 +182,15 @@ resource "databricks_notebook" "index_new_snapshots" {
   path     = "/cricket-pipeline/index_new_snapshots"
   language = "PYTHON"
 }
+
+resource "databricks_notebook" "update_watermark" {
+  source   = "${path.module}/notebooks/update_watermark.py"
+  path     = "/cricket-pipeline/update_watermark"
+  language = "PYTHON"
+}
+
+resource "databricks_notebook" "cleanup_landing" {
+  source   = "${path.module}/notebooks/cleanup_landing.py"
+  path     = "/cricket-pipeline/cleanup_landing"
+  language = "PYTHON"
+}

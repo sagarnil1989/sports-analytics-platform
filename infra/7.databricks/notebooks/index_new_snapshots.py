@@ -58,11 +58,9 @@ scan_start_utc, new_entries, blobs_scanned = landing_index.scan_bronze_to_landin
     bronze, landing_container, sport_id, run_id, event_id_filter=event_id_filter or None
 )
 
-if not event_id_filter:
-    landing_index.set_watermark(landing_container, run_id, scan_start_utc, new_entries, blobs_scanned)
-    print(f"[index_new_snapshots] Watermark updated to {scan_start_utc.isoformat()}")
-else:
-    print(f"[index_new_snapshots] Backfill mode — watermark NOT updated")
+# Watermark is NOT updated here. The update_watermark notebook runs last in the pipeline.
+# On failure, cleanup_landing deletes the index so the next run re-scans from the unchanged watermark.
+print(f"[index_new_snapshots] Landing index written — watermark update deferred to update_watermark step")
 
 elapsed = (datetime.now(timezone.utc) - script_start_utc).total_seconds()
 print(f"\n── Done ── {elapsed:.1f}s  |  {blobs_scanned} blobs scanned  |  {new_entries} entries written")

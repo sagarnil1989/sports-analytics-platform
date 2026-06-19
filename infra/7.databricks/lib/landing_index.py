@@ -4,11 +4,21 @@ landing_index — Landing zone shared library (Azure Batch + Databricks).
 SIDAP-inspired pattern: index new bronze manifests into a per-run landing index
 file so that bronze_to_silver reads only the delta, not all of bronze.
 
+Watermark lifecycle (failure-safe):
+  1. index_new_snapshots  → scan_bronze_to_landing() writes landing/{run_id}/index.json
+                            — watermark NOT updated yet
+  2. bronze_to_silver / silver_to_gold / discover_cricket_ended run
+  3. update_watermark     → update_watermark_from_index() reads index.json, advances watermark
+  4. on ANY failure       → cleanup_landing() deletes landing/{run_id}/index.json
+                            → since watermark was never advanced, next run re-scans
+
 Functions:
-  get_watermark(landing)                          → (cutoff_dt, run_id) | (None, None)
-  set_watermark(landing, run_id, cutoff, n, n2)   → None
-  scan_bronze_to_landing(bronze, landing, ...)    → (scan_start_utc, n_entries, n_blobs)
-  read_landing_index(landing, run_id)             → {event_id: [(path, lm, fi, sid)...]}
+  get_watermark(landing)                           → (cutoff_dt, run_id) | (None, None)
+  set_watermark(landing, run_id, cutoff, n, n2)    → None
+  update_watermark_from_index(landing, run_id)     → None  (reads index.json for metadata)
+  scan_bronze_to_landing(bronze, landing, ...)     → (scan_start_utc, n_entries, n_blobs)
+  read_landing_index(landing, run_id)              → {event_id: [(path, lm, fi, sid)...]}
+  delete_landing_index(landing, run_id)            → None  (cleanup on failure)
 """
 
 import json
@@ -98,12 +108,44 @@ def scan_bronze_to_landing(bronze, landing, sport_id, run_id, event_id_filter=No
             "run_id":         run_id,
             "indexed_at_utc": scan_start_utc.isoformat(),
             "entry_count":    len(entries),
+            "blobs_scanned":  blobs_scanned,
             "entries":        entries,
         }).encode(),
         overwrite=True,
     )
     print(f"[index] Scanned {blobs_scanned} manifests → wrote {len(entries)} entries → landing/{index_path}")
     return scan_start_utc, len(entries), blobs_scanned
+
+
+def update_watermark_from_index(landing, run_id):
+    """
+    Read landing/{run_id}/index.json and advance the watermark.
+    Called by the update_watermark step at the END of a successful pipeline run.
+    Skipped in backfill mode (caller checks EVENT_ID and exits early).
+    """
+    index_path = f"{run_id}/index.json"
+    raw = json.loads(landing.get_blob_client(index_path).download_blob().readall())
+    scan_start_utc = datetime.fromisoformat(raw["indexed_at_utc"])
+    new_entries    = raw.get("entry_count", 0)
+    blobs_scanned  = raw.get("blobs_scanned", 0)
+    set_watermark(landing, run_id, scan_start_utc, new_entries, blobs_scanned)
+    print(f"[update_watermark] Watermark advanced to {scan_start_utc.isoformat()} "
+          f"(entries={new_entries}, blobs={blobs_scanned})")
+
+
+def delete_landing_index(landing, run_id):
+    """
+    Delete landing/{run_id}/index.json.
+    Called by the cleanup_landing step on any pipeline failure so the next run
+    re-scans from the unchanged watermark.
+    """
+    index_path = f"{run_id}/index.json"
+    try:
+        landing.get_blob_client(index_path).delete_blob()
+        print(f"[cleanup_landing] Deleted landing/{index_path}")
+    except Exception as ex:
+        # Blob may not exist if index_new_snapshots itself failed — that's fine.
+        print(f"[cleanup_landing] Delete skipped (blob may not exist): {ex}")
 
 
 def read_landing_index(landing, run_id):
