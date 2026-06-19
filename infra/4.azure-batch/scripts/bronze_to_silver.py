@@ -18,6 +18,16 @@ from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# ADF Custom Activity writes extendedProperties to activity.json in the working
+# directory. Inject them into os.environ so the rest of the script reads them
+# the same way regardless of how ADF passes them.
+_activity_json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "activity.json")
+if os.path.exists(_activity_json_path):
+    with open(_activity_json_path) as _f:
+        _ext = json.load(_f).get("typeProperties", {}).get("extendedProperties", {})
+    for _k, _v in _ext.items():
+        os.environ.setdefault(_k, str(_v))
+
 from azure.identity import ManagedIdentityCredential
 from azure.keyvault.secrets import SecretClient
 from azure.storage.blob import BlobServiceClient
@@ -41,7 +51,9 @@ silver = svc.get_container_client("silver")
 QUIET_THRESHOLD_MINUTES = 60
 PARALLEL_WORKERS        = 128
 
+run_id          = os.environ.get("RUN_ID", "unknown")
 event_id_filter = os.environ.get("EVENT_ID", "").strip()
+print(f"run_id: {run_id}")
 print(f"event_id filter: {event_id_filter or '(all quiet matches)'}")
 
 # ---------------------------------------------------------------------------
@@ -61,24 +73,15 @@ def _dl_required(container, path):
     return data
 
 # ---------------------------------------------------------------------------
-# Step 1+2: Scan bronze manifests AND silver markers in parallel
+# Step 1+2: Read landing index AND silver markers in parallel
 # ---------------------------------------------------------------------------
 
-def _scan_bronze():
-    result = defaultdict(list)
-    for blob in bronze.list_blobs(name_starts_with=f"betsapi/inplay_snapshot/sport_id={sport_id}/"):
-        if not blob.name.endswith("/manifest.json"):
-            continue
-        parts = blob.name.split("/")
-        eid   = next((p[9:]  for p in parts if p.startswith("event_id=")),    None)
-        fi    = next((p[3:]  for p in parts if p.startswith("fi=")),          None)
-        sid   = next((p[12:] for p in parts if p.startswith("snapshot_id=")), None)
-        if not eid or not sid:
-            continue
-        if event_id_filter and eid != event_id_filter:
-            continue
-        result[eid].append((blob.name, blob.last_modified, fi or "", sid))
-    return result
+from landing_index import read_landing_index
+
+landing = svc.get_container_client("landing")
+
+def _read_landing():
+    return read_landing_index(landing, run_id)
 
 def _scan_complete_events():
     complete = set()
@@ -89,16 +92,16 @@ def _scan_complete_events():
     return complete
 
 t0 = time.monotonic()
-print("Scanning bronze + silver in parallel...")
+print("Reading landing index + silver markers in parallel...")
 with ThreadPoolExecutor(max_workers=2) as pool:
-    f_bronze   = pool.submit(_scan_bronze)
+    f_landing  = pool.submit(_read_landing)
     f_complete = pool.submit(_scan_complete_events)
-    bronze_events   = f_bronze.result()
+    bronze_events   = f_landing.result()
     complete_events = f_complete.result()
 
 total_events    = len(bronze_events)
 total_manifests = sum(len(v) for v in bronze_events.values())
-print(f"  bronze   : {total_events} events | {total_manifests} snapshots")
+print(f"  landing  : {total_events} events | {total_manifests} snapshots (since last watermark)")
 print(f"  complete : {len(complete_events)} events already done (will skip)")
 print(f"  listing took {time.monotonic()-t0:.1f}s")
 
@@ -211,7 +214,8 @@ def _maybe_write_complete_marker(eid: str, success_count: int) -> None:
         return
     now_iso = datetime.now(timezone.utc).isoformat()
     silver.get_blob_client(f"control/complete/event_id={eid}.json").upload_blob(
-        json.dumps({"completed_at_utc": now_iso, "snapshot_count": success_count}),
+        json.dumps({"completed_at_utc": now_iso, "snapshot_count": success_count,
+                    "run_id": run_id, "pipeline": "pl_build_ended_match"}),
         overwrite=True,
     )
     complete_written += 1

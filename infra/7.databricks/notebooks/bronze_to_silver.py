@@ -12,7 +12,7 @@ subprocess.run(["pip", "install", "--quiet", "azure-storage-blob", "azure-storag
 
 # COMMAND ----------
 
-import sys, os, json, time
+import sys, os, json, time, types
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
@@ -20,12 +20,24 @@ from azure.storage.blob import BlobServiceClient
 
 sys.path.insert(0, "/dbfs/FileStore/cricket-pipeline/src/")
 
+def _load_from_dbfs(module_name, dbfs_path):
+    """Read module source from DBFS via REST API (no FUSE mount, works on Shared clusters)."""
+    content = dbutils.fs.head(dbfs_path, 500000)
+    mod = types.ModuleType(module_name)
+    mod.__file__ = dbfs_path
+    sys.modules[module_name] = mod
+    exec(compile(content, dbfs_path, "exec"), mod.__dict__)
+    return mod
+
+_src = "dbfs:/FileStore/cricket-pipeline/src"
+
 conn_str = dbutils.secrets.get("cricket-pipeline", "DATA_STORAGE_CONNECTION_STRING")
 sport_id = dbutils.secrets.get("cricket-pipeline", "SPORT_ID")
 
-svc    = BlobServiceClient.from_connection_string(conn_str)
-bronze = svc.get_container_client("bronze")
-silver = svc.get_container_client("silver")
+svc     = BlobServiceClient.from_connection_string(conn_str)
+bronze  = svc.get_container_client("bronze")
+silver  = svc.get_container_client("silver")
+landing = svc.get_container_client("landing")
 
 QUIET_THRESHOLD_MINUTES = 60
 PARALLEL_WORKERS        = 128  # IO-bound blob ops — threads >> cores is correct for network-bound work
@@ -43,52 +55,57 @@ def _dl_required(container, path):
     return data
 
 # COMMAND ----------
-# ── STEP 0: Read event_id parameter ─────────────────────────────────────────
+# ── STEP 0: Read parameters ───────────────────────────────────────────────────
 
-event_id_filter = dbutils.widgets.get("event_id").strip() if dbutils.widgets.getAll().get("event_id") else ""
+dbutils.widgets.text("event_id", "")
+dbutils.widgets.text("run_id",   "")
+
+try:
+    event_id_filter = dbutils.widgets.get("event_id").strip()
+except Exception:
+    event_id_filter = ""
+
+try:
+    run_id = dbutils.widgets.get("run_id").strip()
+except Exception:
+    run_id = ""
+
+if not run_id:
+    run_id = "manual-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+
+print(f"run_id: {run_id}")
 print(f"event_id filter: {event_id_filter or '(all quiet matches)'}")
 
 # COMMAND ----------
-# ── STEP 1 + 2: Scan bronze manifests AND silver markers in parallel ─────────
-# Both are full container listings — running them concurrently halves the wait.
+# ── STEP 1 + 2: Read landing index AND silver markers in parallel ─────────────
 
 from concurrent.futures import ThreadPoolExecutor as _ScanPool
 
-def _scan_bronze():
-    result = defaultdict(list)
-    for blob in bronze.list_blobs(name_starts_with=f"betsapi/inplay_snapshot/sport_id={sport_id}/"):
-        if not blob.name.endswith("/manifest.json"):
-            continue
-        parts = blob.name.split("/")
-        eid   = next((p[9:]  for p in parts if p.startswith("event_id=")),    None)
-        fi    = next((p[3:]  for p in parts if p.startswith("fi=")),          None)
-        sid   = next((p[12:] for p in parts if p.startswith("snapshot_id=")), None)
-        if not eid or not sid:
-            continue
-        if event_id_filter and eid != event_id_filter:
-            continue
-        result[eid].append((blob.name, blob.last_modified, fi or "", sid))
-    return result
+_load_from_dbfs("landing_index", f"{_src}/landing_index.py")
+from landing_index import read_landing_index
+
+def _read_landing():
+    return read_landing_index(landing, run_id)
 
 def _scan_complete_events():
     complete = set()
     for blob in silver.list_blobs(name_starts_with="control/complete/"):
         fname = blob.name.rsplit("/", 1)[-1]
         if fname.startswith("event_id=") and fname.endswith(".json"):
-            complete.add(fname[9:-5])  # strip "event_id=" and ".json"
+            complete.add(fname[9:-5])
     return complete
 
 t0 = time.monotonic()
-print("Scanning bronze + silver in parallel...")
+print("Reading landing index + silver markers in parallel...")
 with _ScanPool(max_workers=2) as pool:
-    f_bronze   = pool.submit(_scan_bronze)
+    f_landing  = pool.submit(_read_landing)
     f_complete = pool.submit(_scan_complete_events)
-    bronze_events   = f_bronze.result()
+    bronze_events   = f_landing.result()
     complete_events = f_complete.result()
 
 total_events    = len(bronze_events)
 total_manifests = sum(len(v) for v in bronze_events.values())
-print(f"  bronze   : {total_events} events | {total_manifests} snapshots")
+print(f"  landing  : {total_events} events | {total_manifests} snapshots (since last watermark)")
 print(f"  complete : {len(complete_events)} events already done (will skip)")
 print(f"  listing took {time.monotonic()-t0:.1f}s")
 
@@ -239,7 +256,8 @@ for eid, success_count in succeeded_by_event.items():
     if success_count != expected_by_event[eid]:
         continue
     silver.get_blob_client(f"control/complete/event_id={eid}.json").upload_blob(
-        json.dumps({"completed_at_utc": now_iso, "snapshot_count": success_count}),
+        json.dumps({"completed_at_utc": now_iso, "snapshot_count": success_count,
+                    "run_id": run_id, "pipeline": "pl_build_ended_match_databricks"}),
         overwrite=True,
     )
     complete_written += 1

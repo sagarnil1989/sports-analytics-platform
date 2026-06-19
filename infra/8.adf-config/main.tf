@@ -144,11 +144,42 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
 
   activities_json = jsonencode([
     {
+      name = "index_new_snapshots"
+      type = "Custom"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      linkedServiceName = {
+        referenceName = "ls_azure_batch"
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        command = "python3 index_new_snapshots.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath         = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
+        }
+      }
+    },
+    {
       name = "bronze_to_silver"
       type = "Custom"
       policy = {
         timeout = "0.08:00:00"
       }
+      dependsOn = [
+        {
+          activity             = "index_new_snapshots"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
       linkedServiceName = {
         referenceName = "ls_azure_batch"
         type          = "LinkedServiceReference"
@@ -164,6 +195,7 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
         extendedProperties = {
           KEY_VAULT_URI              = local.kv_uri
           MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
         }
       }
     },
@@ -194,6 +226,7 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
         extendedProperties = {
           KEY_VAULT_URI              = local.kv_uri
           MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
         }
       }
     },
@@ -224,6 +257,7 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
         extendedProperties = {
           KEY_VAULT_URI              = local.kv_uri
           MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
         }
       }
     },
@@ -254,6 +288,7 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
         extendedProperties = {
           KEY_VAULT_URI              = local.kv_uri
           MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
         }
       }
     },
@@ -284,6 +319,7 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
         extendedProperties = {
           KEY_VAULT_URI              = local.kv_uri
           MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
         }
       }
     }
@@ -318,6 +354,181 @@ resource "azurerm_data_factory_trigger_schedule" "build_ended_match" {
 #
 # Both activities receive the same event_id parameter.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# ADF — pipeline: build ended match — Databricks variant (daily scheduled)
+#
+# Mirror of pl_build_ended_match but running on Databricks job clusters.
+# Activity 0: index_new_snapshots   — delta-indexes new bronze manifests into landing/
+# Activity 1: bronze_to_silver      — reads landing index, writes silver
+# Activity 2: silver_to_gold        — rebuilds gold from silver
+# Activity 3: discover_cricket_ended — scans gold tracker files, writes ended index
+# Activity 4a/4b: hypothesis notebooks — parallel, depend on Activity 3
+#
+# Trigger is created but deactivated — activate manually when switching pipelines.
+# ---------------------------------------------------------------------------
+
+resource "azurerm_data_factory_pipeline" "build_ended_match_databricks" {
+  name            = "pl_build_ended_match_databricks"
+  data_factory_id = data.azurerm_data_factory.main.id
+  description     = "Daily (Databricks): landing index → silver parse → gold rebuild → ended index. Mirror of pl_build_ended_match."
+
+  activities_json = jsonencode([
+    {
+      name = "index_new_snapshots"
+      type = "DatabricksNotebook"
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/index_new_snapshots"
+        baseParameters = {
+          run_id   = { value = "@pipeline().RunId", type = "Expression" }
+          event_id = ""
+        }
+      }
+    },
+    {
+      name = "bronze_to_silver"
+      type = "DatabricksNotebook"
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      policy = {
+        timeout = "0.08:00:00"
+      }
+      dependsOn = [
+        {
+          activity             = "index_new_snapshots"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/bronze_to_silver"
+        baseParameters = {
+          run_id   = { value = "@pipeline().RunId", type = "Expression" }
+          event_id = ""
+        }
+      }
+    },
+    {
+      name = "silver_to_gold"
+      type = "DatabricksNotebook"
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      policy = {
+        timeout = "0.04:00:00"
+      }
+      dependsOn = [
+        {
+          activity             = "bronze_to_silver"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/silver_to_gold"
+        baseParameters = {
+          run_id   = { value = "@pipeline().RunId", type = "Expression" }
+          event_id = ""
+        }
+      }
+    },
+    {
+      name = "discover_cricket_ended"
+      type = "DatabricksNotebook"
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      dependsOn = [
+        {
+          activity             = "silver_to_gold"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/discover_cricket_ended"
+        baseParameters = {
+          run_id = { value = "@pipeline().RunId", type = "Expression" }
+        }
+      }
+    },
+    {
+      name = "hypothesis_inn2_over6"
+      type = "DatabricksNotebook"
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      dependsOn = [
+        {
+          activity             = "discover_cricket_ended"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/hypothesis/inn2_over6"
+        baseParameters = {
+          run_id = { value = "@pipeline().RunId", type = "Expression" }
+        }
+      }
+    },
+    {
+      name = "hypothesis_timeout_wicket"
+      type = "DatabricksNotebook"
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      dependsOn = [
+        {
+          activity             = "discover_cricket_ended"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/hypothesis/timeout_wicket"
+        baseParameters = {
+          run_id = { value = "@pipeline().RunId", type = "Expression" }
+        }
+      }
+    }
+  ])
+
+  depends_on = [azurerm_data_factory_linked_service_azure_databricks.main]
+}
+
+resource "azurerm_data_factory_trigger_schedule" "build_ended_match_databricks" {
+  name            = "trigger_build_ended_match_databricks"
+  data_factory_id = data.azurerm_data_factory.main.id
+  pipeline_name   = azurerm_data_factory_pipeline.build_ended_match_databricks.name
+
+  interval  = 1
+  frequency = "Day"
+
+  schedule {
+    hours   = [1]   # 01:00 UTC = 02:00 CET / 03:00 CEST
+    minutes = [0]
+  }
+
+  activated = false
+}
 
 resource "azurerm_data_factory_pipeline" "backfill" {
   name            = "pl_backfill"

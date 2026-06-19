@@ -67,13 +67,14 @@ resource "azurerm_batch_pool" "main" {
   auto_scale {
     evaluation_interval = "PT5M"
     formula             = <<-EOT
-      $TargetDedicatedNodes = ($PendingTasks.GetSample(1) > 0) ? 1 : 0;
+      $tasks = max($PendingTasks.GetSample(TimeInterval_Minute * 5));
+      $TargetDedicatedNodes = ($tasks > 0) ? 1 : 0;
       $NodeDeallocationOption = taskcompletion;
     EOT
   }
 
   start_task {
-    command_line     = "bash -c 'pip3 install azure-storage-blob azure-identity azure-keyvault-secrets requests'"
+    command_line     = "/bin/bash -c 'apt-get update -qq && apt-get install -y -qq python3-pip && pip3 install azure-storage-blob azure-identity azure-keyvault-secrets requests'"
     wait_for_success = true
 
     user_identity {
@@ -228,4 +229,20 @@ resource "azurerm_storage_blob" "lib_tracker_writer" {
   type                 = "Block"
   source               = "${local.lib_path}/tracker_writer.py"
   content_md5          = filemd5("${local.lib_path}/tracker_writer.py")
+}
+
+resource "azurerm_storage_blob" "lib_landing_index" {
+  name                 = "landing_index.py"
+  storage_container_id = azurerm_storage_container.scripts.id
+  type                 = "Block"
+  source               = "${local.lib_path}/landing_index.py"
+  content_md5          = filemd5("${local.lib_path}/landing_index.py")
+}
+
+resource "azurerm_storage_blob" "script_index_new_snapshots" {
+  name                 = "index_new_snapshots.py"
+  storage_container_id = azurerm_storage_container.scripts.id
+  type                 = "Block"
+  source               = "${path.module}/scripts/index_new_snapshots.py"
+  content_md5          = filemd5("${path.module}/scripts/index_new_snapshots.py")
 }

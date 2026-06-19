@@ -154,6 +154,11 @@ resource "databricks_dbfs_file" "hypothesis_py" {
   path   = "${local.dbfs_src_path}/hypothesis.py"
 }
 
+resource "databricks_dbfs_file" "landing_index_py" {
+  source = "${path.module}/lib/landing_index.py"
+  path   = "${local.dbfs_src_path}/landing_index.py"
+}
+
 resource "databricks_notebook" "hypothesis_inn2_over6" {
   source   = "${path.module}/notebooks/hypothesis_inn2_over6.py"
   path     = "/cricket-pipeline/hypothesis/inn2_over6"
@@ -169,5 +174,11 @@ resource "databricks_notebook" "hypothesis_timeout_wicket" {
 resource "databricks_notebook" "analysis_ended_match_table" {
   source   = "${path.module}/notebooks/analysis_ended_match_table.py"
   path     = "/cricket-pipeline/analysis/ended_match_table"
+  language = "PYTHON"
+}
+
+resource "databricks_notebook" "index_new_snapshots" {
+  source   = "${path.module}/notebooks/index_new_snapshots.py"
+  path     = "/cricket-pipeline/index_new_snapshots"
   language = "PYTHON"
 }

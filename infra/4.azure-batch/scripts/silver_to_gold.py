@@ -16,6 +16,13 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+_activity_json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "activity.json")
+if os.path.exists(_activity_json_path):
+    with open(_activity_json_path) as _f:
+        _ext = json.load(_f).get("typeProperties", {}).get("extendedProperties", {})
+    for _k, _v in _ext.items():
+        os.environ.setdefault(_k, str(_v))
+
 from azure.identity import ManagedIdentityCredential
 from azure.keyvault.secrets import SecretClient
 from azure.storage.blob import BlobServiceClient
