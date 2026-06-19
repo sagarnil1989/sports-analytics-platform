@@ -71,6 +71,53 @@ resource "azurerm_role_assignment" "adf_kv_secrets_user" {
   principal_id         = data.azurerm_data_factory.main.identity[0].principal_id
 }
 
+# Grant ADF managed identity write access to blob storage.
+# Required for the Web Activity that writes watermarks.json via storage REST API.
+resource "azurerm_role_assignment" "adf_storage_blob_contributor" {
+  scope                = data.azurerm_storage_account.data_lake.id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = data.azurerm_data_factory.main.identity[0].principal_id
+}
+
+# ---------------------------------------------------------------------------
+# ADF — parameterized dataset for the landing index blob
+#
+# Used by the native Delete activity (cleanup_landing) to delete
+# landing/{run_id}/index.json without any compute. The Delete activity
+# handles "blob not found" gracefully — no error if index_new_snapshots
+# itself failed before writing the file.
+# ---------------------------------------------------------------------------
+
+resource "azapi_resource" "adf_dataset_landing_index" {
+  type      = "Microsoft.DataFactory/factories/datasets@2018-06-01"
+  name      = "ds_landing_index"
+  parent_id = data.azurerm_data_factory.main.id
+
+  body = {
+    properties = {
+      type = "AzureBlob"
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+        type          = "LinkedServiceReference"
+      }
+      parameters = {
+        run_id = { type = "string" }
+      }
+      typeProperties = {
+        folderPath = {
+          value = "@concat('landing/', dataset().run_id)"
+          type  = "Expression"
+        }
+        fileName = "index.json"
+        format   = { type = "TextFormat" }
+      }
+    }
+  }
+
+  schema_validation_enabled = false
+  depends_on = [azurerm_data_factory_linked_service_azure_blob_storage.scripts]
+}
+
 # ---------------------------------------------------------------------------
 # ADF — Databricks linked service
 #
@@ -294,13 +341,13 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
       }
     },
     {
-      # Runs on failure: delete landing/{run_id}/index.json so the next run
-      # re-scans from the unchanged watermark. Depends on update_watermark with
-      # ["Failed","Skipped"] so it fires whenever any upstream step failed.
+      # Native Delete activity — no compute, just a storage API call.
+      # Handles "blob not found" gracefully if index_new_snapshots itself failed.
       name = "cleanup_landing"
-      type = "Custom"
+      type = "Delete"
       policy = {
-        timeout = "0.00:10:00"
+        timeout = "0.00:05:00"
+        retry   = 0
       }
       dependsOn = [
         {
@@ -308,28 +355,24 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
           dependencyConditions = ["Failed", "Skipped"]
         }
       ]
-      linkedServiceName = {
-        referenceName = "ls_azure_batch"
-        type          = "LinkedServiceReference"
-      }
       typeProperties = {
-        command = "python3 cleanup_landing.py"
-        resourceLinkedService = {
-          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
-          type          = "LinkedServiceReference"
+        dataset = {
+          referenceName = "ds_landing_index"
+          type          = "DatasetReference"
+          parameters = {
+            run_id = "@pipeline().RunId"
+          }
         }
-        folderPath          = "batch-scripts"
-        retentionTimeInDays = 1
-        extendedProperties = {
-          KEY_VAULT_URI              = local.kv_uri
-          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
-          RUN_ID                     = "@pipeline().RunId"
+        enableLogging = false
+        storeSettings = {
+          type      = "AzureBlobStorageReadSettings"
+          recursive = false
         }
       }
     }
   ])
 
-  depends_on = [azapi_resource.adf_ls_azure_batch]
+  depends_on = [azapi_resource.adf_ls_azure_batch, azapi_resource.adf_dataset_landing_index]
 }
 
 # ---------------------------------------------------------------------------
@@ -536,14 +579,14 @@ resource "azurerm_data_factory_pipeline" "build_ended_match_databricks" {
       }
     },
     {
+      # Web Activity writes watermarks.json via blob storage REST API.
+      # No Databricks cluster spun up — ADF managed identity authenticates directly.
+      # Body comes from index_new_snapshots notebook exit output (watermark JSON payload).
       name = "update_watermark"
-      type = "DatabricksNotebook"
-      linkedServiceName = {
-        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
-        type          = "LinkedServiceReference"
-      }
+      type = "WebActivity"
       policy = {
-        timeout = "0.00:10:00"
+        timeout = "0.00:05:00"
+        retry   = 1
       }
       dependsOn = [
         {
@@ -552,22 +595,26 @@ resource "azurerm_data_factory_pipeline" "build_ended_match_databricks" {
         }
       ]
       typeProperties = {
-        notebookPath = "/cricket-pipeline/update_watermark"
-        baseParameters = {
-          run_id   = { value = "@pipeline().RunId", type = "Expression" }
-          event_id = ""
+        url    = "https://${data.azurerm_storage_account.data_lake.name}.blob.core.windows.net/landing/control/watermarks.json"
+        method = "PUT"
+        headers = {
+          "x-ms-blob-type" = "BlockBlob"
+          "Content-Type"   = "application/json"
+        }
+        body = "@activity('index_new_snapshots').output.runOutput"
+        authentication = {
+          type     = "MSI"
+          resource = "https://storage.azure.com/"
         }
       }
     },
     {
+      # Native Delete activity — no compute, just a storage API call.
       name = "cleanup_landing"
-      type = "DatabricksNotebook"
-      linkedServiceName = {
-        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
-        type          = "LinkedServiceReference"
-      }
+      type = "Delete"
       policy = {
-        timeout = "0.00:10:00"
+        timeout = "0.00:05:00"
+        retry   = 0
       }
       dependsOn = [
         {
@@ -576,15 +623,23 @@ resource "azurerm_data_factory_pipeline" "build_ended_match_databricks" {
         }
       ]
       typeProperties = {
-        notebookPath = "/cricket-pipeline/cleanup_landing"
-        baseParameters = {
-          run_id = { value = "@pipeline().RunId", type = "Expression" }
+        dataset = {
+          referenceName = "ds_landing_index"
+          type          = "DatasetReference"
+          parameters = {
+            run_id = "@pipeline().RunId"
+          }
+        }
+        enableLogging = false
+        storeSettings = {
+          type      = "AzureBlobStorageReadSettings"
+          recursive = false
         }
       }
     }
   ])
 
-  depends_on = [azurerm_data_factory_linked_service_azure_databricks.main]
+  depends_on = [azurerm_data_factory_linked_service_azure_databricks.main, azapi_resource.adf_dataset_landing_index]
 }
 
 resource "azurerm_data_factory_trigger_schedule" "build_ended_match_databricks" {
@@ -738,9 +793,10 @@ resource "azurerm_data_factory_pipeline" "backfill" {
     },
     {
       name = "cleanup_landing"
-      type = "Custom"
+      type = "Delete"
       policy = {
-        timeout = "0.00:10:00"
+        timeout = "0.00:05:00"
+        retry   = 0
       }
       dependsOn = [
         {
@@ -748,28 +804,24 @@ resource "azurerm_data_factory_pipeline" "backfill" {
           dependencyConditions = ["Failed", "Skipped"]
         }
       ]
-      linkedServiceName = {
-        referenceName = "ls_azure_batch"
-        type          = "LinkedServiceReference"
-      }
       typeProperties = {
-        command = "python3 cleanup_landing.py"
-        resourceLinkedService = {
-          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
-          type          = "LinkedServiceReference"
+        dataset = {
+          referenceName = "ds_landing_index"
+          type          = "DatasetReference"
+          parameters = {
+            run_id = "@pipeline().RunId"
+          }
         }
-        folderPath          = "batch-scripts"
-        retentionTimeInDays = 1
-        extendedProperties = {
-          KEY_VAULT_URI              = local.kv_uri
-          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
-          RUN_ID                     = "@pipeline().RunId"
+        enableLogging = false
+        storeSettings = {
+          type      = "AzureBlobStorageReadSettings"
+          recursive = false
         }
       }
     }
   ])
 
-  depends_on = [azapi_resource.adf_ls_azure_batch]
+  depends_on = [azapi_resource.adf_ls_azure_batch, azapi_resource.adf_dataset_landing_index]
 }
 
 # ---------------------------------------------------------------------------
@@ -879,13 +931,10 @@ resource "azurerm_data_factory_pipeline" "backfill_databricks" {
     },
     {
       name = "cleanup_landing"
-      type = "DatabricksNotebook"
-      linkedServiceName = {
-        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
-        type          = "LinkedServiceReference"
-      }
+      type = "Delete"
       policy = {
-        timeout = "0.00:10:00"
+        timeout = "0.00:05:00"
+        retry   = 0
       }
       dependsOn = [
         {
@@ -894,15 +943,23 @@ resource "azurerm_data_factory_pipeline" "backfill_databricks" {
         }
       ]
       typeProperties = {
-        notebookPath = "/cricket-pipeline/cleanup_landing"
-        baseParameters = {
-          run_id = { value = "@pipeline().RunId", type = "Expression" }
+        dataset = {
+          referenceName = "ds_landing_index"
+          type          = "DatasetReference"
+          parameters = {
+            run_id = "@pipeline().RunId"
+          }
+        }
+        enableLogging = false
+        storeSettings = {
+          type      = "AzureBlobStorageReadSettings"
+          recursive = false
         }
       }
     }
   ])
 
-  depends_on = [azurerm_data_factory_linked_service_azure_databricks.main]
+  depends_on = [azurerm_data_factory_linked_service_azure_databricks.main, azapi_resource.adf_dataset_landing_index]
 }
 
 # ---------------------------------------------------------------------------

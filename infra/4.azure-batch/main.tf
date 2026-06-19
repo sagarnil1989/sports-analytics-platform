@@ -255,10 +255,3 @@ resource "azurerm_storage_blob" "script_update_watermark" {
   content_md5          = filemd5("${path.module}/scripts/update_watermark.py")
 }
 
-resource "azurerm_storage_blob" "script_cleanup_landing" {
-  name                 = "cleanup_landing.py"
-  storage_container_id = azurerm_storage_container.scripts.id
-  type                 = "Block"
-  source               = "${path.module}/scripts/cleanup_landing.py"
-  content_md5          = filemd5("${path.module}/scripts/cleanup_landing.py")
-}

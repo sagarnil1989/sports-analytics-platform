@@ -58,9 +58,24 @@ scan_start_utc, new_entries, blobs_scanned = landing_index.scan_bronze_to_landin
     bronze, landing_container, sport_id, run_id, event_id_filter=event_id_filter or None
 )
 
-# Watermark is NOT updated here. The update_watermark notebook runs last in the pipeline.
-# On failure, cleanup_landing deletes the index so the next run re-scans from the unchanged watermark.
+# Watermark is NOT updated here. The update_watermark step runs last on success.
+# On failure, the cleanup_landing Delete activity removes the index file so the
+# next run re-scans from the unchanged watermark.
 print(f"[index_new_snapshots] Landing index written — watermark update deferred to update_watermark step")
 
 elapsed = (datetime.now(timezone.utc) - script_start_utc).total_seconds()
 print(f"\n── Done ── {elapsed:.1f}s  |  {blobs_scanned} blobs scanned  |  {new_entries} entries written")
+
+# COMMAND ----------
+
+# Emit watermark payload so the ADF Web Activity (update_watermark) can write
+# watermarks.json directly via blob storage REST API — no Databricks cluster needed.
+import json as _json
+_watermark_payload = _json.dumps({
+    "last_scan_cutoff_utc": scan_start_utc.isoformat(),
+    "last_run_id":          run_id,
+    "updated_at_utc":       datetime.now(timezone.utc).isoformat(),
+    "new_entries":          new_entries,
+    "blobs_scanned":        blobs_scanned,
+})
+dbutils.notebook.exit(_watermark_payload)

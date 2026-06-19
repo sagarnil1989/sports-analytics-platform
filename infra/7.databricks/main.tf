@@ -189,8 +189,3 @@ resource "databricks_notebook" "update_watermark" {
   language = "PYTHON"
 }
 
-resource "databricks_notebook" "cleanup_landing" {
-  source   = "${path.module}/notebooks/cleanup_landing.py"
-  path     = "/cricket-pipeline/cleanup_landing"
-  language = "PYTHON"
-}
