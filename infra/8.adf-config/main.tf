@@ -369,6 +369,22 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
           recursive = false
         }
       }
+    },
+    {
+      # Explicitly fail the pipeline run so ADF shows Failed (not Succeeded)
+      # even though cleanup_landing succeeded on the failure branch.
+      name = "fail_pipeline"
+      type = "Fail"
+      dependsOn = [
+        {
+          activity             = "cleanup_landing"
+          dependencyConditions = ["Completed"]
+        }
+      ]
+      typeProperties = {
+        message   = "Pipeline failed — see activity above for root cause. Landing index cleaned up."
+        errorCode = "UpstreamFailure"
+      }
     }
   ])
 
@@ -636,6 +652,20 @@ resource "azurerm_data_factory_pipeline" "build_ended_match_databricks" {
           recursive = false
         }
       }
+    },
+    {
+      name = "fail_pipeline"
+      type = "Fail"
+      dependsOn = [
+        {
+          activity             = "cleanup_landing"
+          dependencyConditions = ["Completed"]
+        }
+      ]
+      typeProperties = {
+        message   = "Pipeline failed — see activity above for root cause. Landing index cleaned up."
+        errorCode = "UpstreamFailure"
+      }
     }
   ])
 
@@ -818,6 +848,20 @@ resource "azurerm_data_factory_pipeline" "backfill" {
           recursive = false
         }
       }
+    },
+    {
+      name = "fail_pipeline"
+      type = "Fail"
+      dependsOn = [
+        {
+          activity             = "cleanup_landing"
+          dependencyConditions = ["Completed"]
+        }
+      ]
+      typeProperties = {
+        message   = "Pipeline failed — see activity above for root cause. Landing index cleaned up."
+        errorCode = "UpstreamFailure"
+      }
     }
   ])
 
@@ -955,6 +999,20 @@ resource "azurerm_data_factory_pipeline" "backfill_databricks" {
           type      = "AzureBlobStorageReadSettings"
           recursive = false
         }
+      }
+    },
+    {
+      name = "fail_pipeline"
+      type = "Fail"
+      dependsOn = [
+        {
+          activity             = "cleanup_landing"
+          dependencyConditions = ["Completed"]
+        }
+      ]
+      typeProperties = {
+        message   = "Pipeline failed — see activity above for root cause. Landing index cleaned up."
+        errorCode = "UpstreamFailure"
       }
     }
   ])

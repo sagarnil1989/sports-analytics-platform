@@ -64,7 +64,13 @@ def scan_bronze_to_landing(bronze, landing, sport_id, run_id, event_id_filter=No
     scan_start_utc = datetime.now(timezone.utc)
     prev_cutoff, _ = get_watermark(landing)
 
-    if prev_cutoff:
+    if event_id_filter:
+        # Backfill mode: ignore the watermark. The caller wants a specific event
+        # regardless of when its blobs were last modified. Applying the watermark
+        # cutoff would silently skip events whose bronze data predates the watermark.
+        effective_cutoff = None
+        print(f"[index] Backfill mode (event_id={event_id_filter}) — watermark bypassed, full scan for this event")
+    elif prev_cutoff:
         effective_cutoff = prev_cutoff - timedelta(minutes=_SCAN_BUFFER_MIN)
         print(f"[index] Watermark : {prev_cutoff.isoformat()}")
         print(f"[index] Cutoff    : {effective_cutoff.isoformat()}  (watermark − {_SCAN_BUFFER_MIN} min)")
