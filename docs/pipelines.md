@@ -38,116 +38,199 @@ Each inplay snapshot bundle contains:
 
 ## ADF Pipelines
 
+All pipelines use **Azure Batch Custom activities** (Batch version) or **Databricks notebook activities** (Databricks mirror). There is a `pl_build_ended_match` / `pl_build_ended_match_databricks` pair and a `pl_backfill` / `pl_backfill_databricks` pair. The Batch versions are primary; Databricks mirrors exist for comparison.
+
+### Landing zone (watermark safety pattern)
+
+Every pipeline run creates a per-run landing index in `landing/{run_id}/index.json`. This file lists the exact set of bronze snapshots to process so that downstream scripts only read the delta, not all of bronze.
+
+**Watermark lifecycle:**
+1. `index_new_snapshots` scans bronze from the last watermark cutoff and writes `landing/{run_id}/index.json`. The watermark is **not** advanced yet.
+2. Downstream scripts (`bronze_to_silver`, `silver_to_gold`) read the landing index.
+3. On success: `update_watermark` advances `landing/control/watermarks.json` to the scan start time.
+4. On any failure: `cleanup_landing` (ADF native Delete activity, zero compute) deletes `landing/{run_id}/index.json`. Since the watermark was never advanced, the next run re-scans from the same cutoff — no data loss, no duplicate skip.
+
+---
+
 ### pl_build_ended_match
 
-**Schedule:** Daily at 02:00 CET (01:00 UTC) via `trigger_build_ended_match`.
+**Schedule:** Daily at 02:00 CET (01:00 UTC) via `trigger_build_ended_match` (currently STOPPED — start manually).  
+**Compute:** Azure Batch (`ls_azure_batch`).  
+**Source:** `infra/4.azure-batch/scripts/`
 
-Three sequential activities — each depends on the previous succeeding.
+Five sequential activities plus one failure-branch cleanup.
 
-#### Activity 1 — RunSilverBuildEndedMatch
+#### Activity 1 — index_new_snapshots
+*(no dependency — runs first)*
 
-Scans bronze inplay snapshots and parses them into structured silver files. Only processes matches that have had **no new bronze snapshot in the last 60 minutes** (quiet = ended or inactive). Active live matches are never touched.
+Reads the watermark from `landing/control/watermarks.json` (full scan on first run). Lists all bronze `manifest.json` blobs modified since `watermark − 2h` (2h buffer catches late-arriving blobs). Writes `landing/{run_id}/index.json` containing every new snapshot's `event_id`, `snapshot_id`, `fi`, `manifest_path`.
 
-**How it avoids reprocessing:** Each processed snapshot leaves a marker at `silver/cricket/control/processed_snapshots/{snapshot_id}_{event_id}_{fi}.json`. On each run the notebook lists all bronze manifests and all existing markers in parallel, then processes only the difference for quiet event_ids.
+Exits via `dbutils.notebook.exit(watermark_json)` so the Web Activity in the Databricks mirror can use the payload directly.
 
-**Reads:** `bronze/betsapi/inplay_snapshot/…`  
-**Writes:** `silver/cricket/inplay/year=…/event_id=…/snapshot_id=…/*.json` + processed_snapshot markers
+**Reads:** `bronze/betsapi/inplay_snapshot/sport_id=3/…`  
+**Writes:** `landing/{run_id}/index.json`
 
-#### Activity 2 — RunGoldBuildEndedMatch
-*(only runs if Activity 1 succeeds)*
+#### Activity 2 — bronze_to_silver
+*(runs if Activity 1 succeeds)*
 
-Rebuilds `innings_1_from_silver.json` for every event where silver has data newer than the existing gold file. Reads from **silver only — no bronze access**.
+Reads the landing index and parses each bronze snapshot into structured silver files. Runs with 128 parallel worker threads (IO-bound blob operations).
 
-**Stale detection:** compares the newest silver marker timestamp per event against `last_modified` of `gold/cricket/innings_tracker/event_id={eid}/innings_1_from_silver.json`. Rebuilds only where the gold file is missing or older.
+Key behaviours:
+- **Quiet filter:** skips any event whose most recent snapshot is newer than 60 minutes (match still live).
+- **Complete markers:** if every snapshot for an event succeeds, writes `silver/control/complete/event_id={eid}.json`. On the next run, events with a complete marker are skipped in O(1) listing (no per-snapshot recheck).
+- **Incomplete captures:** snapshots that have only `manifest.json` + `lineage.json` (API payload files missing due to an early-June ingestion bug) are skipped gracefully and counted as `skipped_incomplete`, not failures. They still count toward the event's complete marker threshold.
+- **Run log:** writes `gold/logs/pl_build_ended_match/{date}/{time}_bronze_to_silver.json` including `failed_snapshots[]` array with event_id, snapshot_id, error for every failure.
 
-**Reads:** `silver/cricket/inplay/…`, `silver/cricket/control/processed_snapshots/`  
+**Reads:** `landing/{run_id}/index.json`, `bronze/betsapi/inplay_snapshot/…`  
+**Writes:** `silver/…`, `silver/control/complete/event_id={eid}.json`, `gold/logs/…`
+
+#### Activity 3 — silver_to_gold
+*(runs if Activity 2 succeeds)*
+
+Reads silver files and builds the gold tracker (`innings_1_from_silver.json`) per event. Scoped by `EVENT_ID` parameter if set (backfill mode), otherwise processes all events with silver data newer than their gold file.
+
+**Reads:** `silver/…`  
 **Writes:** `gold/cricket/innings_tracker/event_id={eid}/innings_1_from_silver.json`
 
-#### Activity 3 — RunDiscoverCricketEnded
-*(only runs if Activity 2 succeeds)*
+#### Activity 4 — update_watermark
+*(runs if Activity 3 succeeds)*
 
-Scans gold for all `innings_1_from_silver.json` files and writes the ended match index. No API calls — all data from gold/bronze blobs only.
+Reads `landing/{run_id}/index.json` and advances `landing/control/watermarks.json` to the scan-start time recorded in the index. No-op when `EVENT_ID` is set (backfill mode — watermark is unchanged).
 
-Steps:
-1. Load blocked event IDs from `gold/cricket/config/blocked_event_ids.json`
-2. Load currently-live event IDs from `gold/cricket/matches/latest/index.json` (excluded from ended)
-3. Scan gold for all `innings_1_from_silver.json` files — presence = match is ended
-4. For each ended event: resolve `fi` from bronze snapshot path
-5. Read match metadata (name, league, score, batting order) from gold tracker file
-6. Write sorted ended index to `bronze/cricket/ended/latest/index.json`
+**Reads:** `landing/{run_id}/index.json`  
+**Writes:** `landing/control/watermarks.json`
 
-**Note:** League filtering is intentionally **not applied** here. If a match reached gold, it already passed the league filter at bronze capture time. Filtering again caused silent gaps when tracker metadata was null.
+#### Activity 5 — cleanup_landing
+*(runs if update_watermark FAILS or is SKIPPED — i.e., any upstream failure)*
 
-**Reads:** `gold/cricket/innings_tracker/…`, `gold/cricket/config/…`, `bronze/betsapi/…`  
-**Writes:** `bronze/cricket/ended/latest/index.json`
+ADF native Delete activity — no compute, no Batch/Databricks. Deletes `landing/{run_id}/index.json` so the next run re-scans from the unchanged watermark. Handles "blob not found" gracefully (no error if `index_new_snapshots` itself failed before writing the file).
 
-#### Activities 4a & 4b — RunHypothesisInn2Over6 / RunHypothesisTimeoutWicket
-*(both run in parallel if Activity 3 succeeds)*
+**Deletes:** `landing/{run_id}/index.json`
 
-Two hypothesis notebooks that run concurrently after Discover completes.
+---
 
-**RunHypothesisInn2Over6:** Scans all ended matches, finds the innings-2 over-6 snapshot for each, reads match-winner odds (`home_team_odds`/`away_team_odds`) and actual winner, writes results to gold.  
-**Writes:** `gold/cricket/hypothesis/inn2_over6_favorite.json`
+### pl_build_ended_match_databricks
 
-**RunHypothesisTimeoutWicket:** Detects strategic timeouts (game state unchanged >120s between snapshots), checks whether a wicket fell in the over that resumed, writes results to gold.  
-**Writes:** `gold/cricket/hypothesis/timeout_wicket.json`
+Mirror of `pl_build_ended_match` using Databricks notebook activities instead of Batch. Same activity sequence and watermark lifecycle. `update_watermark` is a Web Activity PUT to the blob REST API using ADF managed identity (no Databricks spin-up cost for a simple JSON write).
 
-Both pages at `/api/hypothesis/…` are automatically up to date every morning.
+**Compute:** Databricks single-node `Standard_F4s_v2`, Runtime 15.4 LTS.  
+**Source:** `infra/7.databricks/notebooks/`
 
 ---
 
 ### pl_backfill
 
-**Schedule:** No automatic trigger — run manually in ADF Studio.
+**Schedule:** No automatic trigger — run manually in ADF Studio.  
+**Parameter:** `event_id` (string, default empty).  
+**Compute:** Azure Batch.
 
-**Parameter:** `event_id` (optional). Pass a specific event ID to process one match; leave empty to process all quiet matches (loops for up to 4 hours).
+Pass a specific `event_id` to reprocess one match end-to-end. Leave empty to run over all bronze snapshots newer than the watermark (same as the daily run, useful for catch-up after an outage).
 
-#### Activity 1 — RunSilverBackfill
+Four sequential activities plus cleanup — identical structure to `pl_build_ended_match` minus `discover_cricket_ended`.
 
-Same logic as `RunSilverBuildEndedMatch` but accepts `event_id` parameter.
+#### Activity 1 — index_new_snapshots
 
-#### Activity 2 — RunGoldBackfill
-*(only runs if Activity 1 succeeds)*
+Same as in `pl_build_ended_match`. If `EVENT_ID` is set, the scan filters bronze to only that event's manifests.
 
-Same logic as `RunGoldBuildEndedMatch` but scoped to the provided `event_id` (or all stale events if empty).
+**Writes:** `landing/{run_id}/index.json`
+
+#### Activity 2 — bronze_to_silver
+*(runs if Activity 1 succeeds)*
+
+Same script as `pl_build_ended_match`. If `EVENT_ID` is set, it deletes the existing complete marker for that event first (`silver/control/complete/event_id={eid}.json`) so the event is fully reprocessed even if it was previously marked done.
+
+**Writes:** `silver/…`, complete markers, run log
+
+#### Activity 3 — silver_to_gold
+*(runs if Activity 2 succeeds)*
+
+Same script as `pl_build_ended_match`. Scoped to the single `event_id` if set.
+
+**Writes:** `gold/cricket/innings_tracker/event_id={eid}/innings_1_from_silver.json`
+
+#### Activity 4 — update_watermark
+*(runs if Activity 3 succeeds)*
+
+**No-op when `EVENT_ID` is set** (exits 0 immediately). Watermark is only advanced on a full incremental run (empty `EVENT_ID`). This is intentional: backfilling one match should not shift the scan cutoff and cause other matches to be missed on the next daily run.
+
+#### Activity 5 — cleanup_landing
+*(runs if update_watermark FAILS or is SKIPPED)*
+
+Same Delete activity as in `pl_build_ended_match`. Always runs on failure; runs after update_watermark is skipped when `EVENT_ID` is set and `silver_to_gold` failed.
+
+---
+
+### pl_backfill_databricks
+
+Mirror of `pl_backfill` using Databricks. `update_watermark` uses a Databricks notebook (not a Web Activity) since backfill runs rarely and the compute cost is acceptable.
+
+---
+
+### pl_hypothesis / pl_hypothesis_databricks
+
+**Schedule:** No automatic trigger — run manually.
+
+Two hypothesis scripts run in parallel (no dependency between them). These were previously activities 4a/4b in `pl_build_ended_match` but were moved to a standalone pipeline so hypothesis analysis doesn't block or delay the daily ingestion pipeline.
+
+- **hypothesis_inn2_over6** — Finds the innings-2 over-6 snapshot for each ended match, reads match-winner odds, determines actual winner, writes results.  
+  **Writes:** `gold/cricket/hypothesis/inn2_over6_favorite.json`
+- **hypothesis_timeout_wicket** — Detects strategic timeouts (>120s gap between snapshots), checks for wickets in the resumed over.  
+  **Writes:** `gold/cricket/hypothesis/timeout_wicket.json`
 
 ---
 
 ## Pipeline Flow Diagram
 
 ```
-Daily 02:00 CET
-  pl_build_ended_match
-    └─ Activity 1: RunSilverBuildEndedMatch       → silver files + markers
-    └─ Activity 2: RunGoldBuildEndedMatch         → innings_1_from_silver.json     (if Activity 1 OK)
-    └─ Activity 3: RunDiscoverCricketEnded        → ended index in bronze          (if Activity 2 OK)
-    └─ Activity 4a: RunHypothesisInn2Over6        → hypothesis/inn2_over6.json     (if Activity 3 OK, parallel)
-    └─ Activity 4b: RunHypothesisTimeoutWicket    → hypothesis/timeout_wicket.json (if Activity 3 OK, parallel)
+Daily 01:00 UTC
+  pl_build_ended_match  (trigger currently STOPPED)
+    ├─ index_new_snapshots          → landing/{run_id}/index.json
+    ├─ bronze_to_silver             → silver/ + complete markers + run log      (if index OK)
+    ├─ silver_to_gold               → gold/cricket/innings_tracker/…            (if b2s OK)
+    ├─ update_watermark             → landing/control/watermarks.json           (if s2g OK)
+    └─ cleanup_landing [on failure] → deletes landing/{run_id}/index.json       (if update_watermark fails/skipped)
 
 Manual
   pl_backfill  [event_id=optional]
-    └─ Activity 1: RunSilverBackfill          → silver files + markers
-    └─ Activity 2: RunGoldBackfill            → innings_1_from_silver.json  (if Activity 1 OK)
+    ├─ index_new_snapshots          → landing/{run_id}/index.json
+    ├─ bronze_to_silver             → silver/ (deletes complete marker if event_id set)  (if index OK)
+    ├─ silver_to_gold               → gold/cricket/innings_tracker/…            (if b2s OK)
+    ├─ update_watermark             → no-op if event_id set, else advances watermark     (if s2g OK)
+    └─ cleanup_landing [on failure] → deletes landing/{run_id}/index.json       (if update_watermark fails/skipped)
+
+Manual
+  pl_hypothesis / pl_hypothesis_databricks
+    ├─ hypothesis_inn2_over6        → gold/cricket/hypothesis/inn2_over6_favorite.json   (parallel)
+    └─ hypothesis_timeout_wicket    → gold/cricket/hypothesis/timeout_wicket.json        (parallel)
 ```
 
-After `pl_backfill` completes, trigger `pl_build_ended_match` manually to run Activity 3 and refresh the ended index, or wait for the next daily run.
+After running `pl_backfill` for a specific event_id, the ended index is not automatically refreshed. To include the backfilled match in `/api/ended`, run `pl_build_ended_match` manually (or wait for the next daily run — it will pick up gold files updated by the backfill).
 
 ---
+
+## Batch Scripts
+
+| Script | Used by | Source |
+|---|---|---|
+| `index_new_snapshots.py` | All Batch pipelines — Activity 1 | `infra/4.azure-batch/scripts/` |
+| `bronze_to_silver.py` | All Batch pipelines — Activity 2 | `infra/4.azure-batch/scripts/` |
+| `silver_to_gold.py` | All Batch pipelines — Activity 3 | `infra/4.azure-batch/scripts/` |
+| `update_watermark.py` | All Batch pipelines — Activity 4 | `infra/4.azure-batch/scripts/` |
+| `landing_index.py` | Shared lib (watermark read/write, index scan/read) | `infra/7.databricks/lib/` (uploaded to batch-scripts) |
+| `snapshot_parser.py` | Shared lib (bronze→silver parse + write) | `infra/7.databricks/lib/` (uploaded to batch-scripts) |
 
 ## Databricks Notebooks
 
 | Notebook (in Databricks) | Source file | Used by |
 |---|---|---|
-| `/cricket-pipeline/silver_build_ended_match` | `infra/7.databricks/notebooks/silver_build_ended_match.py` | `pl_build_ended_match` Activity 1 |
-| `/cricket-pipeline/gold_build_ended_match` | `infra/7.databricks/notebooks/gold_build_ended_match.py` | `pl_build_ended_match` Activity 2 |
-| `/cricket-pipeline/discover_cricket_ended` | `infra/7.databricks/notebooks/discover_cricket_ended.py` | `pl_build_ended_match` Activity 3 |
-| `/cricket-pipeline/silver_backfill` | `infra/7.databricks/notebooks/silver_backfill.py` | `pl_backfill` Activity 1 |
-| `/cricket-pipeline/gold_backfill` | `infra/7.databricks/notebooks/gold_backfill.py` | `pl_backfill` Activity 2 |
+| `/cricket-pipeline/index_new_snapshots` | `infra/7.databricks/notebooks/index_new_snapshots.py` | `pl_build_ended_match_databricks`, `pl_backfill_databricks` — Activity 1 |
+| `/cricket-pipeline/bronze_to_silver` | `infra/7.databricks/notebooks/bronze_to_silver.py` | `pl_build_ended_match_databricks`, `pl_backfill_databricks` — Activity 2 |
+| `/cricket-pipeline/silver_to_gold` | `infra/7.databricks/notebooks/silver_to_gold.py` | `pl_build_ended_match_databricks`, `pl_backfill_databricks` — Activity 3 |
+| `/cricket-pipeline/update_watermark` | `infra/7.databricks/notebooks/update_watermark.py` | `pl_backfill_databricks` — Activity 4 (daily uses Web Activity PUT instead) |
+| `/cricket-pipeline/hypothesis_inn2_over6` | `infra/7.databricks/notebooks/hypothesis_inn2_over6.py` | `pl_hypothesis_databricks` |
+| `/cricket-pipeline/hypothesis_timeout_wicket` | `infra/7.databricks/notebooks/hypothesis_timeout_wicket.py` | `pl_hypothesis_databricks` |
 | `/cricket-pipeline/ops/bronze_dedup_cleanup` | `infra/7.databricks/notebooks/bronze_dedup_cleanup.py` | Manual (one-time cleanup) |
-| `/cricket-pipeline/analysis/snapshot_timeline` | `infra/7.databricks/notebooks/analysis_snapshot_timeline.py` | Manual (analysis) |
-| `/cricket-pipeline/analysis/bronze_silver_counts` | `infra/7.databricks/notebooks/analysis_bronze_silver_counts.py` | Manual (analysis) |
 | `/cricket-pipeline/analysis/match_data_explorer` | `infra/7.databricks/notebooks/analysis_match_data_explorer.py` | Manual (full match decode: batting/bowling scorecards, line movement, chase analysis, phase breakdown) |
-| `/cricket-pipeline/hypothesis/inn2_over6` | `infra/7.databricks/notebooks/hypothesis_inn2_over6.py` | Manual — run after `pl_build_ended_match` to refresh hypothesis results |
 
 ---
 

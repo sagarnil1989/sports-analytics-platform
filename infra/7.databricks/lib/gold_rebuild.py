@@ -6,7 +6,7 @@ rather than the Azure Functions _common wrapper used by cricket_display.
 
 Functions exported:
   gold_rebuild_ended_matches(event_id=None)  — rebuild all stale or one specific match
-  auto_rebuild_ended_innings()               — detect ended matches and auto-rebuild
+  auto_rebuild_ended_innings()               — detect ended matches and auto-rebuild (opt-out league model)
 """
 import json
 import logging
@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from util import call_betsapi, download_json, extract_results, get_named_container_client, upload_json
 from tracker_writer import extract_innings_snapshot
-from league_config import load_allowed_league_ids
+from league_config import load_disabled_league_ids
 
 
 def _utc_now():
@@ -313,7 +313,7 @@ def auto_rebuild_ended_innings() -> None:
     now = _utc_now()
     one_hour_ago = now - timedelta(hours=1)
     gold = get_named_container_client("gold")
-    allowed_leagues = load_allowed_league_ids()
+    disabled_leagues = load_disabled_league_ids()
 
     live_eids: set = set()
     try:
@@ -380,7 +380,7 @@ def auto_rebuild_ended_innings() -> None:
         if not tracker:
             continue
         league_id = str(tracker.get("league_id") or "")
-        if league_id not in allowed_leagues:
+        if league_id in disabled_leagues:
             logging.info(json.dumps({"event": "auto_rebuild_skip_league", "event_id": eid, "league_id": league_id}))
             continue
         try:
