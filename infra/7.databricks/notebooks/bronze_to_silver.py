@@ -54,6 +54,9 @@ def _dl_required(container, path):
         raise FileNotFoundError(f"Required blob not found: {path}")
     return data
 
+class _IncompleteCapture(Exception):
+    pass
+
 # COMMAND ----------
 # ── STEP 0: Read parameters ───────────────────────────────────────────────────
 
@@ -177,14 +180,26 @@ def process_snapshot(item):
     manifest               = _dl_required(bronze, path)
     events_inplay_payload  = (_dl(bronze, f"{base}/api_inplay_event_list.json")
                                or _dl(bronze, f"{base}/events_inplay_full.json")
-                               or _dl_required(bronze, f"{base}/events_inplay.json"))
+                               or _dl(bronze, f"{base}/events_inplay.json"))
     bet365_event_payload   = (_dl(bronze, f"{base}/api_live_market_odds.json")
                                or _dl(bronze, f"{base}/bet365_event_by_fi.json")
-                               or _dl_required(bronze, f"{base}/bet365_event.json"))
+                               or _dl(bronze, f"{base}/bet365_event.json"))
     bet365_stats_payload   = _dl(bronze, f"{base}/api_live_market_stats.json")
     event_odds_payload     = (_dl(bronze, f"{base}/api_event_odds.json")
                                or _dl(bronze, f"{base}/event_odds_by_event_id.json")
-                               or _dl_required(bronze, f"{base}/event_odds.json"))
+                               or _dl(bronze, f"{base}/event_odds.json"))
+
+    # Bronze capture was incomplete (ingestion bug from early June): manifest was
+    # written to the new snapshot_id format but API payloads were never persisted.
+    # These snapshots have no recoverable data — skip rather than fail.
+    if events_inplay_payload is None and bet365_event_payload is None and event_odds_payload is None:
+        raise _IncompleteCapture(f"all core payloads missing — incomplete bronze capture")
+    if events_inplay_payload is None:
+        raise FileNotFoundError(f"events_inplay missing: {base}")
+    if bet365_event_payload is None:
+        raise FileNotFoundError(f"bet365_event missing: {base}")
+    if event_odds_payload is None:
+        raise FileNotFoundError(f"event_odds missing: {base}")
     event_view_payload     = (_dl(bronze, f"{base}/api_event_view.json")
                                or _dl(bronze, f"{base}/event_view_by_event_id.json"))
     event_odds_summary     = (_dl(bronze, f"{base}/api_event_odds_summary.json")
@@ -206,8 +221,9 @@ def process_snapshot(item):
 
 
 print(f"\nProcessing {len(work_items)} snapshots with {PARALLEL_WORKERS} parallel workers...")
+script_start_utc = datetime.now(timezone.utc)
 run_start  = time.monotonic()
-done = failed = 0
+done = failed = skipped_incomplete = 0
 failed_items = []
 succeeded_by_event = defaultdict(int)
 failed_eids        = set()
@@ -225,6 +241,10 @@ with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as pool:
                 rate    = done / elapsed if elapsed > 0 else 0
                 eta_s   = (len(work_items) - done) / rate if rate > 0 else 0
                 print(f"  {done}/{len(work_items)}  |  {rate:.1f}/s  |  ETA {eta_s/60:.1f} min  |  failed {failed}")
+        except _IncompleteCapture:
+            skipped_incomplete += 1
+            # Count as "processed" so event can still receive a complete marker
+            succeeded_by_event[item[1]] += 1
         except Exception as ex:
             failed += 1
             failed_eids.add(item[1])
@@ -232,8 +252,9 @@ with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as pool:
 
 elapsed = time.monotonic() - run_start
 print(f"\n── Done ──")
-print(f"  processed : {done}")
-print(f"  failed    : {failed}")
+print(f"  processed           : {done}")
+print(f"  skipped (incomplete): {skipped_incomplete}")
+print(f"  failed              : {failed}")
 print(f"  total time: {elapsed/60:.1f} min  ({elapsed:.0f}s)")
 print(f"  avg rate  : {done/elapsed:.1f} snapshots/s" if elapsed > 0 else "")
 
@@ -264,3 +285,40 @@ for eid, success_count in succeeded_by_event.items():
 
 print(f"\n  complete markers written : {complete_written}")
 print(f"  events with failures (not marked complete) : {len(failed_eids)}")
+
+# ── STEP 6: Write run log to gold ────────────────────────────────────────────
+try:
+    gold = svc.get_container_client("gold")
+    script_finished_utc = datetime.now(timezone.utc)
+    log_date = script_start_utc.strftime("%Y%m%d")
+    log_time = script_start_utc.strftime("%H%M%S")
+    log_path = f"logs/pl_build_ended_match/{log_date}/{log_time}_bronze_to_silver.json"
+    gold.get_blob_client(log_path).upload_blob(
+        json.dumps({
+            "script":                   "bronze_to_silver",
+            "run_date":                 script_start_utc.strftime("%Y-%m-%d"),
+            "started_at_utc":           script_start_utc.isoformat(),
+            "finished_at_utc":          script_finished_utc.isoformat(),
+            "duration_seconds":         round(elapsed, 2),
+            "status":                   "failed" if failed > 0 else "ok",
+            "events_processed":         event_count,
+            "snapshots_processed":          done,
+            "snapshots_skipped_incomplete": skipped_incomplete,
+            "snapshots_failed":             failed,
+            "complete_markers_written":     complete_written,
+            "events_with_failures":         len(failed_eids),
+            "skipped_complete":             skipped_complete,
+            "skipped_active":               skipped_active,
+            "failed_snapshots":         [
+                {"event_id": eid, "snapshot_id": sid, "error": err}
+                for eid, sid, err in failed_items
+            ],
+        }, indent=2).encode(),
+        overwrite=True,
+    )
+    print(f"\n  run log written: {log_path}")
+except Exception as log_ex:
+    print(f"\n  [log write failed — non-fatal]: {log_ex}")
+
+if failed > 0:
+    raise Exception(f"bronze_to_silver: {failed} snapshots failed — see run log for details")

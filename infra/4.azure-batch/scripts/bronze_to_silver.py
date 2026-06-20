@@ -72,6 +72,9 @@ def _dl_required(container, path):
         raise FileNotFoundError(f"Required blob not found: {path}")
     return data
 
+class _IncompleteCapture(Exception):
+    pass
+
 # ---------------------------------------------------------------------------
 # Step 1+2: Read landing index AND silver markers in parallel
 # ---------------------------------------------------------------------------
@@ -167,14 +170,26 @@ def process_snapshot(item):
     manifest               = _dl_required(bronze, path)
     events_inplay_payload  = (_dl(bronze, f"{base}/api_inplay_event_list.json")
                                or _dl(bronze, f"{base}/events_inplay_full.json")
-                               or _dl_required(bronze, f"{base}/events_inplay.json"))
+                               or _dl(bronze, f"{base}/events_inplay.json"))
     bet365_event_payload   = (_dl(bronze, f"{base}/api_live_market_odds.json")
                                or _dl(bronze, f"{base}/bet365_event_by_fi.json")
-                               or _dl_required(bronze, f"{base}/bet365_event.json"))
+                               or _dl(bronze, f"{base}/bet365_event.json"))
     bet365_stats_payload   = _dl(bronze, f"{base}/api_live_market_stats.json")
     event_odds_payload     = (_dl(bronze, f"{base}/api_event_odds.json")
                                or _dl(bronze, f"{base}/event_odds_by_event_id.json")
-                               or _dl_required(bronze, f"{base}/event_odds.json"))
+                               or _dl(bronze, f"{base}/event_odds.json"))
+
+    # Bronze capture was incomplete (ingestion bug from early June): manifest was
+    # written to the new snapshot_id format but API payloads were never persisted.
+    # These snapshots have no recoverable data — skip rather than fail.
+    if events_inplay_payload is None and bet365_event_payload is None and event_odds_payload is None:
+        raise _IncompleteCapture(f"all core payloads missing — incomplete bronze capture")
+    if events_inplay_payload is None:
+        raise FileNotFoundError(f"events_inplay missing: {base}")
+    if bet365_event_payload is None:
+        raise FileNotFoundError(f"bet365_event missing: {base}")
+    if event_odds_payload is None:
+        raise FileNotFoundError(f"event_odds missing: {base}")
     event_view_payload     = (_dl(bronze, f"{base}/api_event_view.json")
                                or _dl(bronze, f"{base}/event_view_by_event_id.json"))
     event_odds_summary     = (_dl(bronze, f"{base}/api_event_odds_summary.json")
@@ -198,7 +213,7 @@ def process_snapshot(item):
 print(f"\nProcessing {len(work_items)} snapshots with {PARALLEL_WORKERS} parallel workers...")
 script_start_utc = datetime.now(timezone.utc)
 run_start = time.monotonic()
-done = failed = 0
+done = failed = skipped_incomplete = 0
 failed_items = []
 succeeded_by_event = defaultdict(int)
 failed_eids        = set()
@@ -243,6 +258,20 @@ with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as pool:
                 rate    = done / elapsed if elapsed > 0 else 0
                 eta_s   = (len(work_items) - done) / rate if rate > 0 else 0
                 print(f"  {done}/{len(work_items)}  |  {rate:.1f}/s  |  ETA {eta_s/60:.1f} min  |  failed {failed}")
+        except _IncompleteCapture:
+            # Count as "processed" so the event can still receive a complete marker
+            # if all other snapshots for the same event succeed.
+            skipped_incomplete += 1
+            eid_skip = item[1]
+            with _event_locks[eid_skip]:
+                succeeded_by_event[eid_skip] += 1
+                current_count = succeeded_by_event[eid_skip]
+                already_failed = eid_skip in failed_eids
+            if not already_failed:
+                try:
+                    _maybe_write_complete_marker(eid_skip, current_count)
+                except Exception as marker_ex:
+                    print(f"  [marker ERROR] event_id={eid_skip}: {marker_ex}")
         except Exception as ex:
             failed += 1
             eid_failed = item[1]
@@ -253,8 +282,9 @@ with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as pool:
 elapsed = time.monotonic() - run_start
 script_finished_utc = datetime.now(timezone.utc)
 print(f"\n── Done ──")
-print(f"  processed : {done}")
-print(f"  failed    : {failed}")
+print(f"  processed           : {done}")
+print(f"  skipped (incomplete): {skipped_incomplete}")
+print(f"  failed              : {failed}")
 print(f"  total time: {elapsed/60:.1f} min  ({elapsed:.0f}s)")
 if elapsed > 0:
     print(f"  avg rate  : {done/elapsed:.1f} snapshots/s")
@@ -283,12 +313,17 @@ try:
         "duration_seconds":         round(elapsed, 2),
         "status":                   "failed" if failed > 0 else "ok",
         "events_processed":         event_count,
-        "snapshots_processed":      done,
-        "snapshots_failed":         failed,
-        "complete_markers_written": complete_written,
-        "events_with_failures":     len(failed_eids),
-        "skipped_complete":         skipped_complete,
-        "skipped_active":           skipped_active,
+        "snapshots_processed":        done,
+        "snapshots_skipped_incomplete": skipped_incomplete,
+        "snapshots_failed":           failed,
+        "complete_markers_written":   complete_written,
+        "events_with_failures":       len(failed_eids),
+        "skipped_complete":           skipped_complete,
+        "skipped_active":             skipped_active,
+        "failed_snapshots":         [
+            {"event_id": eid, "snapshot_id": sid, "error": err}
+            for eid, sid, err in failed_items
+        ],
     }
     gold.get_blob_client(log_path).upload_blob(
         json.dumps(run_log, indent=2).encode(), overwrite=True
