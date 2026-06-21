@@ -241,7 +241,7 @@ def _get_first12_line(event_id: str, snapshot_id: str) -> Tuple[Optional[float],
 # Per-event feature extraction
 # ---------------------------------------------------------------------------
 
-def extract_rows_for_event(event_id: str, tracker: Dict) -> List[Dict]:
+def extract_rows_for_event(event_id: str, tracker: Dict, train_cutoff: str = "") -> List[Dict]:
     """
     Build training rows for one completed T20 match.
     Returns a list of dicts, one per (market, checkpoint_over).
@@ -263,6 +263,12 @@ def extract_rows_for_event(event_id: str, tracker: Dict) -> List[Dict]:
     if actual_total is None or outcome not in ("over", "under", "push"):
         return []  # match not fully resolved
 
+    match_date = str(tracker.get("match_date_utc") or "")[:10]   # "2025-09-01"
+    if train_cutoff and match_date:
+        split = "train" if match_date <= train_cutoff else "test"
+    else:
+        split = "train"
+
     common = {
         "event_id":        event_id,
         "league_id":       tracker.get("league_id"),
@@ -274,6 +280,7 @@ def extract_rows_for_event(event_id: str, tracker: Dict) -> List[Dict]:
         "away_team":       tracker.get("away_team_name"),
         "actual_inn1_total": actual_total,
         "inn1_outcome":    outcome,   # vs innings-total line at last snapshot
+        "split":           split,
     }
 
     output_rows = []
@@ -398,6 +405,16 @@ print(f"[ml_extract] event_id_filter={event_id_filter or '(all T20 completed mat
 
 # COMMAND ----------
 
+# Load train/test split config from gold/ml/train_config.json
+# Format: {"train_cutoff_date": "2025-12-31"}
+# Rows with match_date_utc <= train_cutoff_date → split="train", else → split="test"
+# If config absent, all rows are "train".
+_train_config = _download_json(gold, "ml/train_config.json") or {}
+_train_cutoff  = (_train_config.get("train_cutoff_date") or "").strip()
+print(f"[ml_extract] train_cutoff_date={_train_cutoff or '(none — all rows = train)'}")
+
+# COMMAND ----------
+
 started_at = datetime.now(timezone.utc)
 
 # Collect event_ids with a gold innings_tracker
@@ -427,7 +444,7 @@ for eid in event_ids:
         n_skipped += 1
         continue
 
-    rows = extract_rows_for_event(eid, tracker)
+    rows = extract_rows_for_event(eid, tracker, train_cutoff=_train_cutoff)
     if rows:
         all_rows.extend(rows)
         n_processed += 1
@@ -446,7 +463,7 @@ if not all_rows:
 # Write as CSV to gold/ml/over_under_training_data.csv
 fieldnames = [
     "event_id", "league_id", "league_name", "match_name", "match_date_utc", "venue",
-    "home_team", "away_team",
+    "home_team", "away_team", "split",
     "market", "checkpoint_over", "over_str", "snapshot_id",
     "balls_completed", "balls_remaining",
     "score", "wickets", "wickets_in_hand",
@@ -481,7 +498,10 @@ for r in all_rows:
     counts[key] += 1
     label_counts[key]["over" if r["label"] == 1 else "under"] += 1
 
+n_train = sum(1 for r in all_rows if r.get("split") == "train")
+n_test  = sum(1 for r in all_rows if r.get("split") == "test")
 print(f"\n── Summary ── {elapsed:.0f}s")
+print(f"Split: train={n_train}  test={n_test}  (cutoff={_train_cutoff or 'none'})")
 print(f"{'Market':<20} {'CP':>4} {'N':>6} {'OVER%':>7}")
 print("-" * 42)
 for (mkt, cp) in sorted(counts.keys()):
@@ -492,5 +512,7 @@ for (mkt, cp) in sorted(counts.keys()):
 dbutils.notebook.exit(json.dumps({
     "events_processed":  n_processed,
     "total_rows":        len(all_rows),
+    "n_train":           n_train,
+    "n_test":            n_test,
     "duration_seconds":  round(elapsed, 1),
 }))

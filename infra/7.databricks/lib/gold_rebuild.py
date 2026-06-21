@@ -12,12 +12,65 @@ import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from util import call_betsapi, download_json, extract_results, get_named_container_client, upload_json
 from tracker_writer import extract_innings_snapshot
 from league_config import load_disabled_league_ids
 from over_under_predictor import compute_over_under_predictions
+
+
+_OVER_ORD   = re.compile(r'^\d+(?:st|nd|rd|th)?\s+over', re.I)
+_PLAYER_RUN = re.compile(r'.+\s+innings\s+runs?$', re.I)
+_PLAYER_MIL = re.compile(r'.+\s+milestones?$', re.I)
+_TOP_BATTER = re.compile(r'.+\s+top\s+batter$', re.I)
+_TOP_BOWL   = re.compile(r'.+\s+top\s+bowl', re.I)
+_INN_TOTAL  = re.compile(r'.+\s+\d+\s+overs?\s+runs?$', re.I)
+_BALL_DEL   = re.compile(r'runs?\s+off\s+\d+\w*\s+delivery', re.I)
+_FALL_WKT   = re.compile(r'runs?\s+at\s+fall\s+of', re.I)
+
+
+def _categorise_market(name: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Map a market_group_name to (canonical_name, type, color). Returns (None, None, None) if unknown."""
+    g  = name.strip()
+    gl = g.lower()
+    if 'match winner' in gl:
+        return 'Match Winner', 'match', '#2563eb'
+    if _INN_TOTAL.match(g):
+        return 'Innings Total (O/U)', 'match', '#2563eb'
+    if _OVER_ORD.match(g):
+        if 'odd' in gl or 'even' in gl:
+            return 'Over Runs – Odd/Even', 'over', '#d97706'
+        if 'wicket' in gl:
+            return 'Over – Wicket', 'over', '#d97706'
+        return 'Over Total Runs', 'over', '#d97706'
+    if 'dismissal method' in gl or 'method of dismissal' in gl:
+        return 'Dismissal Method', 'ball', '#16a34a'
+    if _BALL_DEL.search(gl):
+        return 'Ball Delivery Runs', 'ball', '#16a34a'
+    if 'next batter out' in gl:
+        return 'Next Batter Out', 'player', '#9333ea'
+    if _PLAYER_RUN.match(g):
+        return 'Batter Innings Runs', 'player', '#9333ea'
+    if _PLAYER_MIL.match(g) or 'batter milestones' in gl:
+        return 'Batter Milestones', 'player', '#9333ea'
+    if _TOP_BATTER.match(g):
+        return 'Top Batter', 'match', '#2563eb'
+    if _TOP_BOWL.match(g):
+        return 'Top Bowler', 'match', '#2563eb'
+    if 'to score most runs' in gl:
+        return 'Top Scorer', 'match', '#2563eb'
+    if "6's" in gl or 'sixes' in gl:
+        return 'Team Sixes (O/U)', 'match', '#2563eb'
+    if 'highest' in gl and 'partnership' in gl:
+        return 'Opening Partnership', 'player', '#9333ea'
+    if _FALL_WKT.search(gl):
+        return 'Fall of Wicket Runs', 'player', '#9333ea'
+    if 'session runs' in gl:
+        return 'Session Runs', 'over', '#d97706'
+    if 'runs in first' in gl:
+        return 'Powerplay Runs', 'over', '#d97706'
+    return None, None, None
 
 
 def _utc_now():
@@ -105,6 +158,8 @@ def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = N
     final_score = silver_score if _2nd_runs(silver_score) >= _2nd_runs(gold_score) else gold_score
 
     raw_points: List[Dict[str, Any]] = []
+    heatmap_balls: List[Dict[str, Any]] = []
+    all_heatmap_cats: Dict[str, Dict] = {}
     errors = 0
     for ms_path in snapshot_paths:
         base = ms_path.removesuffix("/match_state.json")
@@ -134,6 +189,37 @@ def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = N
                             break
             if point is not None:
                 raw_points.append(point)
+
+            # Collect heatmap categories from active_markets
+            open_cats: Set[str] = set()
+            for mkt_row in active_markets_doc.get("rows", []):
+                grp_name = str(mkt_row.get("market_group_name") or "")
+                if not grp_name:
+                    continue
+                canon, mtype, mcolor = _categorise_market(grp_name)
+                if canon is None:
+                    continue
+                if canon not in all_heatmap_cats:
+                    all_heatmap_cats[canon] = {"type": mtype, "color": mcolor}
+                open_cats.add(canon)
+
+            if point is not None and open_cats:
+                over_str = str(point.get("over") or "0")
+                try:
+                    ov_f       = float(over_str)
+                    over_num   = int(ov_f)
+                    ball_in_ov = round((ov_f - over_num) * 10)
+                except Exception:
+                    over_num = 0
+                    ball_in_ov = 0
+                heatmap_balls.append({
+                    "over":     over_str,
+                    "over_num": over_num,
+                    "ball":     ball_in_ov,
+                    "innings":  point.get("innings", 1),
+                    "score":    f"{point.get('score', 0)}/{point.get('wickets', 0)}",
+                    "cats":     sorted(open_cats),
+                })
         except Exception:
             errors += 1
 
@@ -228,6 +314,18 @@ def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = N
     tracker["gender"] = "W" if ("women" in _combined or "(w)" in _combined) else "M"
 
     upload_json(gold, gold_tracker_path, tracker, overwrite=True)
+
+    # Heatmap — write pre-computed market availability grid to gold
+    if heatmap_balls and all_heatmap_cats:
+        try:
+            upload_json(gold, f"event_id={event_id}/heatmap.json", {
+                "event_id":         event_id,
+                "generated_at_utc": _utc_now().isoformat(),
+                "categories":       all_heatmap_cats,
+                "balls":            heatmap_balls,
+            }, overwrite=True)
+        except Exception:
+            pass
 
     # Over/Under predictions — silent no-op if models not on DBFS
     try:

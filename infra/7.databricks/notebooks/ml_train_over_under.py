@@ -52,7 +52,11 @@ os.makedirs(DBFS_MODEL_DIR, exist_ok=True)
 raw = gold.get_blob_client("ml/over_under_training_data.csv").download_blob().readall()
 reader = csv.DictReader(io.StringIO(raw.decode("utf-8")))
 all_rows = list(reader)
-print(f"Loaded {len(all_rows)} rows from training CSV")
+
+train_rows = [r for r in all_rows if r.get("split", "train") == "train"]
+test_rows  = [r for r in all_rows if r.get("split") == "test"]
+print(f"Loaded {len(all_rows)} rows from training CSV  (train={len(train_rows)}, test={len(test_rows)})")
+print(f"Training on train split only; test split used for held-out evaluation.")
 
 # ---------------------------------------------------------------------------
 # Feature definition
@@ -99,7 +103,7 @@ def _row_to_features(row: Dict) -> Optional[List[float]]:
 
 groups: Dict[Tuple[str, int], Tuple[List, List]] = defaultdict(lambda: ([], []))
 
-for row in all_rows:
+for row in train_rows:
     market = row.get("market", "")
     cp     = row.get("checkpoint_over", "")
     label  = _to_float(row.get("label"))
@@ -242,7 +246,7 @@ def _row_to_pooled_features(row: Dict) -> Optional[List[float]]:
 # Group by market only (all checkpoints pooled together)
 pooled_groups: Dict[str, Tuple[List, List]] = defaultdict(lambda: ([], []))
 
-for row in all_rows:
+for row in train_rows:
     market = row.get("market", "")
     label  = _to_float(row.get("label"))
     if label is None:
@@ -358,15 +362,70 @@ for market, (X_list, y_list) in sorted(pooled_groups.items()):
 # COMMAND ----------
 
 # ---------------------------------------------------------------------------
+# Held-out test evaluation (if test_rows exist)
+# ---------------------------------------------------------------------------
+
+test_eval = []
+if test_rows:
+    print(f"\n── Test set evaluation ({len(test_rows)} rows) ──")
+
+    # Load saved models and evaluate on test rows
+    for (mkt, cp), (_, _) in sorted(groups.items()):
+        model_key = f"{mkt}_cp{cp}"
+        model_path = os.path.join(DBFS_MODEL_DIR, f"{model_key}.pkl")
+        if not os.path.exists(model_path):
+            continue
+        with open(model_path, "rb") as f:
+            m_obj = pickle.load(f)
+        cp_test = [r for r in test_rows if r.get("market") == mkt and int(r.get("checkpoint_over", -1)) == cp]
+        fvecs = [_row_to_features(r) for r in cp_test]
+        labels = [int(_to_float(r.get("label"))) for r in cp_test]
+        pairs = [(fv, lb) for fv, lb in zip(fvecs, labels) if fv is not None]
+        if len(pairs) < 5:
+            continue
+        X_t = np.array([p[0] for p in pairs], dtype=np.float32)
+        y_t = np.array([p[1] for p in pairs], dtype=np.int32)
+        proba = m_obj["model"].predict_proba(X_t)[:, 1]
+        auc = roc_auc_score(y_t, proba) if len(set(y_t)) > 1 else float("nan")
+        test_eval.append({"key": model_key, "n": len(pairs), "test_auc": round(auc, 3)})
+        print(f"  {model_key:<30} n={len(pairs)}  test_auc={auc:.3f}")
+
+    # Pooled models on test set
+    for market in sorted(pooled_groups.keys()):
+        model_key = f"{market}_pooled"
+        model_path = os.path.join(DBFS_MODEL_DIR, f"{model_key}.pkl")
+        if not os.path.exists(model_path):
+            continue
+        with open(model_path, "rb") as f:
+            m_obj = pickle.load(f)
+        mkt_test = [r for r in test_rows if r.get("market") == market]
+        fvecs  = [_row_to_pooled_features(r) for r in mkt_test]
+        labels = [int(_to_float(r.get("label"))) for r in mkt_test]
+        pairs  = [(fv, lb) for fv, lb in zip(fvecs, labels) if fv is not None]
+        if len(pairs) < 5:
+            continue
+        X_t = np.array([p[0] for p in pairs], dtype=np.float32)
+        y_t = np.array([p[1] for p in pairs], dtype=np.int32)
+        proba = m_obj["model"].predict_proba(X_t)[:, 1]
+        auc = roc_auc_score(y_t, proba) if len(set(y_t)) > 1 else float("nan")
+        test_eval.append({"key": model_key, "n": len(pairs), "test_auc": round(auc, 3)})
+        print(f"  {model_key:<30} n={len(pairs)}  test_auc={auc:.3f}")
+else:
+    print("\nNo test rows — set train_cutoff_date in gold/ml/train_config.json to enable held-out evaluation.")
+
+# ---------------------------------------------------------------------------
 # Write metadata to gold
 # ---------------------------------------------------------------------------
 
 metadata = {
     "trained_at_utc":  datetime.now(timezone.utc).isoformat(),
     "n_models":        len(results),
+    "n_train_rows":    len(train_rows),
+    "n_test_rows":     len(test_rows),
     "features":        FEATURES,
     "pooled_features": POOLED_FEATURES,
     "models":          results,
+    "test_evaluation": test_eval,
 }
 gold.get_blob_client("ml/over_under_model_metadata.json").upload_blob(
     json.dumps(metadata, indent=2).encode(), overwrite=True

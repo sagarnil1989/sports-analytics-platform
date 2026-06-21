@@ -854,6 +854,67 @@ resource "azurerm_data_factory_pipeline" "backfill_databricks" {
 # hypothesis logic needs refreshing without re-processing bronze/silver/gold.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# ADF — pipeline: ML retrain (Databricks, manual trigger)
+#
+# Runs the two ML notebooks in sequence:
+#   1. ml_extract_over_under_features — scans gold, writes training CSV
+#   2. ml_train_over_under            — trains models, writes DBFS pkl + metadata
+#
+# Train/test split is controlled by gold/ml/train_config.json:
+#   {"train_cutoff_date": "2025-12-31"}
+# Rows with match_date_utc <= cutoff → split=train, else → split=test.
+# If the file is absent, all rows are treated as train.
+# ---------------------------------------------------------------------------
+
+resource "azurerm_data_factory_pipeline" "ml_retrain" {
+  name            = "pl_ml_retrain"
+  data_factory_id = data.azurerm_data_factory.main.id
+  description     = "Manual (Databricks): extract Over/Under features from gold then retrain LightGBM models. Train/test split set via gold/ml/train_config.json."
+
+  activities_json = jsonencode([
+    {
+      name = "ml_extract_over_under_features"
+      type = "DatabricksNotebook"
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      policy = {
+        timeout = "0.02:00:00"
+      }
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/ml/extract_over_under_features"
+        baseParameters = {
+          event_id = ""
+        }
+      }
+    },
+    {
+      name = "ml_train_over_under"
+      type = "DatabricksNotebook"
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      policy = {
+        timeout = "0.02:00:00"
+      }
+      dependsOn = [
+        {
+          activity             = "ml_extract_over_under_features"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/ml/train_over_under"
+      }
+    }
+  ])
+
+  depends_on = [azurerm_data_factory_linked_service_azure_databricks.main]
+}
+
 resource "azurerm_data_factory_pipeline" "hypothesis_databricks" {
   name            = "pl_hypothesis_databricks"
   data_factory_id = data.azurerm_data_factory.main.id

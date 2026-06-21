@@ -25,6 +25,7 @@ def view_home(req: func.HttpRequest) -> func.HttpResponse:
         <h2 style="margin:24px 0 4px; color:#333;">T20</h2>
         <h3 style="margin:16px 0 4px; color:#555; font-size:15px; text-transform:uppercase; letter-spacing:1px;">Model</h3>
         <div class="card"><a href="/api/ml/win-predictor">ML Win Predictor</a><p>Model performance, feature importances and algorithm comparison across all three prediction windows</p></div>
+        <div class="card"><a href="/api/ml/over-under">ML Over/Under Predictor</a><p>LightGBM models predicting innings total and first-12-overs Over/Under at checkpoint overs during inn1 — per-checkpoint and pooled models with CV-AUC and held-out test evaluation</p></div>
         <div class="card"><a href="/api/ml/feature-matrix">ML Feature Matrix</a><p>All matches × all features in one table — train/test split highlighted, selected features marked per model</p></div>
         <div class="card"><a href="/api/ml/score-predictor">Inn1 Score Predictor</a><p>Predicts final innings-1 score at over 6, 10 and 16 — MAE, RMSE, R² and per-match test predictions</p></div>
         <div class="card"><a href="/api/ml/score-matrix">Score Feature Matrix</a><p>All matches × score-predictor features — three cutoff tabs (over 6 / 10 / 16), train/test highlighted</p></div>

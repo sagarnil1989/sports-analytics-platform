@@ -6,146 +6,52 @@ from .common import (
 
 
 def view_market_heatmap_html(req: func.HttpRequest) -> func.HttpResponse:
-    """Post-match betting market heatmap. Reads silver state files."""
+    """Post-match betting market heatmap. Reads pre-computed gold/event_id={eid}/heatmap.json."""
     import re as _re
 
-    # ── market categorisation ─────────────────────────────────────────────────
-    _OVER_ORD   = _re.compile(r'^\d+(?:st|nd|rd|th)?\s+over', _re.I)
-    _PLAYER_RUN = _re.compile(r'.+\s+innings\s+runs?$', _re.I)
-    _PLAYER_MIL = _re.compile(r'.+\s+milestones?$', _re.I)
-    _TOP_BATTER = _re.compile(r'.+\s+top\s+batter$', _re.I)
-    _TOP_BOWL   = _re.compile(r'.+\s+top\s+bowl', _re.I)
-    _INN_TOTAL  = _re.compile(r'.+\s+\d+\s+overs?\s+runs?$', _re.I)
-    _BALL_DEL   = _re.compile(r'runs?\s+off\s+\d+\w*\s+delivery', _re.I)
-    _FALL_WKT   = _re.compile(r'runs?\s+at\s+fall\s+of', _re.I)
-
-    def _categorise(name: str):
-        g = name.strip()
-        gl = g.lower()
-        if 'match winner' in gl:
-            return 'Match Winner', 'match', '#2563eb'
-        if _INN_TOTAL.match(g):
-            return 'Innings Total (O/U)', 'match', '#2563eb'
-        if _OVER_ORD.match(g):
-            if 'odd' in gl or 'even' in gl:
-                return 'Over Runs – Odd/Even', 'over', '#d97706'
-            if 'wicket' in gl:
-                return 'Over – Wicket', 'over', '#d97706'
-            return 'Over Total Runs', 'over', '#d97706'
-        if 'dismissal method' in gl or 'method of dismissal' in gl:
-            return 'Dismissal Method', 'ball', '#16a34a'
-        if _BALL_DEL.search(gl):
-            return 'Ball Delivery Runs', 'ball', '#16a34a'
-        if 'next batter out' in gl:
-            return 'Next Batter Out', 'player', '#9333ea'
-        if _PLAYER_RUN.match(g):
-            return 'Batter Innings Runs', 'player', '#9333ea'
-        if _PLAYER_MIL.match(g) or 'batter milestones' in gl:
-            return 'Batter Milestones', 'player', '#9333ea'
-        if _TOP_BATTER.match(g):
-            return 'Top Batter', 'match', '#2563eb'
-        if _TOP_BOWL.match(g):
-            return 'Top Bowler', 'match', '#2563eb'
-        if 'to score most runs' in gl:
-            return 'Top Scorer', 'match', '#2563eb'
-        if "6's" in gl or 'sixes' in gl:
-            return 'Team Sixes (O/U)', 'match', '#2563eb'
-        if 'highest' in gl and 'partnership' in gl:
-            return 'Opening Partnership', 'player', '#9333ea'
-        if _FALL_WKT.search(gl):
-            return 'Fall of Wicket Runs', 'player', '#9333ea'
-        if 'session runs' in gl:
-            return 'Session Runs', 'over', '#d97706'
-        if 'runs in first' in gl:
-            return 'Powerplay Runs', 'over', '#d97706'
-        return None, None, None   # skip unknown
-
-    event_id = req.route_params.get("event_id", "")
-    return func.HttpResponse(
-        f"<h2>Heatmap not available</h2><p>Event {escape(event_id)}: market heatmap data has not been migrated to gold yet.</p>",
-        status_code=503, mimetype="text/html",
-    )
-
-    try:  # noqa: unreachable — kept for future re-enable
+    try:
         event_id = req.route_params.get("event_id", "")
         gold_c   = get_named_container_client("gold")
 
-        # ── load gold tracker for match meta + final score ────────────────────
-        tracker = (
-            download_json(gold_c, f"event_id={event_id}/innings_tracker.json")
-            or {}
-        )
-        match_name  = escape(tracker.get("match_name") or f"Event {event_id}")
-        home_team   = tracker.get("home_team_name") or ""
-        away_team   = tracker.get("away_team_name") or ""
-        final_ss    = tracker.get("final_score_ss") or ""
-        stadium     = tracker.get("stadium_data") or {}
-        venue_str   = stadium.get("name") or tracker.get("venue") or ""
+        # ── load gold tracker for match meta ──────────────────────────────────
+        tracker = download_json(gold_c, f"event_id={event_id}/innings_tracker.json") or {}
+        match_name = escape(tracker.get("match_name") or f"Event {event_id}")
+        home_team  = tracker.get("home_team_name") or ""
+        away_team  = tracker.get("away_team_name") or ""
+        final_ss   = tracker.get("score_summary_events") or ""
+        stadium    = tracker.get("stadium_data") or {}
+        venue_str  = stadium.get("name") or tracker.get("venue") or ""
 
-        # ── load & sort silver state files ────────────────────────────────────
-        def _sort_key(bname):
-            m = _re.match(r'state_(\d+)_(\d+)_(\d+)_(\d+)\.json', bname.rsplit("/", 1)[-1])
-            return (int(m.group(1)), int(m.group(2)), int(m.group(4)), int(m.group(3))) if m else (99,999,99,99)
-
-        prefix = f"event_id={event_id}/state/"
-        blobs  = sorted(
-            [b.name for b in silver_c.list_blobs(name_starts_with=prefix) if b.name.endswith(".json")],
-            key=_sort_key
-        )
-
-        if not blobs:
+        # ── load pre-computed heatmap data from gold ──────────────────────────
+        heatmap_doc = download_json(gold_c, f"event_id={event_id}/heatmap.json")
+        if not heatmap_doc or not heatmap_doc.get("balls"):
             return func.HttpResponse(
-                f"No silver state files found for event {event_id}. Run the silver reprocessor first.",
-                status_code=404
+                f"<h2>Heatmap not available</h2>"
+                f"<p>Event {escape(event_id)}: heatmap data has not been built yet. "
+                f"Run the silver_to_gold pipeline to generate it.</p>",
+                status_code=404, mimetype="text/html",
             )
 
-        # ── build ball × market matrix ────────────────────────────────────────
-        # balls: list of {over, innings, score, wickets, market_cats: set}
+        # ── unpack heatmap data ───────────────────────────────────────────────
+        # categories: {name: {type, color}}  →  all_cats: {name: (type, color)}
+        cats_meta = heatmap_doc.get("categories") or {}
+        all_cats: Dict[str, tuple] = {k: (v["type"], v["color"]) for k, v in cats_meta.items()}
+
+        # balls: list of {over, over_num, ball, innings, score, cats: [str]}
+        raw_balls = heatmap_doc.get("balls") or []
         balls = []
-        all_cats: Dict[str, tuple] = {}  # canonical_name -> (type, color)
-
-        for bname in blobs:
-            try:
-                state = download_json(silver_c, bname)
-            except Exception:
-                continue
-            if not state:
-                continue
-
-            over    = str(state.get("over") or "0.0")
-            innings = int(state.get("innings") or 1)
-            score   = str(state.get("score") or "0/0")
-            runs    = state.get("runs")
-            wkts    = state.get("wickets")
-
-            # parse over to float
-            try:
-                ov_f = float(over)
-            except Exception:
-                ov_f = 0.0
-            over_num    = int(ov_f)
-            ball_in_ov  = round((ov_f - over_num) * 10)
-
-            open_cats: set = set()
-            for mkt in state.get("markets", []):
-                grp = str(mkt.get("market_group_name") or "")
-                if not grp:
-                    continue
-                canon, mtype, mcolor = _categorise(grp)
-                if canon is None:
-                    continue
-                if canon not in all_cats:
-                    all_cats[canon] = (mtype, mcolor)
-                open_cats.add(canon)
-
+        for b in raw_balls:
             balls.append({
-                "over": over, "over_num": over_num, "ball": ball_in_ov,
-                "innings": innings, "score": score, "runs": runs, "wkts": wkts,
-                "cats": open_cats,
+                "over":     b.get("over", "0"),
+                "over_num": b.get("over_num", 0),
+                "ball":     b.get("ball", 0),
+                "innings":  b.get("innings", 1),
+                "score":    b.get("score", "0/0"),
+                "cats":     set(b.get("cats") or []),
             })
 
         if not balls:
-            return func.HttpResponse("No market data in silver state files.", status_code=404)
+            return func.HttpResponse("No market data found in heatmap.", status_code=404)
 
         # ── order market rows: match → over → ball → player ──────────────────
         _TYPE_ORDER = {"match": 0, "over": 1, "ball": 2, "player": 3}

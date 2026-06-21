@@ -29,6 +29,8 @@ from views import (
     view_glossary_html,
     view_hypothesis_inn2_over6,
     view_hypothesis_timeout_wicket,
+    view_ml_over_under_html,
+    view_ml_over_under_config_post,
 )
 
 app = func.FunctionApp()
@@ -196,6 +198,16 @@ def get_glossary_html(req: func.HttpRequest) -> func.HttpResponse:
 # ---------------------------------------------------------------------------
 # HTTP routes — Hypothesis
 # ---------------------------------------------------------------------------
+
+@app.route(route="ml/over-under", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_ml_over_under_html(req: func.HttpRequest) -> func.HttpResponse:
+    return view_ml_over_under_html(req)
+
+
+@app.route(route="ml/over-under/config", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+def post_ml_over_under_config(req: func.HttpRequest) -> func.HttpResponse:
+    return view_ml_over_under_config_post(req)
+
 
 @app.route(route="hypothesis/inn2-over6", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_hypothesis_inn2_over6(req: func.HttpRequest) -> func.HttpResponse:
