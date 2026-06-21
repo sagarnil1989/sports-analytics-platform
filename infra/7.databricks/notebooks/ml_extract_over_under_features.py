@@ -269,18 +269,24 @@ def extract_rows_for_event(event_id: str, tracker: Dict, train_cutoff: str = "")
     else:
         split = "train"
 
+    # Batting team in inn1 (first row with batting_team set)
+    batting_team_inn1 = next(
+        (r.get("batting_team") for r in inn1_rows if r.get("batting_team")), None
+    )
+
     common = {
-        "event_id":        event_id,
-        "league_id":       tracker.get("league_id"),
-        "league_name":     tracker.get("league_name"),
-        "match_name":      tracker.get("match_name"),
-        "match_date_utc":  tracker.get("match_date_utc"),
-        "venue":           tracker.get("venue"),
-        "home_team":       tracker.get("home_team_name"),
-        "away_team":       tracker.get("away_team_name"),
-        "actual_inn1_total": actual_total,
-        "inn1_outcome":    outcome,   # vs innings-total line at last snapshot
-        "split":           split,
+        "event_id":           event_id,
+        "league_id":          tracker.get("league_id"),
+        "league_name":        tracker.get("league_name"),
+        "match_name":         tracker.get("match_name"),
+        "match_date_utc":     tracker.get("match_date_utc"),
+        "venue":              tracker.get("venue"),
+        "home_team":          tracker.get("home_team_name"),
+        "away_team":          tracker.get("away_team_name"),
+        "batting_team_inn1":  batting_team_inn1,
+        "actual_inn1_total":  actual_total,
+        "inn1_outcome":       outcome,
+        "split":              split,
     }
 
     output_rows = []
@@ -463,7 +469,7 @@ if not all_rows:
 # Write as CSV to gold/ml/over_under_training_data.csv
 fieldnames = [
     "event_id", "league_id", "league_name", "match_name", "match_date_utc", "venue",
-    "home_team", "away_team", "split",
+    "home_team", "away_team", "batting_team_inn1", "split",
     "market", "checkpoint_over", "over_str", "snapshot_id",
     "balls_completed", "balls_remaining",
     "score", "wickets", "wickets_in_hand",

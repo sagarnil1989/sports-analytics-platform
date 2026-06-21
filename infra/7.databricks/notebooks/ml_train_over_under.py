@@ -413,6 +413,120 @@ if test_rows:
 else:
     print("\nNo test rows — set train_cutoff_date in gold/ml/train_config.json to enable held-out evaluation.")
 
+# COMMAND ----------
+
+# ---------------------------------------------------------------------------
+# Per-match predictions for display page
+#
+# For each (market, checkpoint), apply the inference model (per-cp if AUC ≥ 0.60,
+# else pooled) to every train and test row and record the prediction.
+# Written to gold/ml/over_under_match_predictions.json — read by the display page.
+# ---------------------------------------------------------------------------
+
+_AUC_THRESHOLD = 0.60
+
+def _apply_model(m_obj, fvec):
+    try:
+        X = np.array([fvec], dtype=np.float32)
+        return float(m_obj["model"].predict_proba(X)[0][1])
+    except Exception:
+        return None
+
+def _pred_row(r, prob):
+    lbl = _to_float(r.get("label"))
+    if lbl is None or prob is None:
+        return None
+    actual    = "over" if int(lbl) == 1 else "under"
+    predicted = "over" if prob >= 0.5 else "under"
+    return {
+        "event_id":      r.get("event_id"),
+        "match_name":    r.get("match_name"),
+        "match_date":    str(r.get("match_date_utc") or "")[:10],
+        "batting_team":  r.get("batting_team_inn1") or r.get("home_team"),
+        "home_team":     r.get("home_team"),
+        "away_team":     r.get("away_team"),
+        "score_at_cp":   r.get("score"),
+        "wickets_at_cp": r.get("wickets"),
+        "over_str":      r.get("over_str"),
+        "betting_line":  r.get("betting_line"),
+        "actual_value":  r.get("actual_value"),
+        "actual_result": actual,
+        "predicted":     predicted,
+        "prob_over":     round(prob, 3),
+        "correct":       actual == predicted,
+    }
+
+# Load pooled models once
+_pooled_cache = {}
+for _mkt in sorted(set(r.get("market") for r in all_rows)):
+    _pk = f"{_mkt}_pooled"
+    _pp = os.path.join(DBFS_MODEL_DIR, f"{_pk}.pkl")
+    if os.path.exists(_pp):
+        with open(_pp, "rb") as f:
+            _pooled_cache[_mkt] = pickle.load(f)
+
+match_preds_out = {
+    "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+    "n_train_rows":     len(train_rows),
+    "n_test_rows":      len(test_rows),
+    "markets":          {},
+}
+
+for _mkt in sorted(set(r.get("market") for r in all_rows)):
+    _cps = sorted(set(int(r.get("checkpoint_over", 0)) for r in all_rows if r.get("market") == _mkt))
+    match_preds_out["markets"][_mkt] = {"checkpoints": {}}
+
+    for _cp in _cps:
+        _per_cp_key  = f"{_mkt}_cp{_cp}"
+        _per_cp_meta = model_meta.get(_per_cp_key, {})
+        _cv_auc      = _per_cp_meta.get("cv_auc", 0.0)
+        _use_per_cp  = _cv_auc >= _AUC_THRESHOLD
+
+        _per_cp_obj = None
+        _per_cp_path = os.path.join(DBFS_MODEL_DIR, f"{_per_cp_key}.pkl")
+        if _use_per_cp and os.path.exists(_per_cp_path):
+            with open(_per_cp_path, "rb") as f:
+                _per_cp_obj = pickle.load(f)
+
+        _active_obj     = _per_cp_obj if _per_cp_obj else _pooled_cache.get(_mkt)
+        _active_key     = _per_cp_key if _per_cp_obj else f"{_mkt}_pooled"
+        _use_pooled_fv  = _per_cp_obj is None
+
+        if _active_obj is None:
+            continue
+
+        def _collect(rows):
+            out = []
+            for r in rows:
+                if r.get("market") != _mkt or int(r.get("checkpoint_over", -1)) != _cp:
+                    continue
+                fv = _row_to_features(r) if not _use_pooled_fv else _row_to_pooled_features(r)
+                if fv is None:
+                    continue
+                prob = _apply_model(_active_obj, fv)
+                row  = _pred_row(r, prob)
+                if row:
+                    out.append(row)
+            return out
+
+        _train_preds = _collect(train_rows)
+        _test_preds  = _collect(test_rows)
+
+        match_preds_out["markets"][_mkt]["checkpoints"][str(_cp)] = {
+            "model_used": _active_key,
+            "cv_auc":     round(_cv_auc, 3),
+            "n_train":    len(_train_preds),
+            "n_test":     len(_test_preds),
+            "train":      _train_preds,
+            "test":       _test_preds,
+        }
+        print(f"  [{_mkt} cp={_cp}] model={_active_key}  train={len(_train_preds)}  test={len(_test_preds)}")
+
+gold.get_blob_client("ml/over_under_match_predictions.json").upload_blob(
+    json.dumps(match_preds_out, indent=2).encode(), overwrite=True
+)
+print("Per-match predictions written to gold/ml/over_under_match_predictions.json")
+
 # ---------------------------------------------------------------------------
 # Write metadata to gold
 # ---------------------------------------------------------------------------

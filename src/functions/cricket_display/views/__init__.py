@@ -54,6 +54,7 @@ from .hypothesis import (
 from .over_under_view import (
     view_ml_over_under_html,
     view_ml_over_under_config_post,
+    view_ml_over_under_market_html,
 )
 
 __all__ = [
@@ -77,4 +78,5 @@ __all__ = [
     "view_hypothesis_timeout_wicket",
     "view_ml_over_under_html",
     "view_ml_over_under_config_post",
+    "view_ml_over_under_market_html",
 ]
