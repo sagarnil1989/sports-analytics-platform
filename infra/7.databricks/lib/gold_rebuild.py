@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from util import call_betsapi, download_json, extract_results, get_named_container_client, upload_json
 from tracker_writer import extract_innings_snapshot
 from league_config import load_disabled_league_ids
+from over_under_predictor import compute_over_under_predictions
 
 
 def _utc_now():
@@ -227,6 +228,12 @@ def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = N
     tracker["gender"] = "W" if ("women" in _combined or "(w)" in _combined) else "M"
 
     upload_json(gold, gold_tracker_path, tracker, overwrite=True)
+
+    # Over/Under predictions — silent no-op if models not on DBFS
+    try:
+        compute_over_under_predictions(silver, gold, event_id, tracker)
+    except Exception:
+        pass
 
     return {
         "event_id": event_id,

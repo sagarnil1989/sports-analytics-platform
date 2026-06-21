@@ -13,7 +13,8 @@ dbutils.widgets.text("event_id", "")
 import subprocess
 subprocess.run([
     "pip", "install", "--quiet",
-    "azure-storage-blob", "azure-storage-file-datalake", "requests", "azure-functions"
+    "azure-storage-blob", "azure-storage-file-datalake", "requests", "azure-functions",
+    "lightgbm", "scikit-learn",
 ], check=True)
 
 # COMMAND ----------

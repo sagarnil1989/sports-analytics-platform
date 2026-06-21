@@ -162,6 +162,99 @@ def view_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
 
 
+def _build_ou_section_html(ou_preds: Dict, home_team: str, away_team: str) -> str:
+    """
+    Build the Over/Under predictions HTML section from over_under_predictions.json.
+    Returns empty string if no predictions available.
+    """
+    it_rows  = ou_preds.get("innings_total", [])
+    f12_rows = ou_preds.get("first_12_overs", [])
+    if not it_rows and not f12_rows:
+        return ""
+
+    def _prob_bar(prob_over: float) -> str:
+        pct_o = round(prob_over * 100)
+        pct_u = 100 - pct_o
+        return (
+            f'<div class="ou-prob-bar">'
+            f'<div class="ou-prob-over" style="width:{pct_o}%">{pct_o}%</div>'
+            f'<div class="ou-prob-under" style="width:{pct_u}%">{pct_u}%</div>'
+            f'</div>'
+        )
+
+    def _outcome_cell(p: Dict) -> str:
+        outcome = p.get("outcome")
+        if not outcome:
+            return '<span class="ou-outcome-pending">Pending</span>'
+        prob_over = p.get("prob_over", 0.5)
+        predicted = "over" if prob_over >= 0.5 else "under"
+        correct   = (predicted == outcome)
+        label     = f"{'▲' if outcome == 'over' else '▼'} {outcome.upper()}"
+        cls       = "ou-outcome-correct" if correct else "ou-outcome-wrong"
+        tick      = " ✓" if correct else " ✗"
+        return f'<span class="{cls}">{label}{tick}</span>'
+
+    def _conf_badge(auc: float) -> str:
+        if auc >= 0.65:
+            return '<span style="background:#27ae60;color:white;font-size:10px;padding:1px 5px;border-radius:3px;">High</span>'
+        if auc >= 0.55:
+            return '<span style="background:#f39c12;color:white;font-size:10px;padding:1px 5px;border-radius:3px;">Med</span>'
+        return '<span class="ou-conf-low">Low</span>'
+
+    def _render_market_table(rows: List[Dict], title: str, subtitle: str) -> str:
+        if not rows:
+            return ""
+        header = (
+            f'<h3>{title}</h3>'
+            f'<div class="ou-sub">{subtitle}</div>'
+            '<table class="ou-table">'
+            '<thead><tr>'
+            '<th>Over</th><th>Score</th><th>Betting Line</th>'
+            '<th>Odds (O/U)</th><th>P(OVER) vs P(UNDER)</th>'
+            '<th>Confidence</th><th>Outcome</th>'
+            '</tr></thead><tbody>'
+        )
+        body = ""
+        for p in rows:
+            cp       = p.get("checkpoint_over", "?")
+            score    = p.get("score", "?")
+            wkts     = 10 - p.get("wickets_in_hand", 10)
+            line     = p.get("betting_line", "?")
+            ov_odds  = p.get("over_odds")
+            un_odds  = p.get("under_odds")
+            prob_o   = p.get("prob_over", 0.5)
+            auc      = p.get("model_auc", 0)
+            odds_str = f"{ov_odds} / {un_odds}" if ov_odds and un_odds else "—"
+            body += (
+                f'<tr>'
+                f'<td><b>{cp}</b></td>'
+                f'<td>{score}/{wkts}</td>'
+                f'<td><b>{line}</b></td>'
+                f'<td style="color:#666;font-size:12px;">{escape(odds_str)}</td>'
+                f'<td>{_prob_bar(prob_o)}</td>'
+                f'<td>{_conf_badge(auc)}</td>'
+                f'<td>{_outcome_cell(p)}</td>'
+                f'</tr>'
+            )
+        return header + body + "</tbody></table>"
+
+    it_html  = _render_market_table(
+        it_rows,
+        "Innings Total — Over/Under Predictions",
+        "Does the 1st innings total beat the Bet365 line? Checkpoint = over at which prediction is made.",
+    )
+    f12_html = _render_market_table(
+        f12_rows,
+        "First 12 Overs — Over/Under Predictions",
+        "Does the batting team's 12-over total beat the Bet365 First 12 Overs line?",
+    )
+
+    gen_time = escape(str(ou_preds.get("generated_at_utc", ""))[:16].replace("T", " "))
+    footer   = f'<div style="font-size:11px;color:#aaa;margin-top:4px;">Predictions generated {gen_time} UTC · Confidence = model CV-AUC</div>'
+
+    return f'<div class="ou-section">{it_html}{f12_html}{footer}</div>'
+
+
 def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
     """Innings tracker built from silver data.
 
@@ -301,10 +394,14 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
                 {venue_line}
             </div>"""
         actual_total = tracker.get("actual_total")
-        if actual_total is None and _ended2:
+        if actual_total is None and "_ended2" in dir() and _ended2:
             _es2 = parse_ss_final_scores(_ended2.get("score", ""))
             actual_total = _es2.get("inn1_runs")
         outcome      = tracker.get("outcome")
+
+        # ── Over/Under predictions section ────────────────────────────────────
+        ou_preds     = download_json(gold, f"event_id={event_id}/over_under_predictions.json") or {}
+        ou_section_html = _build_ou_section_html(ou_preds, home_team, away_team)
 
         def ball_pill(b: str) -> str:
             b = str(b).strip()
@@ -477,6 +574,19 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
         .sb-result {{ font-size: 14px; font-weight: bold; color: #155724; background: #d4edda;
                       border-radius: 6px; padding: 6px 12px; display: inline-block; margin-bottom: 8px; }}
         .sb-venue {{ font-size: 13px; color: #555; margin-top: 8px; }}
+        .ou-section {{ background: white; border-radius: 10px; box-shadow: 0 2px 8px #ddd; padding: 18px 24px; margin: 16px 0; }}
+        .ou-section h3 {{ margin: 0 0 4px 0; font-size: 15px; color: #1a1a2e; }}
+        .ou-section .ou-sub {{ font-size: 12px; color: #888; margin-bottom: 12px; }}
+        .ou-table {{ width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 14px; }}
+        .ou-table th {{ background: #2c3e50; color: white; padding: 7px 10px; text-align: left; font-size: 12px; }}
+        .ou-table td {{ padding: 7px 10px; border-bottom: 1px solid #eee; }}
+        .ou-prob-bar {{ display: flex; height: 18px; border-radius: 4px; overflow: hidden; width: 120px; }}
+        .ou-prob-over {{ background: #27ae60; display: flex; align-items: center; justify-content: center; color: white; font-size: 10px; font-weight: bold; }}
+        .ou-prob-under {{ background: #e74c3c; display: flex; align-items: center; justify-content: center; color: white; font-size: 10px; font-weight: bold; }}
+        .ou-outcome-correct {{ color: #155724; font-weight: bold; }}
+        .ou-outcome-wrong {{ color: #721c24; font-weight: bold; }}
+        .ou-outcome-pending {{ color: #888; }}
+        .ou-conf-low {{ font-size: 11px; color: #aaa; }}
     </style>
 </head>
 <body>
@@ -486,6 +596,7 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
     <div class="meta">{display_match_name} &nbsp;|&nbsp; {len(rows_data)} snapshots captured</div>
     {scoreboard_html}
     {summary_html}
+    {ou_section_html}
     <table>
         <thead>
             <tr>
