@@ -867,8 +867,8 @@ resource "azurerm_data_factory_pipeline" "backfill_databricks" {
 # If the file is absent, all rows are treated as train.
 # ---------------------------------------------------------------------------
 
-resource "azurerm_data_factory_pipeline" "ml_retrain" {
-  name            = "pl_ml_retrain"
+resource "azurerm_data_factory_pipeline" "over_under_retrain" {
+  name            = "pl_over_under_retrain"
   data_factory_id = data.azurerm_data_factory.main.id
   description     = "Manual (Databricks): extract Over/Under features from gold then retrain LightGBM models. Train/test split set via gold/ml/train_config.json."
 
