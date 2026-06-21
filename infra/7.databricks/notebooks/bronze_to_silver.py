@@ -34,10 +34,10 @@ _src = "dbfs:/FileStore/cricket-pipeline/src"
 conn_str = dbutils.secrets.get("cricket-pipeline", "DATA_STORAGE_CONNECTION_STRING")
 sport_id = dbutils.secrets.get("cricket-pipeline", "SPORT_ID")
 
-svc     = BlobServiceClient.from_connection_string(conn_str)
-bronze  = svc.get_container_client("bronze")
-silver  = svc.get_container_client("silver")
-landing = svc.get_container_client("landing")
+svc    = BlobServiceClient.from_connection_string(conn_str)
+bronze = svc.get_container_client("bronze")
+silver = svc.get_container_client("silver")
+pq     = svc.get_container_client("process-queue")
 
 QUIET_THRESHOLD_MINUTES = 60
 PARALLEL_WORKERS        = 128  # IO-bound blob ops — threads >> cores is correct for network-bound work
@@ -80,15 +80,15 @@ print(f"run_id: {run_id}")
 print(f"event_id filter: {event_id_filter or '(all quiet matches)'}")
 
 # COMMAND ----------
-# ── STEP 1 + 2: Read landing index AND silver markers in parallel ─────────────
+# ── STEP 1 + 2: Read process-queue in-progress file AND silver markers in parallel ──
 
 from concurrent.futures import ThreadPoolExecutor as _ScanPool
 
-_load_from_dbfs("landing_index", f"{_src}/landing_index.py")
-from landing_index import read_landing_index
+_load_from_dbfs("process_queue", f"{_src}/process_queue.py")
+from process_queue import read_in_progress
 
-def _read_landing():
-    return read_landing_index(landing, run_id)
+def _read_in_progress():
+    return read_in_progress(pq, run_id)
 
 def _scan_complete_events():
     complete = set()
@@ -99,17 +99,17 @@ def _scan_complete_events():
     return complete
 
 t0 = time.monotonic()
-print("Reading landing index + silver markers in parallel...")
+print("Reading process-queue in-progress + silver markers in parallel...")
 with _ScanPool(max_workers=2) as pool:
-    f_landing  = pool.submit(_read_landing)
-    f_complete = pool.submit(_scan_complete_events)
-    bronze_events   = f_landing.result()
+    f_in_progress = pool.submit(_read_in_progress)
+    f_complete    = pool.submit(_scan_complete_events)
+    bronze_events   = f_in_progress.result()
     complete_events = f_complete.result()
 
 total_events    = len(bronze_events)
 total_manifests = sum(len(v) for v in bronze_events.values())
-print(f"  landing  : {total_events} events | {total_manifests} snapshots (since last watermark)")
-print(f"  complete : {len(complete_events)} events already done (will skip)")
+print(f"  in-progress : {total_events} events | {total_manifests} snapshots (from process-queue)")
+print(f"  complete    : {len(complete_events)} events already done (will skip)")
 print(f"  listing took {time.monotonic()-t0:.1f}s")
 
 # COMMAND ----------
@@ -189,17 +189,15 @@ def process_snapshot(item):
                                or _dl(bronze, f"{base}/event_odds_by_event_id.json")
                                or _dl(bronze, f"{base}/event_odds.json"))
 
-    # Bronze capture was incomplete (ingestion bug from early June): manifest was
-    # written to the new snapshot_id format but API payloads were never persisted.
-    # These snapshots have no recoverable data — skip rather than fail.
+    # Skip snapshots where core match-state payloads are missing — either all three
+    # absent (ingestion bug, early June) or just events_inplay absent (network timeout).
+    # event_odds is supplementary odds data; None is handled gracefully by the parser.
     if events_inplay_payload is None and bet365_event_payload is None and event_odds_payload is None:
         raise _IncompleteCapture(f"all core payloads missing — incomplete bronze capture")
     if events_inplay_payload is None:
-        raise FileNotFoundError(f"events_inplay missing: {base}")
+        raise _IncompleteCapture(f"events_inplay missing — partial capture, no recoverable match state: {base}")
     if bet365_event_payload is None:
         raise FileNotFoundError(f"bet365_event missing: {base}")
-    if event_odds_payload is None:
-        raise FileNotFoundError(f"event_odds missing: {base}")
     event_view_payload     = (_dl(bronze, f"{base}/api_event_view.json")
                                or _dl(bronze, f"{base}/event_view_by_event_id.json"))
     event_odds_summary     = (_dl(bronze, f"{base}/api_event_odds_summary.json")

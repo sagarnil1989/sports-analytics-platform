@@ -45,6 +45,12 @@ resource "azurerm_storage_container" "landing" {
   container_access_type = "private"
 }
 
+resource "azurerm_storage_container" "process_queue" {
+  name                  = "process-queue"
+  storage_account_id    = azurerm_storage_account.data_lake.id
+  container_access_type = "private"
+}
+
 resource "azurerm_storage_account" "function_storage" {
   name                     = local.config.function_storage_account_name
   resource_group_name      = data.azurerm_resource_group.rg.name

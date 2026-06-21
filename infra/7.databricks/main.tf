@@ -159,6 +159,11 @@ resource "databricks_dbfs_file" "landing_index_py" {
   path   = "${local.dbfs_src_path}/landing_index.py"
 }
 
+resource "databricks_dbfs_file" "process_queue_py" {
+  source = "${path.module}/lib/process_queue.py"
+  path   = "${local.dbfs_src_path}/process_queue.py"
+}
+
 resource "databricks_notebook" "hypothesis_inn2_over6" {
   source   = "${path.module}/notebooks/hypothesis_inn2_over6.py"
   path     = "/cricket-pipeline/hypothesis/inn2_over6"
@@ -177,15 +182,15 @@ resource "databricks_notebook" "analysis_ended_match_table" {
   language = "PYTHON"
 }
 
-resource "databricks_notebook" "index_new_snapshots" {
-  source   = "${path.module}/notebooks/index_new_snapshots.py"
-  path     = "/cricket-pipeline/index_new_snapshots"
+resource "databricks_notebook" "read_pending_queue" {
+  source   = "${path.module}/notebooks/read_pending_queue.py"
+  path     = "/cricket-pipeline/read_pending_queue"
   language = "PYTHON"
 }
 
-resource "databricks_notebook" "update_watermark" {
-  source   = "${path.module}/notebooks/update_watermark.py"
-  path     = "/cricket-pipeline/update_watermark"
+resource "databricks_notebook" "delete_processed_markers" {
+  source   = "${path.module}/notebooks/delete_processed_markers.py"
+  path     = "/cricket-pipeline/delete_processed_markers"
   language = "PYTHON"
 }
 

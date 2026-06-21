@@ -149,13 +149,15 @@ def extract_current_score_context(match_snapshot: Dict[str, Any]) -> Dict[str, A
 
 
 def extract_event_odds_records(
-    event_odds_payload: Dict[str, Any],
+    event_odds_payload: Optional[Dict[str, Any]],
     snapshot_id: str,
     snapshot_time_utc: str,
     event_id: str,
     fi: str,
     score_context: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
+    if event_odds_payload is None:
+        return []
     body = event_odds_payload.get("response", {}).get("body", {})
     results = body.get("results", {}) if isinstance(body, dict) else {}
     stats = results.get("stats", {}) if isinstance(results, dict) else {}

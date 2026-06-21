@@ -418,4 +418,14 @@ def bronze_capture_cricket_inplay_snapshot() -> None:
             "last_snapshot_id": snapshot_id,
         }, overwrite=True)
 
+        # Write a lightweight pending marker so read_pending_queue can discover
+        # this snapshot without scanning all 300k+ bronze blobs.
+        pq_container = get_named_container_client("process-queue")
+        upload_json(pq_container, f"pending/event_id={event_id}/{snapshot_id}.json", {
+            "event_id":        event_id,
+            "snapshot_id":     snapshot_id,
+            "manifest_path":   f"{base_path}/manifest.json",
+            "captured_at_utc": snapshot_time.isoformat(),
+        })
+
         captured += 1

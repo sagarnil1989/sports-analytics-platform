@@ -82,10 +82,11 @@ resource "azurerm_role_assignment" "adf_storage_blob_contributor" {
 # ---------------------------------------------------------------------------
 # ADF — parameterized dataset for the landing index blob
 #
-# Used by the native Delete activity (cleanup_landing) to delete
-# landing/{run_id}/index.json without any compute. The Delete activity
-# handles "blob not found" gracefully — no error if index_new_snapshots
-# itself failed before writing the file.
+# Retained for reference and backward compatibility with any manual
+# pl_backfill runs that still use the old landing-index pattern.
+# The active pipelines (pl_build_ended_match, pl_backfill, and their
+# Databricks mirrors) no longer depend on this dataset — they use
+# process-queue/in-progress/{run_id}.json instead.
 # ---------------------------------------------------------------------------
 
 resource "azapi_resource" "adf_dataset_landing_index" {
@@ -187,11 +188,11 @@ resource "azurerm_data_factory_linked_service_azure_databricks" "main" {
 resource "azurerm_data_factory_pipeline" "build_ended_match" {
   name            = "pl_build_ended_match"
   data_factory_id = data.azurerm_data_factory.main.id
-  description     = "Daily (Batch): landing index → silver parse → gold rebuild → ended index → update watermark. Hypothesis runs separately via pl_hypothesis."
+  description     = "Daily (Batch): process-queue → silver parse → gold rebuild → ended index → delete pending markers. Hypothesis runs separately via pl_hypothesis."
 
   activities_json = jsonencode([
     {
-      name = "index_new_snapshots"
+      name = "read_pending_queue"
       type = "Custom"
       policy = {
         timeout = "0.01:00:00"
@@ -201,7 +202,7 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
         type          = "LinkedServiceReference"
       }
       typeProperties = {
-        command = "python3 index_new_snapshots.py"
+        command = "python3 read_pending_queue.py"
         resourceLinkedService = {
           referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
           type          = "LinkedServiceReference"
@@ -223,7 +224,7 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
       }
       dependsOn = [
         {
-          activity             = "index_new_snapshots"
+          activity             = "read_pending_queue"
           dependencyConditions = ["Succeeded"]
         }
       ]
@@ -309,8 +310,9 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
       }
     },
     {
-      # Advance the watermark only after all processing has succeeded.
-      name = "update_watermark"
+      # Delete pending markers for processed events only after full success.
+      # On failure the markers stay in place so the next run retries automatically.
+      name = "delete_processed_markers"
       type = "Custom"
       policy = {
         timeout = "0.00:10:00"
@@ -326,7 +328,7 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
         type          = "LinkedServiceReference"
       }
       typeProperties = {
-        command = "python3 update_watermark.py"
+        command = "python3 delete_processed_markers.py"
         resourceLinkedService = {
           referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
           type          = "LinkedServiceReference"
@@ -339,56 +341,10 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
           RUN_ID                     = "@pipeline().RunId"
         }
       }
-    },
-    {
-      # Native Delete activity — no compute, just a storage API call.
-      # Handles "blob not found" gracefully if index_new_snapshots itself failed.
-      name = "cleanup_landing"
-      type = "Delete"
-      policy = {
-        timeout = "0.00:05:00"
-        retry   = 0
-      }
-      dependsOn = [
-        {
-          activity             = "update_watermark"
-          dependencyConditions = ["Failed", "Skipped"]
-        }
-      ]
-      typeProperties = {
-        dataset = {
-          referenceName = "ds_landing_index"
-          type          = "DatasetReference"
-          parameters = {
-            run_id = "@pipeline().RunId"
-          }
-        }
-        enableLogging = false
-        storeSettings = {
-          type      = "AzureBlobStorageReadSettings"
-          recursive = false
-        }
-      }
-    },
-    {
-      # Explicitly fail the pipeline run so ADF shows Failed (not Succeeded)
-      # even though cleanup_landing succeeded on the failure branch.
-      name = "fail_pipeline"
-      type = "Fail"
-      dependsOn = [
-        {
-          activity             = "cleanup_landing"
-          dependencyConditions = ["Completed"]
-        }
-      ]
-      typeProperties = {
-        message   = "Pipeline failed — see activity above for root cause. Landing index cleaned up."
-        errorCode = "UpstreamFailure"
-      }
     }
   ])
 
-  depends_on = [azapi_resource.adf_ls_azure_batch, azapi_resource.adf_dataset_landing_index]
+  depends_on = [azapi_resource.adf_ls_azure_batch]
 }
 
 # ---------------------------------------------------------------------------
@@ -490,11 +446,11 @@ resource "azurerm_data_factory_trigger_schedule" "build_ended_match" {
 # ADF — pipeline: build ended match — Databricks variant (daily scheduled)
 #
 # Mirror of pl_build_ended_match but running on Databricks job clusters.
-# Activity 0: index_new_snapshots   — delta-indexes new bronze manifests into landing/
-# Activity 1: bronze_to_silver      — reads landing index, writes silver
+# Activity 0: read_pending_queue    — lists process-queue/pending/ markers, writes in-progress
+# Activity 1: bronze_to_silver      — reads in-progress file, writes silver
 # Activity 2: silver_to_gold        — rebuilds gold from silver
 # Activity 3: discover_cricket_ended — scans gold tracker files, writes ended index
-# Activity 4a/4b: hypothesis notebooks — parallel, depend on Activity 3
+# Activity 4: delete_processed_markers — deletes pending markers for succeeded events
 #
 # Trigger is created but deactivated — activate manually when switching pipelines.
 # ---------------------------------------------------------------------------
@@ -502,11 +458,11 @@ resource "azurerm_data_factory_trigger_schedule" "build_ended_match" {
 resource "azurerm_data_factory_pipeline" "build_ended_match_databricks" {
   name            = "pl_build_ended_match_databricks"
   data_factory_id = data.azurerm_data_factory.main.id
-  description     = "Daily (Databricks): landing index → silver parse → gold rebuild → ended index → update watermark. Mirror of pl_build_ended_match. Hypothesis runs separately via pl_hypothesis_databricks."
+  description     = "Daily (Databricks): process-queue → silver parse → gold rebuild → ended index → delete pending markers. Mirror of pl_build_ended_match. Hypothesis runs separately via pl_hypothesis_databricks."
 
   activities_json = jsonencode([
     {
-      name = "index_new_snapshots"
+      name = "read_pending_queue"
       type = "DatabricksNotebook"
       linkedServiceName = {
         referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
@@ -516,7 +472,7 @@ resource "azurerm_data_factory_pipeline" "build_ended_match_databricks" {
         timeout = "0.01:00:00"
       }
       typeProperties = {
-        notebookPath = "/cricket-pipeline/index_new_snapshots"
+        notebookPath = "/cricket-pipeline/read_pending_queue"
         baseParameters = {
           run_id   = { value = "@pipeline().RunId", type = "Expression" }
           event_id = ""
@@ -535,7 +491,7 @@ resource "azurerm_data_factory_pipeline" "build_ended_match_databricks" {
       }
       dependsOn = [
         {
-          activity             = "index_new_snapshots"
+          activity             = "read_pending_queue"
           dependencyConditions = ["Succeeded"]
         }
       ]
@@ -595,14 +551,16 @@ resource "azurerm_data_factory_pipeline" "build_ended_match_databricks" {
       }
     },
     {
-      # Web Activity writes watermarks.json via blob storage REST API.
-      # No Databricks cluster spun up — ADF managed identity authenticates directly.
-      # Body comes from index_new_snapshots notebook exit output (watermark JSON payload).
-      name = "update_watermark"
-      type = "WebActivity"
+      # Delete pending markers for processed events only after full success.
+      # On failure the markers stay in place so the next run retries automatically.
+      name = "delete_processed_markers"
+      type = "DatabricksNotebook"
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
       policy = {
-        timeout = "0.00:05:00"
-        retry   = 1
+        timeout = "0.00:10:00"
       }
       dependsOn = [
         {
@@ -611,65 +569,16 @@ resource "azurerm_data_factory_pipeline" "build_ended_match_databricks" {
         }
       ]
       typeProperties = {
-        url    = "https://${data.azurerm_storage_account.data_lake.name}.blob.core.windows.net/landing/control/watermarks.json"
-        method = "PUT"
-        headers = {
-          "x-ms-blob-type" = "BlockBlob"
-          "Content-Type"   = "application/json"
+        notebookPath = "/cricket-pipeline/delete_processed_markers"
+        baseParameters = {
+          run_id   = { value = "@pipeline().RunId", type = "Expression" }
+          event_id = ""
         }
-        body = "@activity('index_new_snapshots').output.runOutput"
-        authentication = {
-          type     = "MSI"
-          resource = "https://storage.azure.com/"
-        }
-      }
-    },
-    {
-      # Native Delete activity — no compute, just a storage API call.
-      name = "cleanup_landing"
-      type = "Delete"
-      policy = {
-        timeout = "0.00:05:00"
-        retry   = 0
-      }
-      dependsOn = [
-        {
-          activity             = "update_watermark"
-          dependencyConditions = ["Failed", "Skipped"]
-        }
-      ]
-      typeProperties = {
-        dataset = {
-          referenceName = "ds_landing_index"
-          type          = "DatasetReference"
-          parameters = {
-            run_id = "@pipeline().RunId"
-          }
-        }
-        enableLogging = false
-        storeSettings = {
-          type      = "AzureBlobStorageReadSettings"
-          recursive = false
-        }
-      }
-    },
-    {
-      name = "fail_pipeline"
-      type = "Fail"
-      dependsOn = [
-        {
-          activity             = "cleanup_landing"
-          dependencyConditions = ["Completed"]
-        }
-      ]
-      typeProperties = {
-        message   = "Pipeline failed — see activity above for root cause. Landing index cleaned up."
-        errorCode = "UpstreamFailure"
       }
     }
   ])
 
-  depends_on = [azurerm_data_factory_linked_service_azure_databricks.main, azapi_resource.adf_dataset_landing_index]
+  depends_on = [azurerm_data_factory_linked_service_azure_databricks.main]
 }
 
 resource "azurerm_data_factory_trigger_schedule" "build_ended_match_databricks" {
@@ -691,7 +600,7 @@ resource "azurerm_data_factory_trigger_schedule" "build_ended_match_databricks" 
 resource "azurerm_data_factory_pipeline" "backfill" {
   name            = "pl_backfill"
   data_factory_id = data.azurerm_data_factory.main.id
-  description     = "Manual backfill (Batch): landing index → silver parse → gold rebuild → update watermark. Pass event_id for one match, or empty for full backfill."
+  description     = "Manual backfill (Batch): process-queue → silver parse → gold rebuild → delete markers (no-op in backfill mode). Pass event_id for one match, or empty for all pending."
 
   parameters = {
     event_id = ""
@@ -699,7 +608,7 @@ resource "azurerm_data_factory_pipeline" "backfill" {
 
   activities_json = jsonencode([
     {
-      name = "index_new_snapshots"
+      name = "read_pending_queue"
       type = "Custom"
       policy = {
         timeout = "0.01:00:00"
@@ -709,7 +618,7 @@ resource "azurerm_data_factory_pipeline" "backfill" {
         type          = "LinkedServiceReference"
       }
       typeProperties = {
-        command = "python3 index_new_snapshots.py"
+        command = "python3 read_pending_queue.py"
         resourceLinkedService = {
           referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
           type          = "LinkedServiceReference"
@@ -732,7 +641,7 @@ resource "azurerm_data_factory_pipeline" "backfill" {
       }
       dependsOn = [
         {
-          activity             = "index_new_snapshots"
+          activity             = "read_pending_queue"
           dependencyConditions = ["Succeeded"]
         }
       ]
@@ -789,8 +698,8 @@ resource "azurerm_data_factory_pipeline" "backfill" {
       }
     },
     {
-      # update_watermark is a no-op when EVENT_ID is set (backfill mode).
-      name = "update_watermark"
+      # delete_processed_markers is a no-op when EVENT_ID is set (backfill mode).
+      name = "delete_processed_markers"
       type = "Custom"
       policy = {
         timeout = "0.00:10:00"
@@ -806,7 +715,7 @@ resource "azurerm_data_factory_pipeline" "backfill" {
         type          = "LinkedServiceReference"
       }
       typeProperties = {
-        command = "python3 update_watermark.py"
+        command = "python3 delete_processed_markers.py"
         resourceLinkedService = {
           referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
           type          = "LinkedServiceReference"
@@ -820,52 +729,10 @@ resource "azurerm_data_factory_pipeline" "backfill" {
           EVENT_ID                   = "@pipeline().parameters.event_id"
         }
       }
-    },
-    {
-      name = "cleanup_landing"
-      type = "Delete"
-      policy = {
-        timeout = "0.00:05:00"
-        retry   = 0
-      }
-      dependsOn = [
-        {
-          activity             = "update_watermark"
-          dependencyConditions = ["Failed", "Skipped"]
-        }
-      ]
-      typeProperties = {
-        dataset = {
-          referenceName = "ds_landing_index"
-          type          = "DatasetReference"
-          parameters = {
-            run_id = "@pipeline().RunId"
-          }
-        }
-        enableLogging = false
-        storeSettings = {
-          type      = "AzureBlobStorageReadSettings"
-          recursive = false
-        }
-      }
-    },
-    {
-      name = "fail_pipeline"
-      type = "Fail"
-      dependsOn = [
-        {
-          activity             = "cleanup_landing"
-          dependencyConditions = ["Completed"]
-        }
-      ]
-      typeProperties = {
-        message   = "Pipeline failed — see activity above for root cause. Landing index cleaned up."
-        errorCode = "UpstreamFailure"
-      }
     }
   ])
 
-  depends_on = [azapi_resource.adf_ls_azure_batch, azapi_resource.adf_dataset_landing_index]
+  depends_on = [azapi_resource.adf_ls_azure_batch]
 }
 
 # ---------------------------------------------------------------------------
@@ -876,7 +743,7 @@ resource "azurerm_data_factory_pipeline" "backfill" {
 resource "azurerm_data_factory_pipeline" "backfill_databricks" {
   name            = "pl_backfill_databricks"
   data_factory_id = data.azurerm_data_factory.main.id
-  description     = "Manual backfill (Databricks): landing index → silver parse → gold rebuild → update watermark. Mirror of pl_backfill."
+  description     = "Manual backfill (Databricks): process-queue → silver parse → gold rebuild → delete markers (no-op in backfill mode). Mirror of pl_backfill."
 
   parameters = {
     event_id = ""
@@ -884,7 +751,7 @@ resource "azurerm_data_factory_pipeline" "backfill_databricks" {
 
   activities_json = jsonencode([
     {
-      name = "index_new_snapshots"
+      name = "read_pending_queue"
       type = "DatabricksNotebook"
       linkedServiceName = {
         referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
@@ -894,7 +761,7 @@ resource "azurerm_data_factory_pipeline" "backfill_databricks" {
         timeout = "0.01:00:00"
       }
       typeProperties = {
-        notebookPath = "/cricket-pipeline/index_new_snapshots"
+        notebookPath = "/cricket-pipeline/read_pending_queue"
         baseParameters = {
           run_id   = { value = "@pipeline().RunId", type = "Expression" }
           event_id = { value = "@pipeline().parameters.event_id", type = "Expression" }
@@ -913,7 +780,7 @@ resource "azurerm_data_factory_pipeline" "backfill_databricks" {
       }
       dependsOn = [
         {
-          activity             = "index_new_snapshots"
+          activity             = "read_pending_queue"
           dependencyConditions = ["Succeeded"]
         }
       ]
@@ -950,7 +817,8 @@ resource "azurerm_data_factory_pipeline" "backfill_databricks" {
       }
     },
     {
-      name = "update_watermark"
+      # delete_processed_markers is a no-op when event_id is set (backfill mode).
+      name = "delete_processed_markers"
       type = "DatabricksNotebook"
       linkedServiceName = {
         referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
@@ -966,58 +834,16 @@ resource "azurerm_data_factory_pipeline" "backfill_databricks" {
         }
       ]
       typeProperties = {
-        notebookPath = "/cricket-pipeline/update_watermark"
+        notebookPath = "/cricket-pipeline/delete_processed_markers"
         baseParameters = {
           run_id   = { value = "@pipeline().RunId", type = "Expression" }
           event_id = { value = "@pipeline().parameters.event_id", type = "Expression" }
         }
       }
-    },
-    {
-      name = "cleanup_landing"
-      type = "Delete"
-      policy = {
-        timeout = "0.00:05:00"
-        retry   = 0
-      }
-      dependsOn = [
-        {
-          activity             = "update_watermark"
-          dependencyConditions = ["Failed", "Skipped"]
-        }
-      ]
-      typeProperties = {
-        dataset = {
-          referenceName = "ds_landing_index"
-          type          = "DatasetReference"
-          parameters = {
-            run_id = "@pipeline().RunId"
-          }
-        }
-        enableLogging = false
-        storeSettings = {
-          type      = "AzureBlobStorageReadSettings"
-          recursive = false
-        }
-      }
-    },
-    {
-      name = "fail_pipeline"
-      type = "Fail"
-      dependsOn = [
-        {
-          activity             = "cleanup_landing"
-          dependencyConditions = ["Completed"]
-        }
-      ]
-      typeProperties = {
-        message   = "Pipeline failed — see activity above for root cause. Landing index cleaned up."
-        errorCode = "UpstreamFailure"
-      }
     }
   ])
 
-  depends_on = [azurerm_data_factory_linked_service_azure_databricks.main, azapi_resource.adf_dataset_landing_index]
+  depends_on = [azurerm_data_factory_linked_service_azure_databricks.main]
 }
 
 # ---------------------------------------------------------------------------
