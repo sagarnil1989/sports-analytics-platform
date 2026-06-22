@@ -17,8 +17,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from util import call_betsapi, download_json, extract_results, get_named_container_client, upload_json
 from tracker_writer import extract_innings_snapshot
 from league_config import load_disabled_league_ids
-from over_under_predictor import compute_over_under_predictions
-
 
 _OVER_ORD   = re.compile(r'^\d+(?:st|nd|rd|th)?\s+over', re.I)
 _PLAYER_RUN = re.compile(r'.+\s+innings\s+runs?$', re.I)
@@ -326,12 +324,6 @@ def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = N
             }, overwrite=True)
         except Exception:
             pass
-
-    # Over/Under predictions — silent no-op if models not on DBFS
-    try:
-        compute_over_under_predictions(silver, gold, event_id, tracker)
-    except Exception:
-        pass
 
     return {
         "event_id": event_id,

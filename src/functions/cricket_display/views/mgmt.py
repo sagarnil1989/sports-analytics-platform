@@ -363,5 +363,66 @@ def view_admin_match_override_save(req: func.HttpRequest) -> func.HttpResponse:
 
 
 # ------------------------------------------------------------------
+# ADF job log viewer
+# ------------------------------------------------------------------
+
+def view_admin_adf_logs(req: func.HttpRequest) -> func.HttpResponse:
+    """GET /api/mgmt/adf-logs/{activity_id} — read stdout + stderr from adfjobs container."""
+    activity_id = req.route_params.get("activity_id", "").strip()
+    if not activity_id:
+        return func.HttpResponse("activity_id required", status_code=400)
+
+    # Basic UUID-ish sanity check to avoid path traversal
+    import re
+    if not re.fullmatch(r"[0-9a-f\-]{30,}", activity_id):
+        return func.HttpResponse("Invalid activity_id", status_code=400)
+
+    jobs = get_named_container_client("adfjobs")
+
+    def _read(blob_path: str) -> str:
+        try:
+            return jobs.get_blob_client(blob_path).download_blob().readall().decode("utf-8", errors="replace")
+        except Exception as e:
+            return f"(not found or error: {e})"
+
+    stdout = _read(f"{activity_id}/output/stdout.txt")
+    stderr = _read(f"{activity_id}/output/stderr.txt")
+
+    def _fmt(text: str, label: str, bg: str) -> str:
+        lines = escape(text) if text else "(empty)"
+        return f"""<div style="margin-bottom:28px">
+  <h2 style="margin-bottom:8px;font-size:15px;color:#333">{label}</h2>
+  <pre style="background:{bg};border:1px solid #ddd;border-radius:6px;padding:16px 18px;
+              font-size:12px;line-height:1.6;overflow-x:auto;white-space:pre-wrap;
+              max-height:600px;overflow-y:auto">{lines}</pre>
+</div>"""
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <title>ADF Logs — {escape(activity_id)}</title>
+  <meta charset="utf-8">
+  <style>
+    body {{ font-family:Arial,sans-serif; background:#f5f5f5; margin:0; padding:30px; }}
+    nav {{ margin-bottom:20px; font-size:14px; }}
+    nav a {{ color:#0066cc; text-decoration:none; margin-right:16px; }}
+    nav a:hover {{ text-decoration:underline; }}
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="/api/home">Home</a>
+    <a href="/api/mgmt/leagues/view">Admin</a>
+  </nav>
+  <h1 style="font-size:18px;margin-bottom:4px">ADF Job Logs</h1>
+  <p style="font-family:monospace;color:#888;font-size:13px;margin-bottom:24px">{escape(activity_id)}</p>
+  {_fmt(stderr, "stderr", "#fff5f5")}
+  {_fmt(stdout, "stdout", "#f8f8f8")}
+</body>
+</html>"""
+    return func.HttpResponse(html, mimetype="text/html")
+
+
+# ------------------------------------------------------------------
 # Home page
 # ------------------------------------------------------------------
