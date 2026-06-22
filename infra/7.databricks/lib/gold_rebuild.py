@@ -274,16 +274,27 @@ def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = N
     upload_json(silver, acc_path, new_acc, overwrite=True)
 
     outcome = actual_total = None
-    m_score = re.match(r'^(\d+)', str(final_score or ""))
-    if m_score:
-        actual_total = int(m_score.group(1))
-        last_pred = next(
-            (r["predicted_total"] for r in reversed(deduped)
-             if r.get("innings", 1) == 1 and r.get("predicted_total") is not None),
+    if final_score and "," in str(final_score):
+        # final_score (ev_ss) is stored home-first. innings 1 is not always the
+        # home team's innings — swap to inn1's half if the away team batted first.
+        score_parts = str(final_score).split(",", 1)
+        inn1_batting_team = next(
+            (r.get("batting_team") for r in deduped if r.get("innings", 1) == 1 and r.get("batting_team")),
             None,
         )
-        if last_pred is not None:
-            outcome = "over" if actual_total > last_pred else ("under" if actual_total < last_pred else "push")
+        away_name = master_away or existing_gold.get("away_team_name") or silver_away_team
+        if inn1_batting_team and away_name and str(inn1_batting_team).strip() == str(away_name).strip():
+            score_parts = [score_parts[1].strip(), score_parts[0].strip()]
+        m_score = re.match(r'^(\d+)', score_parts[0].strip())
+        if m_score:
+            actual_total = int(m_score.group(1))
+            last_pred = next(
+                (r["predicted_total"] for r in reversed(deduped)
+                 if r.get("innings", 1) == 1 and r.get("predicted_total") is not None),
+                None,
+            )
+            if last_pred is not None:
+                outcome = "over" if actual_total > last_pred else ("under" if actual_total < last_pred else "push")
 
     tracker = {**existing_gold, "event_id": event_id, "fi": fi, "rows": deduped, "last_updated_utc": _utc_now().isoformat()}
     if final_score:
