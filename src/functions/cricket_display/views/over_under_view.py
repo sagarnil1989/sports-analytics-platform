@@ -221,8 +221,59 @@ def _acc_color(v):
     return "#cc2200"
 
 
+_FEATURE_GLOSSARY = {
+    "score":                  ("Current score at this checkpoint", "e.g. 112 runs at over 12"),
+    "wickets_in_hand":        ("Wickets still available (10 − fallen)", "e.g. 7 if 3 wickets lost"),
+    "betting_line":           ("Live market total — the number to beat", "e.g. 168.5 means market predicts ~169 total"),
+    "score_vs_line_pace":     ("How far ahead/behind expected pace: score − (line × balls_done / total_balls)", "e.g. +12 = 12 runs ahead of implied pace right now"),
+    "run_rate":               ("Runs per over so far (score × 6 / balls)", "e.g. 8.2 rpo after 12 overs"),
+    "rr_required":            ("Run rate needed from here to exactly hit the betting line", "e.g. 9.4 rpo needed in last 8 overs"),
+    "implied_prob_over":      ("Market's implied probability of OVER (1 / over_odds)", "e.g. 0.48 from odds of 2.08"),
+    "batting_team_win_odds":  ("Live decimal win odds for the batting team — captures match context beyond runs", "e.g. 1.45 = strong favourite; 3.2 = underdog"),
+    "line_ov1":               ("Betting line at the very first over — the pre-innings market view", "e.g. 163.5 set before any balls bowled"),
+    "line_drift_total":       ("Total change in betting line from over 1 to this checkpoint", "e.g. +18.0 = market moved the line up 18 runs across the innings"),
+    "line_trend_slope":       ("Linear slope of betting line across all overs — how fast it is rising or falling (runs per over)", "e.g. +2.1 = line rising ~2 runs every over on average"),
+    "pct_overs_line_up":      ("Fraction of overs where the market's line went UP (0–1)", "e.g. 0.83 = line rose in 5 of 6 overs — consistent market upward pressure"),
+    "max_line_jump":          ("Biggest single-over rise in the betting line", "e.g. 8.0 = one over caused the market to jump 8 runs at once"),
+    "line_accel":             ("Is the line rising faster in the second half than the first? (2nd-half drift − 1st-half drift)", "e.g. +5.0 = accelerating; −3.0 = early burst then flat"),
+    "score_vs_pace_at_ov2":   ("How far ahead/behind the line's implied pace the team was after just 2 overs", "e.g. +4.5 = already 4.5 runs ahead of implied pace at over 2"),
+    "score_vs_pace_trend":    ("Linear slope of score_vs_pace across all overs — consistently pulling ahead or falling behind the line?", "e.g. +0.8 = gaining ~0.8 runs/over advantage vs the line every over"),
+    "recent_rr_2":            ("Average runs per over in the last 2 overs — current scoring momentum", "e.g. 11.5 = last 2 overs went for 23 runs total"),
+    "recent_rr_4":            ("Average runs per over in the last 4 overs — medium-term momentum", "e.g. 9.25 = last 4 overs averaged 9.25 rpo"),
+    "rr_trend":               ("Recent momentum vs first-half average (recent_rr_2 − first-half avg rpo)", "e.g. +3.2 = scoring 3.2 more rpo recently than earlier in innings"),
+    "max_over_runs":          ("Most runs scored in any single over up to this point", "e.g. 18 = one over produced 18 runs"),
+    "min_over_runs":          ("Fewest runs in any single over — captures quietest/dot-ball phase", "e.g. 2 = one over went for only 2 runs"),
+    "first_wkt_over":         ("Over number when the first wicket fell (= checkpoint + 1 if none yet)", "e.g. 14 = team batted 13+ overs without losing a wicket"),
+    "pp_score":               ("Score at end of powerplay (over 6) — always available for checkpoints ≥ 6", "e.g. 58 at end of over 6"),
+    "pp_wickets":             ("Wickets lost in powerplay overs 1–6 — always available for checkpoints ≥ 6", "e.g. 1 = strong start with only 1 powerplay wicket"),
+    "checkpoint_over":        ("Which over this row represents — pooled model position feature", "e.g. 8, 12, 16"),
+    "balls_remaining":        ("Balls left to bowl — pooled model position feature", "e.g. 24 = 4 overs left"),
+    "balls_completed":        ("Balls bowled so far — pooled model position feature", "e.g. 96 = 16 overs done"),
+}
+
+_PER_OVER_GLOSSARY = {
+    "runs":    ("Runs scored in over {k} only (incremental, not cumulative)", "e.g. ov8_runs=14 means over 8 went for 14 runs"),
+    "cumwkts": ("Cumulative wickets lost up to end of over {k}", "e.g. ov8_cumwkts=2 means 2 wickets by end of over 8"),
+    "line":    ("Betting line at the end of over {k} — snapshot of the market at that moment", "e.g. ov8_line=172.5 means market had set 172.5 at over 8"),
+    "vs_pace": ("score_vs_line_pace at over {k}: how far ahead/behind at that point in history", "e.g. ov8_vs_pace=+9.2 means team was 9 runs ahead of implied pace at over 8"),
+}
+
+
+def _feature_desc(name: str):
+    """Return (description, example) for a feature name, or ('', '')."""
+    import re
+    if name in _FEATURE_GLOSSARY:
+        return _FEATURE_GLOSSARY[name]
+    m = re.fullmatch(r"ov(\d+)_(runs|cumwkts|line|vs_pace)", name)
+    if m:
+        k, suf = m.group(1), m.group(2)
+        td, te = _PER_OVER_GLOSSARY[suf]
+        return td.replace("{k}", k), te
+    return "", ""
+
+
 def _feature_importance_html(meta_doc: Optional[dict], mkt_key: str) -> str:
-    """Render a feature importance table for the given market, sourced from model metadata."""
+    """Render a feature importance table with plain-English descriptions."""
     if not meta_doc:
         return "<p style='color:#999;font-size:13px'>Model metadata not available — run pl_over_under_retrain.</p>"
 
@@ -231,13 +282,11 @@ def _feature_importance_html(meta_doc: Optional[dict], mkt_key: str) -> str:
     if not mkt_models:
         return f"<p style='color:#999;font-size:13px'>No model entries found for market <code>{escape(mkt_key)}</code>.</p>"
 
-    # Prefer pooled model for the importance summary; fall back to averaging per-cp models
     pooled = [m for m in mkt_models if str(m.get("checkpoint_over")) == "pooled"]
     if pooled:
         imp_raw = pooled[0].get("feature_importance") or {}
-        source_label = "Pooled model (all checkpoints combined)"
+        source_label = "Pooled model (all checkpoints combined) — which signals matter most across the innings"
     else:
-        # Aggregate: sum importance across all checkpoint models
         imp_raw: dict = {}
         for m in mkt_models:
             for feat, val in (m.get("feature_importance") or {}).items():
@@ -247,36 +296,45 @@ def _feature_importance_html(meta_doc: Optional[dict], mkt_key: str) -> str:
     if not imp_raw:
         return "<p style='color:#999;font-size:13px'>No feature importance data available.</p>"
 
-    total = sum(imp_raw.values()) or 1
+    total  = sum(imp_raw.values()) or 1
     ranked = sorted(imp_raw.items(), key=lambda x: -x[1])
 
     rows_html = ""
     for rank, (feat, val) in enumerate(ranked, 1):
-        pct = val / total * 100
-        bar_w = int(pct * 2.5)  # max ~250px at 100%
-        bar_w = min(bar_w, 250)
-        rows_html += f"""<tr>
-  <td style="text-align:center;color:#888;width:40px">{rank}</td>
-  <td style="font-family:monospace;font-size:13px">{escape(feat)}</td>
-  <td style="text-align:right;font-family:monospace;width:60px">{pct:.1f}%</td>
-  <td style="width:260px">
-    <div style="background:#e5e7eb;border-radius:3px;height:12px;overflow:hidden">
-      <div style="width:{bar_w}px;height:12px;background:#1e40af;border-radius:3px"></div>
+        pct   = val / total * 100
+        bar_w = min(int(pct * 2.0), 200)
+        desc, example = _feature_desc(feat)
+        sub_html = ""
+        if desc:
+            sub_html += f'<div style="font-size:11px;color:#555;margin-top:2px">{escape(desc)}</div>'
+        if example:
+            sub_html += f'<div style="font-size:11px;color:#2563eb;margin-top:1px;font-style:italic">{escape(example)}</div>'
+
+        rows_html += f"""<tr style="border-bottom:1px solid #f3f4f6">
+  <td style="text-align:center;color:#aaa;width:36px;padding:8px 4px;font-size:12px">{rank}</td>
+  <td style="padding:8px 10px">
+    <div style="font-family:monospace;font-size:13px;font-weight:600;color:#1e3a5f">{escape(feat)}</div>
+    {sub_html}
+  </td>
+  <td style="text-align:right;font-family:monospace;width:52px;padding:8px 8px;font-weight:bold;color:#374151">{pct:.1f}%</td>
+  <td style="width:210px;padding:8px 10px">
+    <div style="background:#e5e7eb;border-radius:3px;height:10px;overflow:hidden">
+      <div style="width:{bar_w}px;height:10px;background:#1e40af;border-radius:3px"></div>
     </div>
   </td>
 </tr>"""
 
     return f"""<div style="background:white;border:1px solid #e5e7eb;border-radius:8px;padding:20px;margin-bottom:24px;box-shadow:0 1px 4px #ccc">
   <h3 style="margin:0 0 4px;font-size:15px;color:#111">Feature Importance</h3>
-  <p style="margin:0 0 16px;font-size:12px;color:#777">{escape(source_label)} · {len(ranked)} features</p>
-  <div style="overflow-y:auto;max-height:400px">
-  <table style="border-collapse:collapse;width:100%;font-size:13px">
+  <p style="margin:0 0 16px;font-size:12px;color:#777">{escape(source_label)} · {len(ranked)} features with non-zero importance</p>
+  <div style="overflow-y:auto;max-height:520px">
+  <table style="border-collapse:collapse;width:100%">
   <thead>
-    <tr style="border-bottom:2px solid #e5e7eb">
-      <th style="text-align:center;padding:6px 8px;color:#555;font-weight:600">Rank</th>
-      <th style="text-align:left;padding:6px 8px;color:#555;font-weight:600">Feature</th>
-      <th style="text-align:right;padding:6px 8px;color:#555;font-weight:600">% of total</th>
-      <th style="padding:6px 8px;color:#555;font-weight:600"></th>
+    <tr style="border-bottom:2px solid #e5e7eb;background:#f9fafb">
+      <th style="text-align:center;padding:8px 4px;color:#6b7280;font-weight:600;font-size:12px">#</th>
+      <th style="text-align:left;padding:8px 10px;color:#6b7280;font-weight:600;font-size:12px">Feature &amp; meaning</th>
+      <th style="text-align:right;padding:8px 8px;color:#6b7280;font-weight:600;font-size:12px">% share</th>
+      <th style="padding:8px 10px;color:#6b7280;font-weight:600;font-size:12px">Importance</th>
     </tr>
   </thead>
   <tbody>

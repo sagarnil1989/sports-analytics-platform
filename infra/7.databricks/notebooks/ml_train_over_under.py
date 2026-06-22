@@ -62,18 +62,6 @@ print(f"Training on train split only; test split used for held-out evaluation.")
 # Feature definition
 # ---------------------------------------------------------------------------
 
-# Core features available at every checkpoint
-FEATURES = [
-    "score",
-    "wickets_in_hand",
-    "betting_line",
-    "score_vs_line_pace",
-    "run_rate",
-    "rr_required",
-    "implied_prob_over",
-    "batting_team_win_odds",
-]
-
 def _to_float(v: Any) -> Optional[float]:
     try:
         return float(v)
@@ -81,16 +69,53 @@ def _to_float(v: Any) -> Optional[float]:
         return None
 
 
-def _row_to_features(row: Dict) -> Optional[List[float]]:
-    """Convert a CSV row to a feature vector. Returns None if required fields missing."""
+# ── Trajectory summary features ───────────────────────────────────────────────
+_TRAJ_SUMMARY = [
+    "line_ov1", "line_drift_total", "line_trend_slope", "pct_overs_line_up",
+    "max_line_jump", "line_accel",
+    "score_vs_pace_at_ov2", "score_vs_pace_trend",
+    "recent_rr_2", "max_over_runs", "min_over_runs", "first_wkt_over",
+]
+
+# These must be present — rows without them are dropped
+_CRITICAL = {"score", "wickets_in_hand", "betting_line", "run_rate"}
+
+
+def _cp_features(cp: int) -> List[str]:
+    """Ordered feature list for a per-checkpoint model at `cp` overs."""
+    base = [
+        "score", "wickets_in_hand", "betting_line", "score_vs_line_pace",
+        "run_rate", "rr_required", "implied_prob_over", "batting_team_win_odds",
+    ] + _TRAJ_SUMMARY
+    if cp >= 4:
+        base.append("recent_rr_4")
+    if cp >= 6:
+        base.extend(["pp_score", "pp_wickets", "rr_trend"])
+    for k in range(1, cp + 1):
+        base += [f"ov{k}_runs", f"ov{k}_cumwkts", f"ov{k}_line", f"ov{k}_vs_pace"]
+    return base
+
+
+POOLED_FEATURES = _cp_features(16) + ["checkpoint_over", "balls_remaining", "balls_completed"]
+
+
+def _row_to_features(row: Dict, features: List[str]) -> Optional[List[float]]:
+    """
+    Convert a CSV row to a float feature vector.
+    Returns None if any CRITICAL feature is missing.
+    batting_team_win_odds → imputed 2.0.
+    All other missing → float('nan') for LightGBM to handle natively.
+    """
     vec = []
-    for f in FEATURES:
+    for f in features:
         val = _to_float(row.get(f))
-        # Impute missing win odds with neutral value (2.0 = 50/50)
-        if val is None and f == "batting_team_win_odds":
-            val = 2.0
         if val is None:
-            return None
+            if f in _CRITICAL:
+                return None
+            elif f == "batting_team_win_odds":
+                val = 2.0
+            else:
+                val = float("nan")
         vec.append(val)
     return vec
 
@@ -101,25 +126,30 @@ def _row_to_features(row: Dict) -> Optional[List[float]]:
 # Group rows by (market, checkpoint_over)
 # ---------------------------------------------------------------------------
 
-groups: Dict[Tuple[str, int], Tuple[List, List]] = defaultdict(lambda: ([], []))
+# groups maps (market, cp) → (X_list, y_list, feature_names)
+groups: Dict[Tuple[str, int], Tuple[List, List, List[str]]] = {}
 
 for row in train_rows:
     market = row.get("market", "")
-    cp     = row.get("checkpoint_over", "")
+    cp_str = row.get("checkpoint_over", "")
     label  = _to_float(row.get("label"))
     if label is None:
         continue
-    fvec = _row_to_features(row)
+    cp_int   = int(cp_str)
+    features = _cp_features(cp_int)
+    fvec     = _row_to_features(row, features)
     if fvec is None:
         continue
-    key = (market, int(cp))
+    key = (market, cp_int)
+    if key not in groups:
+        groups[key] = ([], [], features)
     groups[key][0].append(fvec)
     groups[key][1].append(int(label))
 
 print(f"\nGroups to train: {len(groups)}")
-for (mkt, cp), (X, y) in sorted(groups.items()):
+for (mkt, cp), (X, y, feats) in sorted(groups.items()):
     n_over = sum(y)
-    print(f"  {mkt} cp={cp}: n={len(y)}  over={n_over} ({100*n_over/len(y):.1f}%)")
+    print(f"  {mkt} cp={cp}: n={len(y)}  features={len(feats)}  over={n_over} ({100*n_over/len(y):.1f}%)")
 
 # COMMAND ----------
 
@@ -152,7 +182,7 @@ cv        = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 results   = []
 model_meta: Dict[str, Any] = {}
 
-for (mkt, cp), (X_list, y_list) in sorted(groups.items()):
+for (mkt, cp), (X_list, y_list, features) in sorted(groups.items()):
     X = np.array(X_list, dtype=np.float32)
     y = np.array(y_list, dtype=np.int32)
     n = len(y)
@@ -162,7 +192,7 @@ for (mkt, cp), (X_list, y_list) in sorted(groups.items()):
         continue
 
     # ── 5-fold CV on raw LightGBM (AUC + Brier) ─────────────────────────────
-    lgb_clf  = _make_lgb(n)
+    lgb_clf    = _make_lgb(n)
     auc_scores = cross_val_score(lgb_clf, X, y, cv=cv, scoring="roc_auc")
     brier_scores = []
     for train_idx, test_idx in cv.split(X, y):
@@ -175,9 +205,7 @@ for (mkt, cp), (X_list, y_list) in sorted(groups.items()):
     cv_brier = float(np.mean(brier_scores))
 
     # ── Final model: LightGBM + isotonic calibration on full data ────────────
-    lgb_final = _make_lgb(n)
-    # CalibratedClassifierCV with cv="prefit" needs a pre-fitted estimator;
-    # use internal split so calibration has held-out data.
+    lgb_final  = _make_lgb(n)
     calibrated = CalibratedClassifierCV(
         _make_lgb(n), method="isotonic", cv=min(5, max(3, n // 10))
     )
@@ -185,30 +213,30 @@ for (mkt, cp), (X_list, y_list) in sorted(groups.items()):
 
     # ── Feature importance from uncalibrated model fit on all data ───────────
     lgb_final.fit(X, y)
-    importances = dict(zip(FEATURES, lgb_final.feature_importances_.tolist()))
+    importances = dict(zip(features, lgb_final.feature_importances_.tolist()))
 
     # ── Save model ───────────────────────────────────────────────────────────
     model_key  = f"{mkt}_cp{cp}"
     model_path = os.path.join(DBFS_MODEL_DIR, f"{model_key}.pkl")
     with open(model_path, "wb") as f:
-        pickle.dump({"model": calibrated, "features": FEATURES}, f)
+        pickle.dump({"model": calibrated, "features": features}, f)
 
     meta_entry = {
-        "market":           mkt,
-        "checkpoint_over":  cp,
-        "n_samples":        n,
-        "n_over":           int(sum(y)),
-        "over_pct":         round(100 * sum(y) / n, 1),
-        "cv_auc":           round(cv_auc, 4),
-        "cv_brier":         round(cv_brier, 4),
+        "market":             mkt,
+        "checkpoint_over":    cp,
+        "n_samples":          n,
+        "n_over":             int(sum(y)),
+        "over_pct":           round(100 * sum(y) / n, 1),
+        "cv_auc":             round(cv_auc, 4),
+        "cv_brier":           round(cv_brier, 4),
         "feature_importance": importances,
-        "model_path":       f"dbfs:/FileStore/cricket-pipeline/models/over_under/{model_key}.pkl",
+        "model_path":         f"dbfs:/FileStore/cricket-pipeline/models/over_under/{model_key}.pkl",
     }
     results.append(meta_entry)
     model_meta[model_key] = meta_entry
 
     print(
-        f"[{mkt:>18} cp={cp}]  n={n:>3}  "
+        f"[{mkt:>18} cp={cp}]  n={n:>3}  feats={len(features):>2}  "
         f"CV-AUC={cv_auc:.3f}  CV-Brier={cv_brier:.3f}  "
         f"({meta_entry['over_pct']}% OVER)"
     )
@@ -229,19 +257,8 @@ for (mkt, cp), (X_list, y_list) in sorted(groups.items()):
 # model has CV-AUC >= 0.60.
 # ---------------------------------------------------------------------------
 
-POOLED_FEATURES = FEATURES + ["checkpoint_over", "balls_remaining", "balls_completed"]
-
-def _row_to_pooled_features(row: Dict) -> Optional[List[float]]:
-    vec = []
-    for f in POOLED_FEATURES:
-        val = _to_float(row.get(f))
-        if val is None and f == "batting_team_win_odds":
-            val = 2.0
-        if val is None:
-            return None
-        vec.append(val)
-    return vec
-
+# POOLED_FEATURES defined above in the feature-definition section (cp=16 + position).
+# NaN is passed for per-over features beyond each row's actual checkpoint.
 
 # Group by market only (all checkpoints pooled together)
 pooled_groups: Dict[str, Tuple[List, List]] = defaultdict(lambda: ([], []))
@@ -251,7 +268,7 @@ for row in train_rows:
     label  = _to_float(row.get("label"))
     if label is None:
         continue
-    fvec = _row_to_pooled_features(row)
+    fvec = _row_to_features(row, POOLED_FEATURES)
     if fvec is None:
         continue
     pooled_groups[market][0].append(fvec)
@@ -334,11 +351,13 @@ for market, (X_list, y_list) in sorted(pooled_groups.items()):
         random_state=42, verbose=-1,
     )
     lgb_for_imp.fit(X, y)
-    importances_pooled = dict(zip(POOLED_FEATURES, lgb_for_imp.feature_importances_.tolist()))
-    print("  Feature importance:")
+    importances_pooled = {
+        k: v for k, v in zip(POOLED_FEATURES, lgb_for_imp.feature_importances_.tolist()) if v > 0
+    }
+    print("  Top 10 features:")
     total_imp_p = sum(importances_pooled.values()) or 1
-    for f, v in sorted(importances_pooled.items(), key=lambda x: -x[1])[:6]:
-        print(f"    {f:<30} {100*v/total_imp_p:>5.1f}%")
+    for f, v in sorted(importances_pooled.items(), key=lambda x: -x[1])[:10]:
+        print(f"    {f:<35} {100*v/total_imp_p:>5.1f}%")
 
     model_key  = f"{market}_pooled"
     model_path = os.path.join(DBFS_MODEL_DIR, f"{model_key}.pkl")
@@ -378,7 +397,7 @@ if test_rows:
         with open(model_path, "rb") as f:
             m_obj = pickle.load(f)
         cp_test = [r for r in test_rows if r.get("market") == mkt and int(r.get("checkpoint_over", -1)) == cp]
-        fvecs = [_row_to_features(r) for r in cp_test]
+        fvecs = [_row_to_features(r, m_obj["features"]) for r in cp_test]
         labels = [int(_to_float(r.get("label"))) for r in cp_test]
         pairs = [(fv, lb) for fv, lb in zip(fvecs, labels) if fv is not None]
         if len(pairs) < 5:
@@ -399,7 +418,7 @@ if test_rows:
         with open(model_path, "rb") as f:
             m_obj = pickle.load(f)
         mkt_test = [r for r in test_rows if r.get("market") == market]
-        fvecs  = [_row_to_pooled_features(r) for r in mkt_test]
+        fvecs  = [_row_to_features(r, m_obj["features"]) for r in mkt_test]
         labels = [int(_to_float(r.get("label"))) for r in mkt_test]
         pairs  = [(fv, lb) for fv, lb in zip(fvecs, labels) if fv is not None]
         if len(pairs) < 5:
@@ -490,9 +509,8 @@ for _mkt in sorted(set(r.get("market") for r in all_rows)):
             with open(_per_cp_path, "rb") as f:
                 _per_cp_obj = pickle.load(f)
 
-        _active_obj     = _per_cp_obj if _per_cp_obj else _pooled_cache.get(_mkt)
-        _active_key     = _per_cp_key if _per_cp_obj else f"{_mkt}_pooled"
-        _use_pooled_fv  = _per_cp_obj is None
+        _active_obj = _per_cp_obj if _per_cp_obj else _pooled_cache.get(_mkt)
+        _active_key = _per_cp_key if _per_cp_obj else f"{_mkt}_pooled"
 
         if _active_obj is None:
             continue
@@ -502,7 +520,7 @@ for _mkt in sorted(set(r.get("market") for r in all_rows)):
             for r in rows:
                 if r.get("market") != _mkt or int(r.get("checkpoint_over", -1)) != _cp:
                     continue
-                fv = _row_to_features(r) if not _use_pooled_fv else _row_to_pooled_features(r)
+                fv = _row_to_features(r, _active_obj["features"])
                 if fv is None:
                     continue
                 prob = _apply_model(_active_obj, fv)

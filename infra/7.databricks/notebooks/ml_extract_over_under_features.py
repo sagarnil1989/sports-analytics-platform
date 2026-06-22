@@ -155,6 +155,134 @@ def _implied_prob(decimal_odds: Optional[float]) -> Optional[float]:
     return round(1.0 / decimal_odds, 4)
 
 
+def _linear_slope(xs: List[float], ys: List[float]) -> Optional[float]:
+    """Ordinary least-squares slope for a small list of (x, y) pairs."""
+    n = len(xs)
+    if n < 2:
+        return None
+    sum_x  = sum(xs);  sum_y  = sum(ys)
+    sum_xy = sum(x * y for x, y in zip(xs, ys))
+    sum_xx = sum(x * x for x in xs)
+    denom  = n * sum_xx - sum_x * sum_x
+    if denom == 0:
+        return 0.0
+    return round((n * sum_xy - sum_x * sum_y) / denom, 4)
+
+
+def _extract_trajectory_features(
+    inn1_rows: List[Dict],
+    cp: int,
+    market_total_balls: int = 120,
+) -> Dict:
+    """
+    Extract per-over trajectory features from over 1 through cp.
+    Returns a flat dict covering per-over values (ov{k}_*) and trajectory summaries.
+    market_total_balls: 120 for innings_total (20 overs), 72 for first_12.
+    """
+    result: Dict = {}
+
+    prev_score: Optional[int] = 0
+    lines: List[Tuple[int, float]]        = []
+    vs_pace_vals: List[Tuple[int, float]] = []
+    over_runs: List[float]                = []
+
+    for k in range(1, cp + 1):
+        row_k = _find_checkpoint_row(inn1_rows, k, innings=1)
+
+        if row_k is None:
+            result[f"ov{k}_runs"]    = None
+            result[f"ov{k}_cumwkts"] = None
+            result[f"ov{k}_line"]    = None
+            result[f"ov{k}_vs_pace"] = None
+            prev_score = None
+            continue
+
+        score_k   = row_k.get("score")
+        wickets_k = row_k.get("wickets") or 0
+        balls_k   = _over_to_balls(row_k.get("over")) or (k * 6)
+        line_k    = row_k.get("predicted_total")
+
+        runs_k: Optional[float] = None
+        if score_k is not None and prev_score is not None:
+            runs_k = max(0, score_k - prev_score)
+            over_runs.append(float(runs_k))
+
+        result[f"ov{k}_runs"]    = runs_k
+        result[f"ov{k}_cumwkts"] = wickets_k
+        result[f"ov{k}_line"]    = line_k
+
+        vs_pace_k: Optional[float] = None
+        if line_k is not None and score_k is not None and balls_k > 0:
+            expected  = float(line_k) * balls_k / market_total_balls
+            vs_pace_k = round(score_k - expected, 2)
+            vs_pace_vals.append((k, vs_pace_k))
+        result[f"ov{k}_vs_pace"] = vs_pace_k
+
+        if line_k is not None:
+            lines.append((k, float(line_k)))
+
+        prev_score = score_k
+
+    # ── Line trajectory summaries ─────────────────────────────────────────────
+    if lines:
+        lkeys = [k for k, _ in lines]
+        lvals = [v for _, v in lines]
+        result["line_ov1"]          = lvals[0]
+        result["line_drift_total"]  = round(lvals[-1] - lvals[0], 2) if len(lvals) >= 2 else 0.0
+        result["line_trend_slope"]  = _linear_slope(lkeys, lvals)
+        diffs = [lvals[i + 1] - lvals[i] for i in range(len(lvals) - 1)]
+        result["pct_overs_line_up"] = round(
+            sum(1 for d in diffs if d > 0) / len(diffs), 3
+        ) if diffs else None
+        result["max_line_jump"]     = round(max((d for d in diffs if d > 0), default=0.0), 2)
+        if len(lvals) >= 4:
+            mid = len(lvals) // 2
+            result["line_accel"] = round((lvals[-1] - lvals[mid]) - (lvals[mid] - lvals[0]), 2)
+        else:
+            result["line_accel"] = None
+    else:
+        for _fk in ("line_ov1", "line_drift_total", "line_trend_slope",
+                    "pct_overs_line_up", "max_line_jump", "line_accel"):
+            result[_fk] = None
+
+    # ── Score-vs-pace trajectory ──────────────────────────────────────────────
+    result["score_vs_pace_at_ov2"] = next((v for k, v in vs_pace_vals if k == 2), None)
+    result["score_vs_pace_trend"]  = (
+        _linear_slope([k for k, _ in vs_pace_vals], [v for _, v in vs_pace_vals])
+        if len(vs_pace_vals) >= 2 else None
+    )
+
+    # ── Momentum ─────────────────────────────────────────────────────────────
+    result["recent_rr_2"]   = round(sum(over_runs[-2:]) / 2, 2) if len(over_runs) >= 2 else None
+    result["recent_rr_4"]   = round(sum(over_runs[-4:]) / 4, 2) if len(over_runs) >= 4 else None
+    result["max_over_runs"] = max(over_runs) if over_runs else None
+    result["min_over_runs"] = min(over_runs) if over_runs else None
+    if len(over_runs) >= 4:
+        fh_avg = sum(over_runs[: len(over_runs) // 2]) / (len(over_runs) // 2)
+        result["rr_trend"] = round(result["recent_rr_2"] - fh_avg, 2) if result["recent_rr_2"] is not None else None
+    else:
+        result["rr_trend"] = None
+
+    # ── Wicket pattern ────────────────────────────────────────────────────────
+    first_wkt = cp + 1
+    for k in range(1, cp + 1):
+        if (result.get(f"ov{k}_cumwkts") or 0) > 0:
+            first_wkt = k
+            break
+    result["first_wkt_over"] = first_wkt
+
+    # ── Powerplay (always available for cp >= 6) ──────────────────────────────
+    if cp >= 6:
+        row_pp = _find_checkpoint_row(inn1_rows, 6, innings=1)
+        result["pp_score"]   = row_pp.get("score")           if row_pp else None
+        result["pp_wickets"] = (row_pp.get("wickets") or 0)  if row_pp else None
+    else:
+        result["pp_score"]   = None
+        result["pp_wickets"] = None
+
+    return result
+
+
 def _run_rate(score: Optional[int], balls: int) -> Optional[float]:
     if score is None or balls == 0:
         return None
@@ -313,6 +441,7 @@ def extract_rows_for_event(event_id: str, tracker: Dict, train_cutoff: str = "")
         if label is None:
             continue  # skip pushes for now (rare: actual == exact line)
 
+        _traj = _extract_trajectory_features(inn1_rows, cp, market_total_balls=120)
         output_rows.append({
             **common,
             "market":           "innings_total",
@@ -336,6 +465,7 @@ def extract_rows_for_event(event_id: str, tracker: Dict, train_cutoff: str = "")
             "actual_value":     actual_total,
             "actual_margin":    round(actual_total - line, 1),
             "label":            label,
+            **_traj,
         })
 
     # ── Market 2: First 12 Overs ─────────────────────────────────────────────
@@ -368,6 +498,7 @@ def extract_rows_for_event(event_id: str, tracker: Dict, train_cutoff: str = "")
         if label is None:
             continue
 
+        _traj = _extract_trajectory_features(inn1_rows, cp, market_total_balls=72)
         output_rows.append({
             **common,
             "market":           "first_12_overs",
@@ -391,6 +522,7 @@ def extract_rows_for_event(event_id: str, tracker: Dict, train_cutoff: str = "")
             "actual_value":     actual_first12,
             "actual_margin":    round(actual_first12 - line, 1),
             "label":            label,
+            **_traj,
         })
 
     return output_rows
@@ -468,6 +600,20 @@ if not all_rows:
     dbutils.notebook.exit("no_data")
 
 # Write as CSV to gold/ml/over_under_training_data.csv
+_TRAJ_SUMMARY_FIELDS = [
+    "line_ov1", "line_drift_total", "line_trend_slope", "pct_overs_line_up",
+    "max_line_jump", "line_accel",
+    "score_vs_pace_at_ov2", "score_vs_pace_trend",
+    "recent_rr_2", "recent_rr_4", "rr_trend",
+    "max_over_runs", "min_over_runs", "first_wkt_over",
+    "pp_score", "pp_wickets",
+]
+_PER_OVER_FIELDS = [
+    f"ov{k}_{s}"
+    for k in range(1, 17)
+    for s in ("runs", "cumwkts", "line", "vs_pace")
+]
+
 fieldnames = [
     "event_id", "league_id", "league_name", "match_name", "match_date_utc", "venue",
     "home_team", "away_team", "batting_team_inn1", "gender", "split",
@@ -480,6 +626,8 @@ fieldnames = [
     "actual_inn1_total", "inn1_outcome",
     "actual_value", "actual_margin",
     "label",
+    *_TRAJ_SUMMARY_FIELDS,
+    *_PER_OVER_FIELDS,
 ]
 
 buf = io.StringIO()
