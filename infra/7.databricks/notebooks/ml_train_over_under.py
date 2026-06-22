@@ -316,21 +316,6 @@ for market, (X_list, y_list) in sorted(pooled_groups.items()):
     cv_brier = float(np.mean(brier_scores))
     print(f"  CV-AUC={cv_auc:.3f}  CV-Brier={cv_brier:.3f}")
 
-    # Fit per-checkpoint AUC breakdown so we can see where signal comes from
-    for cp in sorted(set(int(r.get("checkpoint_over", 0)) for r in all_rows if r.get("market") == market)):
-        cp_rows = [r for r in all_rows if r.get("market") == market and int(r.get("checkpoint_over", -1)) == cp]
-        cp_X = [_row_to_pooled_features(r) for r in cp_rows]
-        cp_y = [int(_to_float(r.get("label"))) for r in cp_rows]
-        cp_X = [x for x, yy in zip(cp_X, cp_y) if x is not None]
-        cp_y = [yy for x, yy in zip(cp_X, [int(_to_float(r.get("label"))) for r in cp_rows]) if x is not None]
-        # Re-align after filtering
-        pairs = [(x, yy) for x, yy in zip([_row_to_pooled_features(r) for r in cp_rows],
-                                            [int(_to_float(r.get("label"))) for r in cp_rows]) if x is not None]
-        if len(pairs) < 10:
-            continue
-        cp_X2 = np.array([p[0] for p in pairs], dtype=np.float32)
-        cp_y2 = np.array([p[1] for p in pairs], dtype=np.int32)
-
     # Final calibrated model on all data
     calibrated_pooled = CalibratedClassifierCV(
         lgb.LGBMClassifier(
@@ -389,7 +374,7 @@ if test_rows:
     print(f"\n── Test set evaluation ({len(test_rows)} rows) ──")
 
     # Load saved models and evaluate on test rows
-    for (mkt, cp), (_, _) in sorted(groups.items()):
+    for (mkt, cp), (_, _, _) in sorted(groups.items()):
         model_key = f"{mkt}_cp{cp}"
         model_path = os.path.join(DBFS_MODEL_DIR, f"{model_key}.pkl")
         if not os.path.exists(model_path):
@@ -556,7 +541,7 @@ metadata = {
     "n_models":        len(results),
     "n_train_rows":    len(train_rows),
     "n_test_rows":     len(test_rows),
-    "features":        FEATURES,
+    "features_by_checkpoint": {str(cp): feats for (_mkt2, cp), (_, _, feats) in sorted(groups.items())},
     "pooled_features": POOLED_FEATURES,
     "models":          results,
     "test_evaluation": test_eval,
