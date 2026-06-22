@@ -284,6 +284,7 @@ def extract_rows_for_event(event_id: str, tracker: Dict, train_cutoff: str = "")
         "home_team":          tracker.get("home_team_name"),
         "away_team":          tracker.get("away_team_name"),
         "batting_team_inn1":  batting_team_inn1,
+        "gender":             tracker.get("gender", "M"),
         "actual_inn1_total":  actual_total,
         "inn1_outcome":       outcome,
         "split":              split,
@@ -469,7 +470,7 @@ if not all_rows:
 # Write as CSV to gold/ml/over_under_training_data.csv
 fieldnames = [
     "event_id", "league_id", "league_name", "match_name", "match_date_utc", "venue",
-    "home_team", "away_team", "batting_team_inn1", "split",
+    "home_team", "away_team", "batting_team_inn1", "gender", "split",
     "market", "checkpoint_over", "over_str", "snapshot_id",
     "balls_completed", "balls_remaining",
     "score", "wickets", "wickets_in_hand",

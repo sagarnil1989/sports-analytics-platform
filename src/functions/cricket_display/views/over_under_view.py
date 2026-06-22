@@ -134,6 +134,8 @@ def _pred_table(rows, target_over):
   <th>Event ID</th>
   <th>Match</th>
   <th>Date</th>
+  <th>League</th>
+  <th>G</th>
   <th>Inn1 Batting</th>
   <th>Score @ CP</th>
   <th>Wkts</th>
@@ -150,6 +152,8 @@ def _pred_table(rows, target_over):
         eid       = escape(str(p.get("event_id") or ""))
         match     = escape(str(p.get("match_name") or ""))
         date      = escape(str(p.get("match_date") or "")[:10])
+        league    = escape(str(p.get("league_name") or ""))
+        gender    = escape(str(p.get("gender") or "M"))
         batting   = escape(str(p.get("batting_team") or ""))
         score_cp  = p.get("score_at_cp") or "—"
         wkts      = p.get("wickets_at_cp") or "—"
@@ -165,10 +169,19 @@ def _pred_table(rows, target_over):
         a_col      = _result_color(actual_r)
         p_col      = _result_color(predicted)
 
-        html += f"""<tr>
+        gender_badge = (
+            '<span style="background:#dbeafe;color:#1e40af;font-size:10px;padding:1px 5px;border-radius:3px">W</span>'
+            if gender == "W" else
+            '<span style="background:#dcfce7;color:#15803d;font-size:10px;padding:1px 5px;border-radius:3px">M</span>'
+        )
+
+        # data-league and data-gender enable JS filtering
+        html += f"""<tr data-league="{league}" data-gender="{gender}">
   <td style="font-family:monospace;font-size:12px;color:#888">{eid}</td>
   <td>{match}</td>
   <td style="color:#666;white-space:nowrap">{date}</td>
+  <td style="font-size:12px;color:#555">{league}</td>
+  <td style="text-align:center">{gender_badge}</td>
   <td style="font-size:13px">{batting}</td>
   <td style="font-family:monospace;text-align:center">{score_cp}</td>
   <td style="text-align:center">{wkts}</td>
@@ -206,6 +219,72 @@ def _acc_color(v):
     if v >= 0.60:
         return "#cc7700"
     return "#cc2200"
+
+
+def _feature_importance_html(meta_doc: Optional[dict], mkt_key: str) -> str:
+    """Render a feature importance table for the given market, sourced from model metadata."""
+    if not meta_doc:
+        return "<p style='color:#999;font-size:13px'>Model metadata not available — run pl_over_under_retrain.</p>"
+
+    models = meta_doc.get("models") or []
+    mkt_models = [m for m in models if m.get("market") == mkt_key]
+    if not mkt_models:
+        return f"<p style='color:#999;font-size:13px'>No model entries found for market <code>{escape(mkt_key)}</code>.</p>"
+
+    # Prefer pooled model for the importance summary; fall back to averaging per-cp models
+    pooled = [m for m in mkt_models if str(m.get("checkpoint_over")) == "pooled"]
+    if pooled:
+        imp_raw = pooled[0].get("feature_importance") or {}
+        source_label = "Pooled model (all checkpoints combined)"
+    else:
+        # Aggregate: sum importance across all checkpoint models
+        imp_raw: dict = {}
+        for m in mkt_models:
+            for feat, val in (m.get("feature_importance") or {}).items():
+                imp_raw[feat] = imp_raw.get(feat, 0) + (val or 0)
+        source_label = f"Aggregated across {len(mkt_models)} checkpoint model(s)"
+
+    if not imp_raw:
+        return "<p style='color:#999;font-size:13px'>No feature importance data available.</p>"
+
+    total = sum(imp_raw.values()) or 1
+    ranked = sorted(imp_raw.items(), key=lambda x: -x[1])
+
+    rows_html = ""
+    for rank, (feat, val) in enumerate(ranked, 1):
+        pct = val / total * 100
+        bar_w = int(pct * 2.5)  # max ~250px at 100%
+        bar_w = min(bar_w, 250)
+        rows_html += f"""<tr>
+  <td style="text-align:center;color:#888;width:40px">{rank}</td>
+  <td style="font-family:monospace;font-size:13px">{escape(feat)}</td>
+  <td style="text-align:right;font-family:monospace;width:60px">{pct:.1f}%</td>
+  <td style="width:260px">
+    <div style="background:#e5e7eb;border-radius:3px;height:12px;overflow:hidden">
+      <div style="width:{bar_w}px;height:12px;background:#1e40af;border-radius:3px"></div>
+    </div>
+  </td>
+</tr>"""
+
+    return f"""<div style="background:white;border:1px solid #e5e7eb;border-radius:8px;padding:20px;margin-bottom:24px;box-shadow:0 1px 4px #ccc">
+  <h3 style="margin:0 0 4px;font-size:15px;color:#111">Feature Importance</h3>
+  <p style="margin:0 0 16px;font-size:12px;color:#777">{escape(source_label)} · {len(ranked)} features</p>
+  <div style="overflow-y:auto;max-height:400px">
+  <table style="border-collapse:collapse;width:100%;font-size:13px">
+  <thead>
+    <tr style="border-bottom:2px solid #e5e7eb">
+      <th style="text-align:center;padding:6px 8px;color:#555;font-weight:600">Rank</th>
+      <th style="text-align:left;padding:6px 8px;color:#555;font-weight:600">Feature</th>
+      <th style="text-align:right;padding:6px 8px;color:#555;font-weight:600">% of total</th>
+      <th style="padding:6px 8px;color:#555;font-weight:600"></th>
+    </tr>
+  </thead>
+  <tbody>
+    {rows_html}
+  </tbody>
+  </table>
+  </div>
+</div>"""
 
 
 # ── CONFIG POST ───────────────────────────────────────────────────────────────
@@ -359,6 +438,18 @@ def _common_page_style():
     .meta-box {{ background:white; padding:14px 18px; border-radius:8px; box-shadow:0 1px 4px #ccc; min-width:130px; }}
     .meta-label {{ font-size:12px; color:#888; margin-bottom:3px; }}
     .meta-val {{ font-size:15px; font-weight:bold; color:#222; }}
+    .filter-bar {{ background:white; border:1px solid #e5e7eb; border-radius:8px; padding:14px 18px;
+                   margin-bottom:20px; box-shadow:0 1px 4px #ccc; display:flex; gap:20px;
+                   align-items:center; flex-wrap:wrap; }}
+    .filter-label {{ font-size:12px; color:#777; font-weight:600; text-transform:uppercase;
+                     letter-spacing:0.04em; white-space:nowrap; }}
+    .filter-select {{ font-size:13px; padding:5px 10px; border:1px solid #d1d5db;
+                      border-radius:5px; background:white; cursor:pointer; }}
+    .gender-btn {{ padding:5px 14px; border-radius:5px; border:1px solid #d1d5db; cursor:pointer;
+                   font-size:13px; background:white; font-weight:bold; transition:all 0.1s; }}
+    .gender-btn.active-M {{ background:#dcfce7; color:#15803d; border-color:#15803d; }}
+    .gender-btn.active-W {{ background:#dbeafe; color:#1e40af; border-color:#1e40af; }}
+    .gender-btn.active-All {{ background:#374151; color:white; border-color:#374151; }}
     .cp-tabs {{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px; }}
     .cp-tab {{ padding:6px 16px; border-radius:6px; border:1px solid #d1d5db; cursor:pointer;
                font-size:13px; background:white; }}
@@ -377,13 +468,102 @@ def _common_page_style():
     .pred-table td {{ padding:9px 12px; border-bottom:1px solid #eee; }}
     .pred-table tr:last-child td {{ border-bottom:none; }}
     .pred-table tr:hover td {{ background:#f9f9f9; }}
+    .pred-table tr.filtered-out {{ display:none; }}
     .acc-badge {{ display:inline-block; padding:3px 10px; border-radius:999px; font-size:12px;
                   font-weight:bold; color:white; margin-left:8px; vertical-align:middle; }}
     .hint {{ color:#777; font-size:12px; margin-top:6px; }}
+    .no-results-msg {{ display:none; color:#999; font-size:13px; padding:12px 0; }}
     """
 
 
-def _render_market_page(market_def: dict, preds_doc: Optional[dict]) -> str:
+def _collect_filter_options(preds_doc: dict, mkt_key: str):
+    """Return (sorted leagues list, genders set) across all predictions for this market."""
+    leagues = set()
+    genders = set()
+    mkt_data = (preds_doc.get("markets") or {}).get(mkt_key) or {}
+    for cp_data in (mkt_data.get("checkpoints") or {}).values():
+        for split in ("train", "test"):
+            for row in (cp_data.get(split) or []):
+                lg = str(row.get("league_name") or "").strip()
+                gd = str(row.get("gender") or "M").strip()
+                if lg:
+                    leagues.add(lg)
+                genders.add(gd)
+    return sorted(leagues), genders
+
+
+def _filter_bar_html(leagues: list, genders: set) -> str:
+    league_options = '<option value="">All Leagues</option>'
+    for lg in leagues:
+        league_options += f'<option value="{escape(lg)}">{escape(lg)}</option>'
+
+    has_women = "W" in genders
+    has_men   = "M" in genders
+
+    gender_btns = '<button class="gender-btn active-All" id="gbtn-All" onclick="setGender(\'All\')">All</button>'
+    if has_men:
+        gender_btns += '<button class="gender-btn" id="gbtn-M" onclick="setGender(\'M\')">M</button>'
+    if has_women:
+        gender_btns += '<button class="gender-btn" id="gbtn-W" onclick="setGender(\'W\')">W</button>'
+
+    return f"""<div class="filter-bar">
+  <div>
+    <span class="filter-label">League</span><br style="margin-bottom:4px">
+    <select class="filter-select" id="leagueFilter" onchange="applyFilters()">
+      {league_options}
+    </select>
+  </div>
+  <div>
+    <span class="filter-label">Gender</span><br style="margin-bottom:4px">
+    <div style="display:flex;gap:6px">{gender_btns}</div>
+  </div>
+  <div style="font-size:12px;color:#999;margin-left:auto" id="filterStatus"></div>
+</div>"""
+
+
+_FILTER_SCRIPT = """
+var _activeGender = 'All';
+
+function setGender(g) {
+    _activeGender = g;
+    document.querySelectorAll('.gender-btn').forEach(function(b) {
+        b.className = 'gender-btn';
+    });
+    var btn = document.getElementById('gbtn-' + g);
+    if (btn) btn.classList.add('active-' + g);
+    applyFilters();
+}
+
+function applyFilters() {
+    var league = document.getElementById('leagueFilter').value;
+    var gender = _activeGender;
+    var total = 0, visible = 0;
+    document.querySelectorAll('.pred-table tbody tr').forEach(function(row) {
+        var rowLeague = row.getAttribute('data-league') || '';
+        var rowGender = row.getAttribute('data-gender') || 'M';
+        var leagueOk = !league || rowLeague === league;
+        var genderOk = gender === 'All' || rowGender === gender;
+        total++;
+        if (leagueOk && genderOk) {
+            row.classList.remove('filtered-out');
+            visible++;
+        } else {
+            row.classList.add('filtered-out');
+        }
+    });
+    var status = document.getElementById('filterStatus');
+    if (status) {
+        if (total > 0 && visible < total) {
+            status.textContent = 'Showing ' + visible + ' of ' + total + ' rows';
+        } else {
+            status.textContent = '';
+        }
+    }
+}
+"""
+
+
+def _render_market_page(market_def: dict, preds_doc: Optional[dict], meta_doc: Optional[dict] = None) -> str:
     title    = market_def["title"]
     subtitle = market_def["subtitle"]
     mkt_key  = market_def["market_key"]
@@ -401,6 +581,10 @@ def _render_market_page(market_def: dict, preds_doc: Optional[dict]) -> str:
 
     if not checkpoints:
         return f"<p style='color:#c00'>No predictions found for market <code>{escape(mkt_key)}</code>. Check that the model was trained.</p>"
+
+    # Collect filter options from all rows
+    leagues, genders = _collect_filter_options(preds_doc, mkt_key)
+    filter_bar = _filter_bar_html(leagues, genders)
 
     # Sort checkpoints numerically
     sorted_cps = sorted(checkpoints.keys(), key=lambda x: int(x))
@@ -425,17 +609,7 @@ def _render_market_page(market_def: dict, preds_doc: Optional[dict]) -> str:
         section_id = f"cp_{cp}"
         tab_id     = f"tab_{cp}"
 
-        # Summary badges
-        acc_badge = ""
-        if test_acc is not None:
-            col = _acc_color(test_acc)
-            acc_badge = f'<span class="acc-badge" style="background:{col}">Test acc {test_acc:.0%}</span>'
-
         tabs_html += f'<button class="cp-tab {active_cls}" id="{tab_id}" onclick="showCp(\'{cp}\')"">Over {cp}</button>'
-
-        # Train / Test split tabs inside this checkpoint section
-        train_lbl = f"Training matches ({n_train})"
-        test_lbl  = f"Test matches ({n_test})" if n_test else "Test matches (0)"
 
         sections_html += f"""<div class="cp-section {active_cls}" id="{section_id}">
   <div style="background:white;border:1px solid #e5e7eb;border-radius:8px;padding:16px 20px;margin-bottom:16px;">
@@ -444,7 +618,7 @@ def _render_market_page(market_def: dict, preds_doc: Optional[dict]) -> str:
       <div><strong>Model:</strong> <code>{escape(model_used)}</code></div>
       <div><strong>CV-AUC:</strong> <span style="color:{_acc_color(cv_auc) if cv_auc else '#999'};font-weight:bold">{cv_auc:.3f}</span></div>
       {'<div><strong>Train accuracy:</strong> ' + (f'<span style="color:{_acc_color(train_acc)};font-weight:bold">{train_acc:.0%}</span>' if train_acc is not None else '—') + '</div>' if train_rows else ''}
-      {'<div><strong>Test accuracy:</strong> ' + (f'<span style="color:{_acc_color(test_acc)};font-weight:bold">{test_acc:.0%}</span>' if test_acc is not None else 'n/a') + '</div>' if True else ''}
+      {'<div><strong>Test accuracy:</strong> ' + (f'<span style="color:{_acc_color(test_acc)};font-weight:bold">{test_acc:.0%}</span>' if test_acc is not None else 'n/a') + '</div>'}
     </div>
   </div>
 
@@ -462,6 +636,11 @@ def _render_market_page(market_def: dict, preds_doc: Optional[dict]) -> str:
   </div>
 </div>"""
 
+    feat_importance_section = f"""
+<h2>Feature Importance</h2>
+{_feature_importance_html(meta_doc, mkt_key)}
+"""
+
     body = f"""
 <div class="meta-grid">
   <div class="meta-box"><div class="meta-label">Checkpoints</div><div class="meta-val">{len(sorted_cps)}</div></div>
@@ -471,8 +650,12 @@ def _render_market_page(market_def: dict, preds_doc: Optional[dict]) -> str:
 
 <p style="color:#555;font-size:14px;margin-bottom:20px">{escape(subtitle)}</p>
 
+{filter_bar}
+
 <div class="cp-tabs">{tabs_html}</div>
 {sections_html}
+
+{feat_importance_section}
 
 <script>
 function showCp(cp) {{
@@ -488,6 +671,7 @@ function showSplit(cp, split) {{
   document.getElementById('split_' + cp + '_' + split).classList.add('active');
   event.target.classList.add('active');
 }}
+{_FILTER_SCRIPT}
 </script>"""
     return body
 
@@ -520,7 +704,13 @@ def view_ml_over_under_market_html(req: func.HttpRequest) -> func.HttpResponse:
             preds_doc = json.loads(gold.get_blob_client(_PREDS_BLOB).download_blob().readall())
         except Exception:
             preds_doc = None
-        body = _render_market_page(market_def, preds_doc)
+
+        try:
+            meta_doc = json.loads(gold.get_blob_client(_METADATA_BLOB).download_blob().readall())
+        except Exception:
+            meta_doc = None
+
+        body = _render_market_page(market_def, preds_doc, meta_doc)
 
     # Breadcrumb nav links for sibling markets
     sibling_links = " &nbsp;|&nbsp; ".join(

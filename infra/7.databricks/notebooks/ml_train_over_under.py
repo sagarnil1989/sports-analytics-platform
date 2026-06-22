@@ -442,6 +442,8 @@ def _pred_row(r, prob):
         "event_id":      r.get("event_id"),
         "match_name":    r.get("match_name"),
         "match_date":    str(r.get("match_date_utc") or "")[:10],
+        "league_name":   r.get("league_name", ""),
+        "gender":        r.get("gender", "M"),
         "batting_team":  r.get("batting_team_inn1") or r.get("home_team"),
         "home_team":     r.get("home_team"),
         "away_team":     r.get("away_team"),
