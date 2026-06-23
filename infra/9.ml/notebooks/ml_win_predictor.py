@@ -417,6 +417,14 @@ for t in t20_trackers:
 
     is_womens = 1 if ("women" in match_name.lower() or "(w)" in match_name.lower()) else 0
 
+    # Day-of-week of the match — weekend crowds/conditions can correlate with
+    # more aggressive batting or different pitch/curator behaviour.
+    is_weekend = 0
+    try:
+        is_weekend = 1 if datetime.strptime(date_str, "%Y-%m-%d").weekday() >= 5 else 0  # Sat=5, Sun=6
+    except Exception:
+        pass
+
     rec = {
         "event_id":   event_id,  "match_name": match_name,
         "match_date": date_str,  "split":      split,
@@ -426,6 +434,7 @@ for t in t20_trackers:
         "inn1_bowl_team": inn1_bowl_team or "unknown",
         # match-level flags
         "is_womens_match": is_womens,
+        "is_weekend_match": is_weekend,
         # innings 1 aggregate
         "inn1_total_score":   inn1_total_score,
         "inn1_total_wickets": inn1_total_wickets,
@@ -595,7 +604,7 @@ display(df[["match_name", "match_date", "split",
 # ═══════════════════════════════════════════════════════════════════
 
 CAT_FEATURES = ["venue", "inn1_bat_team", "inn1_bowl_team"]
-MATCH_FLAGS  = ["is_womens_match"]
+MATCH_FLAGS  = ["is_womens_match", "is_weekend_match"]
 
 COMPOSITE_INN1 = [
     "inn1_pp_rp_wkt",          # runs per wicket in hand at end of powerplay

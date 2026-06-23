@@ -405,10 +405,28 @@ def extract_rows_for_event(event_id: str, tracker: Dict, train_cutoff: str = "")
     else:
         split = "train"
 
-    # Batting team in inn1 (first row with batting_team set)
+    # Day-of-week — weekend matches can have different crowd/pitch/intent dynamics.
+    is_weekend = 0
+    try:
+        is_weekend = 1 if datetime.strptime(match_date, "%Y-%m-%d").weekday() >= 5 else 0  # Sat=5, Sun=6
+    except Exception:
+        pass
+
+    # Batting team in inn1 (first row with batting_team set); bowling team is whichever
+    # of home/away is not the inn1 batting team.
     batting_team_inn1 = next(
         (r.get("batting_team") for r in inn1_rows if r.get("batting_team")), None
     )
+    _home = tracker.get("home_team_name")
+    _away = tracker.get("away_team_name")
+    if batting_team_inn1 and _home and str(batting_team_inn1).strip() == str(_home).strip():
+        bowling_team_inn1 = _away
+    elif batting_team_inn1 and _away and str(batting_team_inn1).strip() == str(_away).strip():
+        bowling_team_inn1 = _home
+    else:
+        bowling_team_inn1 = next(
+            (r.get("bowling_team") for r in inn1_rows if r.get("bowling_team")), None
+        )
 
     common = {
         "event_id":           event_id,
@@ -420,7 +438,9 @@ def extract_rows_for_event(event_id: str, tracker: Dict, train_cutoff: str = "")
         "home_team":          tracker.get("home_team_name"),
         "away_team":          tracker.get("away_team_name"),
         "batting_team_inn1":  batting_team_inn1,
+        "bowling_team_inn1":  bowling_team_inn1,
         "gender":             tracker.get("gender", "M"),
+        "is_weekend_match":   is_weekend,
         "actual_inn1_total":  actual_total,
         "inn1_outcome":       outcome,
         "split":              split,
@@ -624,7 +644,7 @@ _PER_OVER_FIELDS = [
 
 fieldnames = [
     "event_id", "league_id", "league_name", "match_name", "match_date_utc", "venue",
-    "home_team", "away_team", "batting_team_inn1", "gender", "split",
+    "home_team", "away_team", "batting_team_inn1", "bowling_team_inn1", "gender", "is_weekend_match", "split",
     "market", "checkpoint_over", "over_str", "snapshot_id",
     "balls_completed", "balls_remaining",
     "score", "wickets", "wickets_in_hand",

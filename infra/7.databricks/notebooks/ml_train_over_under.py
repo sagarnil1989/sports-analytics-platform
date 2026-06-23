@@ -112,13 +112,60 @@ _TRAJ_SUMMARY = [
 # These must be present — rows without them are dropped
 _CRITICAL = {"score", "wickets_in_hand", "betting_line", "run_rate"}
 
+# ── Categorical context features ──────────────────────────────────────────────
+# venue/league/gender/team identity don't depend on checkpoint_over at all —
+# they're known before ball 1. Encoded as smoothed target-mean (the historical
+# OVER-rate for that category), shrunk toward the global mean for categories
+# with few samples so a venue/team seen only once or twice doesn't overfit.
+_CAT_FIELDS = {
+    "venue_enc":         "venue",
+    "league_enc":        "league_name",
+    "gender_enc":        "gender",
+    "batting_team_enc":  "batting_team_inn1",
+    "bowling_team_enc":  "bowling_team_inn1",
+}
+_CAT_SMOOTHING = 10.0  # higher = more shrinkage toward global mean for rare categories
+
+
+def _build_target_encoding(rows: List[Dict], raw_field: str, smoothing: float = _CAT_SMOOTHING) -> Dict[str, float]:
+    """Smoothed target-mean encoding: category value -> historical OVER-rate."""
+    cat_sum: Dict[str, float] = defaultdict(float)
+    cat_n:   Dict[str, int]   = defaultdict(int)
+    global_sum = 0.0
+    global_n   = 0
+    for r in rows:
+        lbl = _to_float(r.get("label"))
+        cat = str(r.get(raw_field) or "").strip()
+        if lbl is None or not cat:
+            continue
+        cat_sum[cat] += lbl
+        cat_n[cat]   += 1
+        global_sum   += lbl
+        global_n     += 1
+    global_mean = (global_sum / global_n) if global_n else 0.5
+    encoding = {
+        cat: (cat_sum[cat] + smoothing * global_mean) / (cat_n[cat] + smoothing)
+        for cat in cat_n
+    }
+    encoding["__global_mean__"] = global_mean
+    return encoding
+
+
+def _build_cat_encodings_for_market(rows: List[Dict]) -> Dict[str, Dict[str, float]]:
+    """Build all 5 categorical encodings for one market's training rows."""
+    return {
+        enc_name: _build_target_encoding(rows, raw_field)
+        for enc_name, raw_field in _CAT_FIELDS.items()
+    }
+
 
 def _cp_features(cp: int) -> List[str]:
     """Ordered feature list for a per-checkpoint model at `cp` overs."""
     base = [
         "score", "wickets_in_hand", "betting_line", "score_vs_line_pace",
         "run_rate", "rr_required", "implied_prob_over", "batting_team_win_odds",
-    ] + _TRAJ_SUMMARY
+        "is_weekend_match",
+    ] + _TRAJ_SUMMARY + list(_CAT_FIELDS.keys())
     if cp >= 4:
         base.append("recent_rr_4")
     if cp >= 6:
@@ -131,15 +178,27 @@ def _cp_features(cp: int) -> List[str]:
 POOLED_FEATURES = _cp_features(16) + ["checkpoint_over", "balls_remaining", "balls_completed"]
 
 
-def _row_to_features(row: Dict, features: List[str]) -> Optional[List[float]]:
+def _row_to_features(
+    row: Dict, features: List[str], cat_encodings: Optional[Dict[str, Dict[str, float]]] = None
+) -> Optional[List[float]]:
     """
     Convert a CSV row to a float feature vector.
     Returns None if any CRITICAL feature is missing.
+    Categorical fields (venue_enc, league_enc, etc.) are looked up in cat_encodings;
+    unseen categories fall back to that encoding's global mean.
     batting_team_win_odds → imputed 2.0.
     All other missing → float('nan') for LightGBM to handle natively.
     """
+    cat_encodings = cat_encodings or {}
     vec = []
     for f in features:
+        if f in _CAT_FIELDS:
+            raw_field = _CAT_FIELDS[f]
+            enc = cat_encodings.get(f, {})
+            global_mean = enc.get("__global_mean__", 0.5)
+            raw_val = str(row.get(raw_field) or "").strip()
+            vec.append(enc.get(raw_val, global_mean))
+            continue
         val = _to_float(row.get(f))
         if val is None:
             if f in _CRITICAL:
@@ -158,6 +217,16 @@ def _row_to_features(row: Dict, features: List[str]) -> Optional[List[float]]:
 # Group rows by (market, checkpoint_over)
 # ---------------------------------------------------------------------------
 
+# Per-market categorical encodings — built from TRAIN rows only (all checkpoints
+# pooled per market, since venue/team scoring tendency is checkpoint-invariant
+# and pooling gives far more stable estimates than per-checkpoint would).
+cat_encodings_by_market: Dict[str, Dict[str, Dict[str, float]]] = {}
+for _mkt0 in sorted(set(r.get("market") for r in train_rows)):
+    _mkt_train_rows = [r for r in train_rows if r.get("market") == _mkt0]
+    cat_encodings_by_market[_mkt0] = _build_cat_encodings_for_market(_mkt_train_rows)
+    print(f"[cat encoding] {_mkt0}: "
+          + ", ".join(f"{name}={len(enc)-1} categories" for name, enc in cat_encodings_by_market[_mkt0].items()))
+
 # groups maps (market, cp) → (X_list, y_list, feature_names)
 groups: Dict[Tuple[str, int], Tuple[List, List, List[str]]] = {}
 
@@ -169,7 +238,7 @@ for row in train_rows:
         continue
     cp_int   = int(cp_str)
     features = _cp_features(cp_int)
-    fvec     = _row_to_features(row, features)
+    fvec     = _row_to_features(row, features, cat_encodings_by_market.get(market, {}))
     if fvec is None:
         continue
     key = (market, cp_int)
@@ -251,7 +320,10 @@ for (mkt, cp), (X_list, y_list, features) in sorted(groups.items()):
     model_key  = f"{mkt}_cp{cp}"
     model_path = os.path.join(DBFS_MODEL_DIR, f"{model_key}.pkl")
     with open(model_path, "wb") as f:
-        pickle.dump({"model": calibrated, "features": features}, f)
+        pickle.dump({
+            "model": calibrated, "features": features,
+            "cat_encodings": cat_encodings_by_market.get(mkt, {}),
+        }, f)
 
     meta_entry = {
         "market":             mkt,
@@ -300,7 +372,7 @@ for row in train_rows:
     label  = _to_float(row.get("label"))
     if label is None:
         continue
-    fvec = _row_to_features(row, POOLED_FEATURES)
+    fvec = _row_to_features(row, POOLED_FEATURES, cat_encodings_by_market.get(market, {}))
     if fvec is None:
         continue
     pooled_groups[market][0].append(fvec)
@@ -379,7 +451,10 @@ for market, (X_list, y_list) in sorted(pooled_groups.items()):
     model_key  = f"{market}_pooled"
     model_path = os.path.join(DBFS_MODEL_DIR, f"{model_key}.pkl")
     with open(model_path, "wb") as f:
-        pickle.dump({"model": calibrated_pooled, "features": POOLED_FEATURES}, f)
+        pickle.dump({
+            "model": calibrated_pooled, "features": POOLED_FEATURES,
+            "cat_encodings": cat_encodings_by_market.get(market, {}),
+        }, f)
 
     pooled_entry = {
         "market":           market,
@@ -414,7 +489,7 @@ if test_rows:
         with open(model_path, "rb") as f:
             m_obj = pickle.load(f)
         cp_test = [r for r in test_rows if r.get("market") == mkt and int(r.get("checkpoint_over", -1)) == cp]
-        fvecs = [_row_to_features(r, m_obj["features"]) for r in cp_test]
+        fvecs = [_row_to_features(r, m_obj["features"], m_obj.get("cat_encodings", {})) for r in cp_test]
         labels = [int(_to_float(r.get("label"))) for r in cp_test]
         pairs = [(fv, lb) for fv, lb in zip(fvecs, labels) if fv is not None]
         if len(pairs) < 5:
@@ -435,7 +510,7 @@ if test_rows:
         with open(model_path, "rb") as f:
             m_obj = pickle.load(f)
         mkt_test = [r for r in test_rows if r.get("market") == market]
-        fvecs  = [_row_to_features(r, m_obj["features"]) for r in mkt_test]
+        fvecs  = [_row_to_features(r, m_obj["features"], m_obj.get("cat_encodings", {})) for r in mkt_test]
         labels = [int(_to_float(r.get("label"))) for r in mkt_test]
         pairs  = [(fv, lb) for fv, lb in zip(fvecs, labels) if fv is not None]
         if len(pairs) < 5:
@@ -537,7 +612,7 @@ for _mkt in sorted(set(r.get("market") for r in all_rows)):
             for r in rows:
                 if r.get("market") != _mkt or int(r.get("checkpoint_over", -1)) != _cp:
                     continue
-                fv = _row_to_features(r, _active_obj["features"])
+                fv = _row_to_features(r, _active_obj["features"], _active_obj.get("cat_encodings", {}))
                 if fv is None:
                     continue
                 prob = _apply_model(_active_obj, fv)

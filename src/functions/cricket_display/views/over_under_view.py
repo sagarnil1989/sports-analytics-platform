@@ -230,6 +230,7 @@ _FEATURE_GLOSSARY = {
     "rr_required":            ("Run rate needed from here to exactly hit the betting line", "e.g. 9.4 rpo needed in last 8 overs"),
     "implied_prob_over":      ("Market's implied probability of OVER (1 / over_odds)", "e.g. 0.48 from odds of 2.08"),
     "batting_team_win_odds":  ("Live decimal win odds for the batting team — captures match context beyond runs", "e.g. 1.45 = strong favourite; 3.2 = underdog"),
+    "is_weekend_match":       ("Whether the match was played on a Saturday or Sunday (1) vs a weekday (0)", "e.g. 1 = Saturday fixture — different crowd/intent dynamics than a weekday game"),
     "line_ov1":               ("Betting line at the very first over — the pre-innings market view", "e.g. 163.5 set before any balls bowled"),
     "line_drift_total":       ("Total change in betting line from over 1 to this checkpoint", "e.g. +18.0 = market moved the line up 18 runs across the innings"),
     "line_trend_slope":       ("Linear slope of betting line across all overs — how fast it is rising or falling (runs per over)", "e.g. +2.1 = line rising ~2 runs every over on average"),
@@ -249,6 +250,11 @@ _FEATURE_GLOSSARY = {
     "checkpoint_over":        ("Which over this row represents — pooled model position feature", "e.g. 8, 12, 16"),
     "balls_remaining":        ("Balls left to bowl — pooled model position feature", "e.g. 24 = 4 overs left"),
     "balls_completed":        ("Balls bowled so far — pooled model position feature", "e.g. 96 = 16 overs done"),
+    "venue_enc":              ("Historical OVER-rate for this venue (smoothed toward the global average for venues seen only a few times)", "e.g. 0.65 = at this ground, 65% of historical innings went OVER the line — a high-scoring ground"),
+    "league_enc":             ("Historical OVER-rate for this league/tournament", "e.g. 0.40 = in this league, only 40% of innings go OVER — generally lower-scoring or tighter lines"),
+    "gender_enc":             ("Historical OVER-rate for this gender category (men's vs women's cricket)", "e.g. 0.45 = women's matches in the data go OVER slightly less often than men's"),
+    "batting_team_enc":       ("Historical OVER-rate for this specific batting team across past innings", "e.g. 0.70 = this team has gone OVER the line in 70% of their past innings — aggressive/high-scoring side"),
+    "bowling_team_enc":       ("Historical OVER-rate for innings bowled against this specific team", "e.g. 0.30 = teams batting against this bowling side go OVER only 30% of the time — strong bowling attack"),
 }
 
 _PER_OVER_GLOSSARY = {
