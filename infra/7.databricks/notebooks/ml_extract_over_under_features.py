@@ -169,13 +169,21 @@ def _linear_slope(xs: List[float], ys: List[float]) -> Optional[float]:
     return round((n * sum_xy - sum_x * sum_y) / denom, 4)
 
 
+# ── HARD RULE: no future-checkpoint leakage ─────────────────────────────────
+# A row labeled "as of Over N" must NEVER contain a feature value derived from
+# overs after N. This is enforced structurally below: the loop bound is
+# `range(1, cp + 1)` — it physically cannot read past `cp`. Do not "helpfully"
+# widen this loop or pass a larger cp when extracting a row's own features.
+# ml_train_over_under.py runs a runtime guard on the output CSV that re-checks
+# this invariant and raises if it is ever violated.
+
 def _extract_trajectory_features(
     inn1_rows: List[Dict],
     cp: int,
     market_total_balls: int = 120,
 ) -> Dict:
     """
-    Extract per-over trajectory features from over 1 through cp.
+    Extract per-over trajectory features from over 1 through cp ONLY.
     Returns a flat dict covering per-over values (ov{k}_*) and trajectory summaries.
     market_total_balls: 120 for innings_total (20 overs), 72 for first_12.
     """

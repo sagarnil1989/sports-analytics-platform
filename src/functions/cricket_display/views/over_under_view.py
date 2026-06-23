@@ -272,7 +272,25 @@ def _feature_desc(name: str):
     return "", ""
 
 
-def _feature_importance_for_model(meta_doc: Optional[dict], mkt_key: str, model_used: str):
+def _feature_available_at_cp(feat: str, cp: int) -> bool:
+    """
+    True if `feat` could actually be known at checkpoint `cp` overs into the innings.
+    The pooled model is trained across all checkpoints combined, so its importance
+    dict includes later-over features (e.g. ov14_runs) that are NaN/unknowable for
+    an early checkpoint like Over 10 — those must be filtered out before display.
+    """
+    import re
+    m = re.fullmatch(r"ov(\d+)_(runs|cumwkts|line|vs_pace)", feat)
+    if m:
+        return int(m.group(1)) <= cp
+    if feat == "recent_rr_4":
+        return cp >= 4
+    if feat in ("pp_score", "pp_wickets", "rr_trend"):
+        return cp >= 6
+    return True  # always-available: score, betting_line, line_drift_total, etc.
+
+
+def _feature_importance_for_model(meta_doc: Optional[dict], mkt_key: str, model_used: str, cp: int):
     """
     Find the metadata entry for the specific model actually used at this
     checkpoint (per-checkpoint model, or pooled fallback if CV-AUC was too low).
@@ -287,7 +305,8 @@ def _feature_importance_for_model(meta_doc: Optional[dict], mkt_key: str, model_
 
     if model_used.endswith("_pooled"):
         match = next((m for m in mkt_models if str(m.get("checkpoint_over")) == "pooled"), None)
-        label = "Pooled model — this checkpoint's own CV-AUC was below the 0.60 threshold, so predictions fall back to the all-checkpoints pooled model"
+        label = (f"Pooled model — this checkpoint's own CV-AUC was below the 0.60 threshold, so predictions "
+                  "fall back to the all-checkpoints pooled model (filtered to features known by this over)")
     else:
         try:
             cp_num = model_used.rsplit("_cp", 1)[1]
@@ -298,7 +317,11 @@ def _feature_importance_for_model(meta_doc: Optional[dict], mkt_key: str, model_
 
     if not match:
         return None, ""
-    return match.get("feature_importance") or {}, label
+
+    imp_raw = match.get("feature_importance") or {}
+    if model_used.endswith("_pooled"):
+        imp_raw = {f: v for f, v in imp_raw.items() if _feature_available_at_cp(f, cp)}
+    return imp_raw, label
 
 
 def _feature_importance_html(imp_raw: Optional[dict], source_label: str) -> str:
@@ -679,7 +702,7 @@ def _render_market_page(market_def: dict, preds_doc: Optional[dict], meta_doc: O
 
         tabs_html += f'<button class="cp-tab {active_cls}" id="{tab_id}" onclick="showCp(\'{cp}\')"">Over {cp}</button>'
 
-        cp_imp_raw, cp_imp_label = _feature_importance_for_model(meta_doc, mkt_key, model_used)
+        cp_imp_raw, cp_imp_label = _feature_importance_for_model(meta_doc, mkt_key, model_used, int(cp))
 
         sections_html += f"""<div class="cp-section {active_cls}" id="{section_id}">
   <div style="background:white;border:1px solid #e5e7eb;border-radius:8px;padding:16px 20px;margin-bottom:16px;">

@@ -22,7 +22,7 @@ subprocess.run([
 
 # COMMAND ----------
 
-import csv, io, json, os, pickle, math
+import csv, io, json, os, pickle, math, re
 from datetime import datetime, timezone
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
@@ -57,6 +57,38 @@ train_rows = [r for r in all_rows if r.get("split", "train") == "train"]
 test_rows  = [r for r in all_rows if r.get("split") == "test"]
 print(f"Loaded {len(all_rows)} rows from training CSV  (train={len(train_rows)}, test={len(test_rows)})")
 print(f"Training on train split only; test split used for held-out evaluation.")
+
+# ---------------------------------------------------------------------------
+# HARD RULE — no future-checkpoint leakage
+#
+# A row labeled "checkpoint_over = N" must never carry a non-empty value for
+# any ov{k}_* feature where k > N (that would mean the model could see data
+# from overs that hadn't happened yet at prediction time). This is supposed
+# to be guaranteed structurally by ml_extract_over_under_features.py, but we
+# re-verify it here on the actual CSV before any training happens — if this
+# ever fires, STOP and fix extraction; do not train on the data as-is.
+# ---------------------------------------------------------------------------
+
+_leak_pattern = re.compile(r"^ov(\d+)_(runs|cumwkts|line|vs_pace)$")
+_leak_violations = []
+for _r in all_rows:
+    try:
+        _cp = int(_r.get("checkpoint_over", -1))
+    except (TypeError, ValueError):
+        continue
+    for _f, _v in _r.items():
+        _m = _leak_pattern.match(_f)
+        if _m and int(_m.group(1)) > _cp and _v not in (None, "", "None"):
+            _leak_violations.append((_r.get("event_id"), _r.get("market"), _cp, _f, _v))
+
+if _leak_violations:
+    for v in _leak_violations[:10]:
+        print(f"  LEAK: event={v[0]} market={v[1]} cp={v[2]} feature={v[3]}={v[4]}")
+    raise RuntimeError(
+        f"Future-checkpoint leakage detected in {len(_leak_violations)} feature values — "
+        f"refusing to train. Fix ml_extract_over_under_features.py and re-extract."
+    )
+print(f"[leakage guard] {len(all_rows)} rows checked — no future-checkpoint feature leakage found")
 
 # ---------------------------------------------------------------------------
 # Feature definition
