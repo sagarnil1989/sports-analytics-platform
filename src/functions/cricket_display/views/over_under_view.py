@@ -272,29 +272,39 @@ def _feature_desc(name: str):
     return "", ""
 
 
-def _feature_importance_html(meta_doc: Optional[dict], mkt_key: str) -> str:
-    """Render a feature importance table with plain-English descriptions."""
+def _feature_importance_for_model(meta_doc: Optional[dict], mkt_key: str, model_used: str):
+    """
+    Find the metadata entry for the specific model actually used at this
+    checkpoint (per-checkpoint model, or pooled fallback if CV-AUC was too low).
+    Returns (feature_importance_dict, source_label) or (None, "").
+    """
     if not meta_doc:
-        return "<p style='color:#999;font-size:13px'>Model metadata not available — run pl_over_under_retrain.</p>"
-
+        return None, ""
     models = meta_doc.get("models") or []
     mkt_models = [m for m in models if m.get("market") == mkt_key]
     if not mkt_models:
-        return f"<p style='color:#999;font-size:13px'>No model entries found for market <code>{escape(mkt_key)}</code>.</p>"
+        return None, ""
 
-    pooled = [m for m in mkt_models if str(m.get("checkpoint_over")) == "pooled"]
-    if pooled:
-        imp_raw = pooled[0].get("feature_importance") or {}
-        source_label = "Pooled model (all checkpoints combined) — which signals matter most across the innings"
+    if model_used.endswith("_pooled"):
+        match = next((m for m in mkt_models if str(m.get("checkpoint_over")) == "pooled"), None)
+        label = "Pooled model — this checkpoint's own CV-AUC was below the 0.60 threshold, so predictions fall back to the all-checkpoints pooled model"
     else:
-        imp_raw: dict = {}
-        for m in mkt_models:
-            for feat, val in (m.get("feature_importance") or {}).items():
-                imp_raw[feat] = imp_raw.get(feat, 0) + (val or 0)
-        source_label = f"Aggregated across {len(mkt_models)} checkpoint model(s)"
+        try:
+            cp_num = model_used.rsplit("_cp", 1)[1]
+        except Exception:
+            cp_num = None
+        match = next((m for m in mkt_models if str(m.get("checkpoint_over")) == str(cp_num)), None)
+        label = f"Model trained specifically on Over {cp_num} data — features reflect everything known up to that point"
 
+    if not match:
+        return None, ""
+    return match.get("feature_importance") or {}, label
+
+
+def _feature_importance_html(imp_raw: Optional[dict], source_label: str) -> str:
+    """Render a feature importance table with plain-English descriptions."""
     if not imp_raw:
-        return "<p style='color:#999;font-size:13px'>No feature importance data available.</p>"
+        return "<p style='color:#999;font-size:13px'>No feature importance data available for this checkpoint's model.</p>"
 
     total  = sum(imp_raw.values()) or 1
     ranked = sorted(imp_raw.items(), key=lambda x: -x[1])
@@ -669,6 +679,8 @@ def _render_market_page(market_def: dict, preds_doc: Optional[dict], meta_doc: O
 
         tabs_html += f'<button class="cp-tab {active_cls}" id="{tab_id}" onclick="showCp(\'{cp}\')"">Over {cp}</button>'
 
+        cp_imp_raw, cp_imp_label = _feature_importance_for_model(meta_doc, mkt_key, model_used)
+
         sections_html += f"""<div class="cp-section {active_cls}" id="{section_id}">
   <div style="background:white;border:1px solid #e5e7eb;border-radius:8px;padding:16px 20px;margin-bottom:16px;">
     <div style="display:flex;gap:24px;flex-wrap:wrap;font-size:13px;color:#555">
@@ -692,12 +704,10 @@ def _render_market_page(market_def: dict, preds_doc: Optional[dict], meta_doc: O
     <p class="hint" style="margin-bottom:8px">Matches the model was <strong>trained on</strong> — high accuracy here is expected.</p>
     {_pred_table(train_rows, target_over)}
   </div>
-</div>"""
 
-    feat_importance_section = f"""
-<h2>Feature Importance</h2>
-{_feature_importance_html(meta_doc, mkt_key)}
-"""
+  <h3 style="margin-top:24px">Feature Importance — Over {cp}</h3>
+  {_feature_importance_html(cp_imp_raw, cp_imp_label)}
+</div>"""
 
     body = f"""
 <div class="meta-grid">
@@ -712,8 +722,6 @@ def _render_market_page(market_def: dict, preds_doc: Optional[dict], meta_doc: O
 
 <div class="cp-tabs">{tabs_html}</div>
 {sections_html}
-
-{feat_importance_section}
 
 <script>
 function showCp(cp) {{
