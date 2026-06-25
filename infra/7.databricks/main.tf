@@ -181,6 +181,12 @@ resource "databricks_notebook" "hypothesis_timeout_wicket" {
   language = "PYTHON"
 }
 
+resource "databricks_notebook" "hypothesis_inn1_prematch" {
+  source   = "${path.module}/notebooks/hypothesis_inn1_prematch.py"
+  path     = "/cricket-pipeline/hypothesis/inn1_prematch"
+  language = "PYTHON"
+}
+
 resource "databricks_notebook" "analysis_ended_match_table" {
   source   = "${path.module}/notebooks/analysis_ended_match_table.py"
   path     = "/cricket-pipeline/analysis/ended_match_table"

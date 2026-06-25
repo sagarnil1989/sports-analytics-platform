@@ -409,6 +409,31 @@ resource "azurerm_data_factory_pipeline" "hypothesis" {
           RUN_ID                     = "@pipeline().RunId"
         }
       }
+    },
+    {
+      name = "hypothesis_inn1_prematch"
+      type = "Custom"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      linkedServiceName = {
+        referenceName = "ls_azure_batch"
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        command = "python3 hypothesis_inn1_prematch.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath          = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
+        }
+      }
     }
   ])
 
@@ -950,6 +975,23 @@ resource "azurerm_data_factory_pipeline" "hypothesis_databricks" {
       }
       typeProperties = {
         notebookPath = "/cricket-pipeline/hypothesis/timeout_wicket"
+        baseParameters = {
+          run_id = { value = "@pipeline().RunId", type = "Expression" }
+        }
+      }
+    },
+    {
+      name = "hypothesis_inn1_prematch"
+      type = "DatabricksNotebook"
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/hypothesis/inn1_prematch"
         baseParameters = {
           run_id = { value = "@pipeline().RunId", type = "Expression" }
         }

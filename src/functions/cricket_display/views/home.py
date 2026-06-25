@@ -34,6 +34,7 @@ def view_home(req: func.HttpRequest) -> func.HttpResponse:
         <h3 style="margin:20px 0 4px; color:#555; font-size:15px; text-transform:uppercase; letter-spacing:1px;">Hypothesis</h3>
         <div class="card"><a href="/api/hypothesis/inn2-over6">Inn2 Over-6 Favourite Wins</a><p>Does the match-winner odds favourite after 6 overs of the chase always win? T20 only — with score, odds and actual result.</p></div>
         <div class="card"><a href="/api/hypothesis/timeout-wicket">Wicket After Strategic Timeout</a><p>After a strategic timeout (game paused &gt;2 min), does a wicket always fall in the very next over? T20 only — timeout detected from gaps in game state.</p></div>
+        <div class="card"><a href="/api/hypothesis/inn1-prematch">Inn1 Pre-Match Score Over/Under</a><p>Does the actual innings-1 total land OVER the bet365 pre-match line more often than under? Compares the line set before a ball is bowled against the actual result.</p></div>
         <h2 style="margin:24px 0 4px; color:#333;">Reference</h2>
         <div class="card"><a href="/api/ml/glossary">Glossary</a><p>Plain-English explanations of all ML metrics (MAE, RMSE, R², Accuracy, ROC-AUC), algorithms (XGBoost, Random Forest), and cricket analytics terms (CRR, RRR, bat dominance, chase difficulty, odds)</p></div>
     </body>

@@ -7,6 +7,10 @@ Hypothesis 1 — Inn2 Over-6 Favourite Wins:
 Hypothesis 2 — Strategic Timeout Wicket:
   After a strategic timeout (game state unchanged for > 2 minutes), a wicket
   falls in the next over when play resumes.
+
+Hypothesis 3 — Inn1 Pre-Match Score Over/Under:
+  The bet365 pre-match "1st Innings Score" Over/Under line (set before a ball
+  is bowled) — does the actual innings-1 total tend to land on one side of it?
 """
 import json
 import logging
@@ -438,3 +442,147 @@ def _find_timeouts(
             quiet_start_idx = i
 
     return timeouts
+
+
+# ---------------------------------------------------------------------------
+# Hypothesis 3 — Inn1 Pre-Match Score Over/Under
+# ---------------------------------------------------------------------------
+
+_INN1_PREMATCH_CATEGORY = "innings_1"
+_INN1_PREMATCH_MARKET   = "1st Innings Score"
+
+
+def extract_inn1_prematch_over(event_id: Optional[str] = None) -> Dict[str, Any]:
+    """Process T20 matches and write per-event hypothesis_inn1_prematch.json to gold.
+
+    Compares the bet365 pre-match "1st Innings Score" Over/Under line (captured
+    before the match started, via gold/cricket/prematch/latest/) against the
+    actual innings-1 total from the gold tracker.
+
+    If event_id is given, processes only that event. Otherwise scans all ended events.
+    Returns aggregate summary.
+    """
+    gold = get_named_container_client("gold")
+
+    if event_id:
+        event_ids_to_process = [event_id]
+    else:
+        all_ids = _scan_ended_event_ids(gold)
+        event_ids_to_process = []
+        for eid in all_ids:
+            tracker = download_json(gold, f"event_id={eid}/innings_tracker.json") or {}
+            if _is_t20_tracker(tracker):
+                event_ids_to_process.append(eid)
+
+    logging.info(json.dumps({"event": "hypothesis_inn1_prematch_start", "event_count": len(event_ids_to_process)}))
+
+    results = []
+    no_prematch = 0
+    for eid in event_ids_to_process:
+        try:
+            row = _process_inn1_prematch_event(eid, gold)
+            if row is None:
+                no_prematch += 1
+                continue
+            upload_json(
+                gold,
+                f"event_id={eid}/hypothesis_inn1_prematch.json",
+                {"generated_at_utc": utc_now().isoformat(), **row},
+                overwrite=True,
+            )
+            results.append(row)
+        except Exception:
+            logging.exception(json.dumps({"event": "hypothesis_inn1_prematch_event_error", "event_id": eid}))
+
+    results.sort(key=lambda r: r.get("match_date", ""), reverse=True)
+
+    over_count  = sum(1 for r in results if r.get("result") == "OVER")
+    under_count = sum(1 for r in results if r.get("result") == "UNDER")
+    push_count  = sum(1 for r in results if r.get("result") == "PUSH")
+    eligible    = over_count + under_count
+
+    output: Dict[str, Any] = {
+        "generated_at_utc": utc_now().isoformat(),
+        "hypothesis": "The actual innings-1 total lands OVER the bet365 pre-match '1st Innings Score' line more often than under.",
+        "total_t20_matches": len(event_ids_to_process),
+        "no_prematch_market_count": no_prematch,
+        "eligible_matches": eligible,
+        "over_count": over_count,
+        "under_count": under_count,
+        "push_count": push_count,
+        "over_pct": round(100.0 * over_count / eligible, 1) if eligible > 0 else None,
+        "results": results,
+    }
+
+    logging.info(json.dumps({
+        "event": "hypothesis_inn1_prematch_done",
+        "total": len(results),
+        "over": over_count,
+        "under": under_count,
+        "over_pct": output["over_pct"],
+    }))
+    return output
+
+
+def _process_inn1_prematch_event(event_id: str, gold) -> Optional[Dict[str, Any]]:
+    """Extract hypothesis row for one ended T20 match. Returns None if no pre-match market available."""
+    tracker = download_json(gold, f"event_id={event_id}/innings_tracker.json") or {}
+    actual_total = tracker.get("actual_total")
+    if actual_total is None:
+        return None
+
+    dashboard = download_json(gold, f"cricket/prematch/latest/event_id={event_id}/prematch_dashboard.json")
+    if not dashboard:
+        return None
+
+    records = (dashboard.get("prematch_markets") or {}).get("records") or []
+    inn1_recs = [
+        r for r in records
+        if r.get("category_key") == _INN1_PREMATCH_CATEGORY and r.get("market_name") == _INN1_PREMATCH_MARKET
+    ]
+    if not inn1_recs:
+        return None
+
+    line: Optional[float] = None
+    over_odds: Optional[float] = None
+    under_odds: Optional[float] = None
+    for r in inn1_recs:
+        try:
+            line = float(r.get("selection_name"))
+        except (TypeError, ValueError):
+            continue
+        header = str(r.get("selection_header") or "").strip().lower()
+        odds = r.get("odds_decimal")
+        if header == "over":
+            over_odds = odds
+        elif header == "under":
+            under_odds = odds
+
+    if line is None:
+        return None
+
+    if actual_total > line:
+        result = "OVER"
+    elif actual_total < line:
+        result = "UNDER"
+    else:
+        result = "PUSH"
+
+    match_header = dashboard.get("match_header") or {}
+    inn1_rows = [r for r in (tracker.get("rows") or []) if r.get("innings") == 1]
+    batting_team_inn1 = next((r.get("batting_team") for r in inn1_rows if r.get("batting_team")), None)
+
+    return {
+        "event_id":            event_id,
+        "match_date":          str(tracker.get("match_date_utc") or "")[:10],
+        "match_name":          tracker.get("match_name") or match_header.get("match_name") or f"event_{event_id}",
+        "league_name":         tracker.get("league_name") or match_header.get("league_name") or "",
+        "is_womens_match":     _is_womens_match(tracker.get("match_name") or ""),
+        "batting_team_inn1":   batting_team_inn1,
+        "prematch_line":       line,
+        "prematch_over_odds":  over_odds,
+        "prematch_under_odds": under_odds,
+        "actual_inn1_total":   actual_total,
+        "margin":              round(actual_total - line, 1),
+        "result":              result,
+    }

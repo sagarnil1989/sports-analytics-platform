@@ -30,6 +30,7 @@ from views import (
     view_glossary_html,
     view_hypothesis_inn2_over6,
     view_hypothesis_timeout_wicket,
+    view_hypothesis_inn1_prematch,
     view_ml_over_under_html,
     view_ml_over_under_config_post,
     view_ml_over_under_market_html,
@@ -229,3 +230,8 @@ def get_hypothesis_inn2_over6(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="hypothesis/timeout-wicket", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_hypothesis_timeout_wicket(req: func.HttpRequest) -> func.HttpResponse:
     return view_hypothesis_timeout_wicket(req)
+
+
+@app.route(route="hypothesis/inn1-prematch", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_hypothesis_inn1_prematch(req: func.HttpRequest) -> func.HttpResponse:
+    return view_hypothesis_inn1_prematch(req)

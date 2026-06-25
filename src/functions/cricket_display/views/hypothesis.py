@@ -251,3 +251,138 @@ def view_hypothesis_inn2_over6(req: func.HttpRequest) -> func.HttpResponse:
     )
 
     return func.HttpResponse(html, mimetype="text/html")
+
+
+def view_hypothesis_inn1_prematch(req: func.HttpRequest) -> func.HttpResponse:
+    gold = get_named_container_client("gold")
+    data = download_json(gold, "cricket/hypothesis/inn1_prematch_over.json")
+
+    if not data:
+        return func.HttpResponse(
+            "<p>No data yet. Run the <code>hypothesis_inn1_prematch</code> Databricks notebook first.</p>",
+            mimetype="text/html",
+            status_code=404,
+        )
+
+    results = sorted(data.get("results", []), key=lambda r: r.get("match_date") or "", reverse=True)
+    generated = data.get("generated_at_utc", "")[:19].replace("T", " ")
+
+    leagues = sorted({r.get("league_name") or "Unknown" for r in results})
+    league_options = '<option value="ALL">All Leagues</option>' + "".join(
+        f'<option value="{escape(ln)}">{escape(ln)}</option>' for ln in leagues
+    )
+
+    rows_html = ""
+    for r in results:
+        event_id    = escape(r.get("event_id") or "")
+        league_name = escape(r.get("league_name") or "Unknown")
+        match_date  = escape(r.get("match_date") or "")
+        match       = escape(r.get("match_name") or r.get("event_id", ""))
+        batting     = escape(r.get("batting_team_inn1") or "")
+        line        = r.get("prematch_line")
+        line_str    = f"{line:.1f}" if line is not None else "—"
+        over_odds   = r.get("prematch_over_odds")
+        under_odds  = r.get("prematch_under_odds")
+        over_odds_str  = f"{over_odds:.2f}" if over_odds else "—"
+        under_odds_str = f"{under_odds:.2f}" if under_odds else "—"
+        actual      = r.get("actual_inn1_total")
+        margin      = r.get("margin")
+        margin_str  = f"{margin:+.1f}" if margin is not None else "—"
+        result      = r.get("result") or ""
+
+        if result == "OVER":
+            result_cell = '<td style="color:#1a7a1a;font-weight:bold;">OVER</td>'
+        elif result == "UNDER":
+            result_cell = '<td style="color:#aa1111;font-weight:bold;">UNDER</td>'
+        elif result == "PUSH":
+            result_cell = '<td style="color:#888;">PUSH</td>'
+        else:
+            result_cell = '<td style="color:#888;">—</td>'
+
+        rows_html += f"""<tr data-league="{league_name}" data-result="{escape(result)}">
+            <td>{match_date}<br><small style="color:#888;font-family:monospace;">{event_id}</small></td>
+            <td>{match}<br><small style="color:#888;">{league_name}</small></td>
+            <td>{batting}</td>
+            <td style="font-family:monospace;font-weight:bold;">{line_str}</td>
+            <td style="font-family:monospace;">{over_odds_str} / {under_odds_str}</td>
+            <td style="font-family:monospace;font-weight:bold;">{actual}</td>
+            <td style="font-family:monospace;">{margin_str}</td>
+            {result_cell}
+        </tr>"""
+
+    summary_and_filter_html = f"""
+    <div id="summaryBanner" style="background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px #ddd;margin-bottom:16px;">
+        <h2 style="margin:0 0 10px;">Hypothesis: Inn1 Pre-Match Score Over/Under</h2>
+        <p style="color:#555;margin:0 0 6px;">The bet365 pre-match "1st Innings Score" Over/Under line is set before a ball is bowled, based purely on team strength, venue and conditions. Does the actual innings-1 total land OVER that line more often than UNDER?</p>
+        <p style="color:#888;font-size:12px;margin:0 0 14px;">Only matches with a captured pre-match snapshot AND that specific market are eligible — pre-match capture started partway through the data history, so older matches are excluded.</p>
+        <table style="border:none;box-shadow:none;background:transparent;width:auto;">
+            <tr><td style="border:none;padding:4px 16px 4px 0;color:#555;">T20 matches scanned</td><td style="border:none;padding:4px 0;font-weight:bold;" id="statTotal">—</td></tr>
+            <tr><td style="border:none;padding:4px 16px 4px 0;color:#555;">Eligible (line available)</td><td style="border:none;padding:4px 0;font-weight:bold;" id="statEligible">—</td></tr>
+            <tr><td style="border:none;padding:4px 16px 4px 0;color:#555;">No pre-match market</td><td style="border:none;padding:4px 0;font-weight:bold;" id="statNoMarket">—</td></tr>
+            <tr><td style="border:none;padding:4px 16px 4px 0;color:#555;">OVER rate</td><td style="border:none;padding:4px 0;font-weight:bold;" id="statVerdict">—</td></tr>
+        </table>
+        <p style="color:#999;font-size:12px;margin:12px 0 0;">Generated {generated} UTC</p>
+    </div>
+    <div style="margin-bottom:16px;">
+        <label style="font-weight:600;margin-right:8px;">League:</label>
+        <select id="leagueFilter" onchange="applyFilter()"
+                style="padding:8px 12px;font-size:14px;border:1px solid #ccc;border-radius:6px;">
+            {league_options}
+        </select>
+    </div>
+    <script>
+    function applyFilter() {{
+        var league = document.getElementById('leagueFilter').value;
+        var rows = document.querySelectorAll('#matchTable tr[data-league]');
+        var total = 0, over = 0, under = 0, push = 0;
+        rows.forEach(function(r) {{
+            var show = league === 'ALL' || r.dataset.league === league;
+            r.style.display = show ? '' : 'none';
+            if (show) {{
+                total++;
+                var res = r.dataset.result;
+                if (res === 'OVER') over++;
+                else if (res === 'UNDER') under++;
+                else if (res === 'PUSH') push++;
+            }}
+        }});
+        var eligible = over + under;
+        var noMarket = total - eligible - push;
+        var pct = eligible > 0 ? (100 * over / eligible).toFixed(1) : null;
+        var verdictColor = !pct ? '#555' : (pct >= 55 ? '#1a7a1a' : (pct >= 45 ? '#cc6600' : '#aa1111'));
+        var verdictText  = pct ? pct + '% OVER (' + over + '/' + eligible + ' eligible matches)' : 'Not enough data yet';
+        document.getElementById('statTotal').textContent    = total;
+        document.getElementById('statEligible').textContent = eligible;
+        document.getElementById('statNoMarket').textContent = noMarket;
+        var sv = document.getElementById('statVerdict');
+        sv.textContent = verdictText;
+        sv.style.color = verdictColor;
+    }}
+    document.addEventListener('DOMContentLoaded', applyFilter);
+    </script>
+    """
+
+    headers = [
+        "Date / Event ID",
+        "Match",
+        "Batting (Inn1)",
+        "Pre-Match Line",
+        "Over / Under Odds",
+        "Actual Inn1 Total",
+        "Margin (Actual − Line)",
+        "Result",
+    ]
+
+    table_page = build_simple_table_page(
+        title="Hypothesis: Inn1 Pre-Match Score Over/Under",
+        headers=headers,
+        rows_html=rows_html,
+        back_link="/api/home",
+    )
+
+    html = table_page.replace(
+        '<div class="hint">This page reads a small pre-built gold index file, so it should load quickly.</div>',
+        summary_and_filter_html,
+    )
+
+    return func.HttpResponse(html, mimetype="text/html")

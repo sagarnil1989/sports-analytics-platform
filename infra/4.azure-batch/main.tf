@@ -177,6 +177,14 @@ resource "azurerm_storage_blob" "script_hypothesis_timeout_wicket" {
   content_md5          = filemd5("${path.module}/scripts/hypothesis_timeout_wicket.py")
 }
 
+resource "azurerm_storage_blob" "script_hypothesis_inn1_prematch" {
+  name                 = "hypothesis_inn1_prematch.py"
+  storage_container_id = azurerm_storage_container.scripts.id
+  type                 = "Block"
+  source               = "${path.module}/scripts/hypothesis_inn1_prematch.py"
+  content_md5          = filemd5("${path.module}/scripts/hypothesis_inn1_prematch.py")
+}
+
 # ---------------------------------------------------------------------------
 # Lib files shared by scripts
 # util.py and league_config.py come from the ingestion function source.
