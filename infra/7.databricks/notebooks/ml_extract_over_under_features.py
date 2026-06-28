@@ -3,10 +3,13 @@
 # Phase 1 of the Over/Under Innings Total Predictor.
 #
 # Scans all completed T20 matches in gold, extracts checkpoint features and
-# labels for two markets:
+# labels for three markets (all 1st innings — 2nd innings betting lines are
+# not currently captured upstream in silver, so 2nd innings markets aren't
+# possible yet):
 #
 #   1. Innings Total     — checkpoints: inn1 over 2, 4, 6, 8, 10, 12, 14, 16
 #   2. First 12 Overs    — checkpoints: inn1 over 2, 4, 6, 8
+#   3. First 6 Overs     — checkpoints: inn1 over 1, 2, 3, 4, 5
 #
 # For each (event, market, checkpoint_over) we record:
 #   - match state features at that over  (score, wickets, run rates, betting line, odds)
@@ -55,11 +58,19 @@ silver = svc.get_container_client("silver")
 
 IT_CHECKPOINTS   = [2, 4, 6, 8, 10, 12, 14, 16]   # innings total
 F12_CHECKPOINTS  = [2, 4, 6, 8]                    # first 12 overs
+F6_CHECKPOINTS   = [1, 2, 3, 4, 5]                  # first 6 overs
 
 # Market template / group identifiers for First 12 Overs in active_markets rows
 _F12_GROUP_ID    = "29"
 _F12_TMPL_ID     = "30171"
 _F12_NAME_SUBSTR = "first 12"   # match against market_group_name.lower()
+
+# First-6-Overs market: group_id/template_id are reused across different market
+# types depending on competition (confirmed in real data — group 29/template
+# 30171 means "First 6 Overs" in some competitions and "First 12 Overs" in
+# others). The name substring is the only reliable identifier, so this one
+# does NOT filter on group/template id at all — name match is authoritative.
+_F6_NAME_SUBSTR  = "first 6 overs"   # match against market_group_name.lower()
 
 # Tolerance: accept any row within this many balls of the checkpoint
 _BALL_TOLERANCE = 5   # ±5 balls from the target checkpoint ball count
@@ -374,6 +385,73 @@ def _get_first12_line(event_id: str, snapshot_id: str) -> Tuple[Optional[float],
 
 
 # ---------------------------------------------------------------------------
+# First-6-Overs market extraction from silver active_markets.json
+# ---------------------------------------------------------------------------
+
+def _get_first6_line(event_id: str, snapshot_id: str) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Read silver active_markets.json for a snapshot and return
+    (line, over_odds, under_odds) for the "Runs in First 6 Overs" market.
+    Returns (None, None, None) if market not present.
+
+    Unlike _get_first12_line, this does not filter on market_group_id /
+    market_template_id — those are reused across different market types
+    depending on competition, so the name substring is the only reliable
+    identifier for this market.
+    """
+    path = f"event_id={event_id}/snapshot_id={snapshot_id}/active_markets.json"
+    data = _download_json(silver, path)
+    if not data:
+        return None, None, None
+
+    rows = data.get("rows", [])
+
+    f6_rows = [
+        r for r in rows
+        if _F6_NAME_SUBSTR in str(r.get("market_group_name") or "").lower()
+    ]
+    if not f6_rows:
+        return None, None, None
+
+    by_line: Dict[str, Dict] = {}
+    for r in f6_rows:
+        sel  = str(r.get("selection_name") or "").strip().lower()
+        odds = r.get("odds_decimal")
+        line = r.get("handicap") or r.get("line")
+        if not line or not odds:
+            continue
+        try:
+            line_val = float(line)
+        except Exception:
+            continue
+        key = str(line_val)
+        by_line.setdefault(key, {})
+        if sel == "over":
+            by_line[key]["over"] = (odds, line_val)
+        elif sel == "under":
+            by_line[key]["under"] = (odds, line_val)
+
+    best_line_val   = None
+    best_over_odds  = None
+    best_under_odds = None
+    best_diff = float("inf")
+
+    for key, sides in by_line.items():
+        if "over" not in sides or "under" not in sides:
+            continue
+        ov_odds, lv = sides["over"]
+        un_odds, _  = sides["under"]
+        diff = abs(ov_odds - un_odds)
+        if diff < best_diff:
+            best_diff       = diff
+            best_line_val   = lv
+            best_over_odds  = ov_odds
+            best_under_odds = un_odds
+
+    return best_line_val, best_over_odds, best_under_odds
+
+
+# ---------------------------------------------------------------------------
 # Per-event feature extraction
 # ---------------------------------------------------------------------------
 
@@ -549,6 +627,63 @@ def extract_rows_for_event(event_id: str, tracker: Dict, train_cutoff: str = "")
             "snapshot_id":      snapshot_id,
             "actual_value":     actual_first12,
             "actual_margin":    round(actual_first12 - line, 1),
+            "label":            label,
+            **_traj,
+        })
+
+    # ── Market 3: First 6 Overs ──────────────────────────────────────────────
+    # Actual first-6 score = batting score at end of over 6
+    actual_first6 = _find_score_at_over(inn1_rows, 6, innings=1)
+
+    for cp in F6_CHECKPOINTS:
+        row = _find_checkpoint_row(inn1_rows, cp, innings=1)
+        if row is None:
+            continue
+
+        snapshot_id = row.get("snapshot_id")
+        if not snapshot_id:
+            continue
+
+        line, ov_odds, un_odds = _get_first6_line(event_id, snapshot_id)
+        if line is None:
+            continue  # market not available at this checkpoint
+
+        score   = row.get("score")
+        wickets = row.get("wickets")
+        balls   = _over_to_balls(row.get("over")) or (cp * 6)
+
+        if score is None or actual_first6 is None:
+            continue
+
+        # Target is 6 overs = 36 balls
+        balls_remaining_in_6 = max(0, 36 - balls)
+        label = (1 if actual_first6 > line else 0) if actual_first6 != line else None
+        if label is None:
+            continue
+
+        _traj = _extract_trajectory_features(inn1_rows, cp, market_total_balls=36)
+        output_rows.append({
+            **common,
+            "market":           "first_6_overs",
+            "checkpoint_over":  cp,
+            "over_str":         row.get("over"),
+            "balls_completed":  balls,
+            "balls_remaining":  balls_remaining_in_6,
+            "score":            score,
+            "wickets":          wickets,
+            "wickets_in_hand":  (10 - (wickets or 0)),
+            "betting_line":     line,
+            "score_vs_line_pace": round(score - line * balls / 36, 2),
+            "run_rate":         _run_rate(score, balls),
+            "rr_required":      _required_rr(line, score, balls_remaining_in_6),
+            "over_odds":        ov_odds,
+            "under_odds":       un_odds,
+            "implied_prob_over": _implied_prob(ov_odds),
+            "batting_team_win_odds":  row.get("batting_team_odds"),
+            "bowling_team_win_odds":  row.get("bowling_team_odds"),
+            "snapshot_id":      snapshot_id,
+            "actual_value":     actual_first6,
+            "actual_margin":    round(actual_first6 - line, 1),
             "label":            label,
             **_traj,
         })

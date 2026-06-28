@@ -17,7 +17,7 @@ _MARKETS = [
         "market_key":  "first_6_overs",
         "innings":     1,
         "target_over": 6,
-        "live":        False,
+        "live":        True,
     },
     {
         "slug":        "inn1-total",
@@ -87,7 +87,7 @@ function saveCutoff() {
     })
     .then(r => r.json())
     .then(j => {
-        if (j.ok) { s.style.color='#2d7a2d'; s.textContent='Saved ✓ — re-run pl_over_under_retrain in ADF to apply.'; }
+        if (j.ok) { s.style.color='#2d7a2d'; s.textContent='Saved ✓ — re-run pl_ml_and_hypothesis in ADF to apply.'; }
         else       { s.style.color='#c00';    s.textContent='Error: ' + (j.error || 'unknown'); }
     })
     .catch(e => { s.style.color='#c00'; s.textContent='Network error: ' + e; });
@@ -517,7 +517,7 @@ def view_ml_over_under_html(req: func.HttpRequest) -> func.HttpResponse:
     <div class="cutoff-label">
       <strong>Train / test cutoff date</strong><br>
       Matches on or before this date → training. After → held-out test.<br>
-      Save here, then run <code>pl_over_under_retrain</code> in ADF.
+      Save here, then run <code>pl_ml_and_hypothesis</code> in ADF.
     </div>
     <input type="date" id="cutoffInput" class="cutoff-input" value="{escape(saved_cutoff)}">
     <button class="cutoff-btn" onclick="saveCutoff()">Save</button>
@@ -680,7 +680,7 @@ def _render_market_page(market_def: dict, preds_doc: Optional[dict], meta_doc: O
     if preds_doc is None:
         body = """<div style="background:#fff3cd;border-left:4px solid #f0a000;padding:16px 20px;
                   border-radius:4px;margin:20px 0;font-size:14px;color:#555;">
-            No model results found.<br>Run <strong>pl_over_under_retrain</strong> in ADF to train models.
+            No model results found.<br>Run <strong>pl_ml_and_hypothesis</strong> in ADF to train models.
         </div>"""
         return body
 

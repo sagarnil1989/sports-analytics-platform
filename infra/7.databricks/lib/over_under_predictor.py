@@ -1,5 +1,6 @@
 """
-over_under_predictor — Over/Under inference for innings_total and first_12_overs.
+over_under_predictor — Over/Under inference for innings_total, first_12_overs,
+and first_6_overs.
 
 Called from gold_rebuild._rebuild_innings_core() after the innings tracker is written.
 Runs only on Databricks (models live on DBFS at /dbfs/FileStore/cricket-pipeline/models/).
@@ -31,11 +32,17 @@ _AUC_THRESHOLD = 0.60   # use per-checkpoint model only if CV-AUC >= this
 
 _IT_CHECKPOINTS  = [2, 4, 6, 8, 10, 12, 14, 16]
 _F12_CHECKPOINTS = [4, 6, 8]
+_F6_CHECKPOINTS  = [2, 3, 4, 5]   # skip cp=1 — too few balls for a useful live display
 
 # First-12-Overs market identifiers in silver active_markets rows
 _F12_GROUP_ID    = "29"
 _F12_TMPL_ID     = "30171"
 _F12_NAME_SUBSTR = "first 12"
+
+# First-6-Overs market: group_id/template_id are reused across competitions for
+# different market types (confirmed in real data), so name match alone is used
+# — same reasoning as ml_extract_over_under_features.py's _get_first6_line.
+_F6_NAME_SUBSTR  = "first 6 overs"
 
 # Feature lists — must match training exactly
 _FEATURES = [
@@ -134,6 +141,62 @@ def _get_first12_line(silver_container, event_id: str, snapshot_id: str
 
     by_line: Dict[str, Dict] = {}
     for r in f12:
+        sel  = str(r.get("selection_name") or "").strip().lower()
+        odds = r.get("odds_decimal")
+        line = r.get("handicap") or r.get("line")
+        if not line or not odds:
+            continue
+        try:
+            lv = float(line)
+        except Exception:
+            continue
+        key = str(lv)
+        by_line.setdefault(key, {})
+        if sel == "over":
+            by_line[key]["over"] = (float(odds), lv)
+        elif sel == "under":
+            by_line[key]["under"] = (float(odds), lv)
+
+    best_line = best_ov = best_un = None
+    best_diff = float("inf")
+    for sides in by_line.values():
+        if "over" not in sides or "under" not in sides:
+            continue
+        ov_o, lv = sides["over"]
+        un_o, _  = sides["under"]
+        diff = abs(ov_o - un_o)
+        if diff < best_diff:
+            best_diff = diff
+            best_line = lv
+            best_ov   = ov_o
+            best_un   = un_o
+    return best_line, best_ov, best_un
+
+
+def _get_first6_line(silver_container, event_id: str, snapshot_id: str
+                     ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Read silver active_markets.json and return (line, over_odds, under_odds)
+    for the "Runs in First 6 Overs" market. Returns (None, None, None) if absent.
+    No group/template id filter — name match is the only reliable identifier
+    (see _F6_NAME_SUBSTR comment above).
+    """
+    try:
+        path = f"event_id={event_id}/snapshot_id={snapshot_id}/active_markets.json"
+        raw  = json.loads(silver_container.get_blob_client(path).download_blob().readall())
+    except Exception:
+        return None, None, None
+
+    rows = raw.get("rows", [])
+    f6   = [
+        r for r in rows
+        if _F6_NAME_SUBSTR in str(r.get("market_group_name") or "").lower()
+    ]
+    if not f6:
+        return None, None, None
+
+    by_line: Dict[str, Dict] = {}
+    for r in f6:
         sel  = str(r.get("selection_name") or "").strip().lower()
         odds = r.get("odds_decimal")
         line = r.get("handicap") or r.get("line")
@@ -276,6 +339,7 @@ def compute_over_under_predictions(
 
     predictions_it  = []
     predictions_f12 = []
+    predictions_f6  = []
     now_str = datetime.now(timezone.utc).isoformat()
 
     # ── Innings Total ─────────────────────────────────────────────────────────
@@ -403,7 +467,68 @@ def compute_over_under_predictions(
                                        else "under" if actual_first12 < line else "push")
         predictions_f12.append(entry)
 
-    if not predictions_it and not predictions_f12:
+    # ── First 6 Overs ─────────────────────────────────────────────────────────
+    actual_first6 = _find_score_at_over(inn1_rows, 6, innings=1)
+
+    for cp in _F6_CHECKPOINTS:
+        row = _find_checkpoint_row(inn1_rows, cp, innings=1)
+        if row is None:
+            continue
+
+        snapshot_id = row.get("snapshot_id")
+        if not snapshot_id:
+            continue
+
+        line, ov_odds, un_odds = _get_first6_line(silver_container, event_id, snapshot_id)
+        if line is None:
+            continue
+
+        score    = row.get("score")
+        wickets  = row.get("wickets")
+        bat_odds = row.get("batting_team_odds")
+        if score is None:
+            continue
+
+        balls    = _over_to_balls(row.get("over")) or (cp * 6)
+        base_vec = _build_vector(score, wickets or 0, balls, line,
+                                  ov_odds, un_odds, bat_odds, cp, 36)
+        if base_vec is None:
+            continue
+
+        model_obj  = _load_model("first_6_overs_pooled")
+        model_used = "first_6_overs_pooled"
+        model_auc  = auc_by_key.get("first_6_overs_cpooled", 0.525)
+        X = _build_pooled_vector(base_vec, cp, balls, 36)
+
+        if model_obj is None:
+            continue
+
+        prob_over = _predict(model_obj, X)
+        if prob_over is None:
+            continue
+
+        entry = {
+            "checkpoint_over":   cp,
+            "snapshot_id":       snapshot_id,
+            "over_str":          row.get("over"),
+            "score":             score,
+            "wickets_in_hand":   10 - (wickets or 0),
+            "betting_line":      line,
+            "over_odds":         ov_odds,
+            "under_odds":        un_odds,
+            "prob_over":         prob_over,
+            "prob_under":        round(1 - prob_over, 4),
+            "model_used":        model_used,
+            "model_auc":         round(model_auc, 3),
+        }
+        if actual_first6 is not None:
+            entry["actual_first6"] = actual_first6
+            entry["actual_margin"] = round(actual_first6 - line, 1)
+            entry["outcome"]       = ("over" if actual_first6 > line
+                                      else "under" if actual_first6 < line else "push")
+        predictions_f6.append(entry)
+
+    if not predictions_it and not predictions_f12 and not predictions_f6:
         return None
 
     output = {
@@ -411,6 +536,7 @@ def compute_over_under_predictions(
         "generated_at_utc": now_str,
         "innings_total":    predictions_it,
         "first_12_overs":   predictions_f12,
+        "first_6_overs":    predictions_f6,
     }
 
     try:
