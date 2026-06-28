@@ -3,13 +3,20 @@
 # Phase 1 of the Over/Under Innings Total Predictor.
 #
 # Scans all completed T20 matches in gold, extracts checkpoint features and
-# labels for three markets (all 1st innings — 2nd innings betting lines are
-# not currently captured upstream in silver, so 2nd innings markets aren't
-# possible yet):
+# labels for five markets:
 #
-#   1. Innings Total     — checkpoints: inn1 over 2, 4, 6, 8, 10, 12, 14, 16
-#   2. First 12 Overs    — checkpoints: inn1 over 2, 4, 6, 8
-#   3. First 6 Overs     — checkpoints: inn1 over 1, 2, 3, 4, 5
+#   1. Innings Total           — checkpoints: inn1 over 2, 4, 6, 8, 10, 12, 14, 16
+#   2. First 12 Overs          — checkpoints: inn1 over 2, 4, 6, 8
+#   3. First 6 Overs           — checkpoints: inn1 over 1, 2, 3, 4, 5
+#   4. 2nd Innings First 6 Overs  — checkpoints: inn2 over 1, 2, 3, 4, 5
+#   5. 2nd Innings First 12 Overs — checkpoints: inn2 over 2, 4, 6, 8
+#
+# NOTE: "Innings Total" has no 2nd-innings equivalent — bet365 does not appear
+# to publish a full 20-overs-runs market for the side batting second (row-level
+# predicted_total/over_odds_at_line/under_odds_at_line are always null for
+# innings=2). The First 6/First 12 Overs markets ARE republished fresh for the
+# 2nd innings though (confirmed in real silver active_markets data), so those
+# two get their own market rows above using inn2 snapshots.
 #
 # For each (event, market, checkpoint_over) we record:
 #   - match state features at that over  (score, wickets, run rates, betting line, odds)
@@ -189,14 +196,27 @@ def _linear_slope(xs: List[float], ys: List[float]) -> Optional[float]:
 # this invariant and raises if it is ever violated.
 
 def _extract_trajectory_features(
-    inn1_rows: List[Dict],
+    inn_rows: List[Dict],
     cp: int,
     market_total_balls: int = 120,
+    innings: int = 1,
 ) -> Dict:
     """
-    Extract per-over trajectory features from over 1 through cp ONLY.
+    Extract per-over trajectory features from over 1 through cp ONLY, for the
+    given innings (1 or 2). `inn_rows` must already be filtered to that innings.
+
     Returns a flat dict covering per-over values (ov{k}_*) and trajectory summaries.
-    market_total_balls: 120 for innings_total (20 overs), 72 for first_12.
+    market_total_balls: 120 for innings_total (20 overs), 72 for first_12, 36 for first_6.
+
+    Note: ov{k}_line / ov{k}_vs_pace and the line_* trajectory summaries read
+    row["predicted_total"], which is only ever populated for the innings_total
+    market of whichever team is CURRENTLY batting — bet365 does not appear to
+    publish that specific full-innings market for the side batting second in
+    most competitions. For innings=2 these fields will be None throughout; the
+    actual market-specific betting line for first_6/first_12 still comes from
+    _get_first6_line/_get_first12_line (looked up separately by snapshot_id),
+    so the label and core features are unaffected — only these auxiliary
+    "line drift across overs" features are unavailable for innings 2.
     """
     result: Dict = {}
 
@@ -206,7 +226,7 @@ def _extract_trajectory_features(
     over_runs: List[float]                = []
 
     for k in range(1, cp + 1):
-        row_k = _find_checkpoint_row(inn1_rows, k, innings=1)
+        row_k = _find_checkpoint_row(inn_rows, k, innings=innings)
 
         if row_k is None:
             result[f"ov{k}_runs"]    = None
@@ -292,7 +312,7 @@ def _extract_trajectory_features(
 
     # ── Powerplay (always available for cp >= 6) ──────────────────────────────
     if cp >= 6:
-        row_pp = _find_checkpoint_row(inn1_rows, 6, innings=1)
+        row_pp = _find_checkpoint_row(inn_rows, 6, innings=innings)
         result["pp_score"]   = row_pp.get("score")           if row_pp else None
         result["pp_wickets"] = (row_pp.get("wickets") or 0)  if row_pp else None
     else:
@@ -469,6 +489,7 @@ def extract_rows_for_event(event_id: str, tracker: Dict, train_cutoff: str = "")
         return []
 
     inn1_rows = [r for r in rows_all if r.get("innings") == 1]
+    inn2_rows = [r for r in rows_all if r.get("innings") == 2]
     if not inn1_rows:
         return []
 
@@ -522,6 +543,30 @@ def extract_rows_for_event(event_id: str, tracker: Dict, train_cutoff: str = "")
         "actual_inn1_total":  actual_total,
         "inn1_outcome":       outcome,
         "split":              split,
+    }
+
+    # Batting/bowling team in inn2 (the chasing side) — needed so 2nd-innings
+    # market rows get their OWN team in batting_team_inn1/bowling_team_inn1
+    # (column names kept as-is; ml_train_over_under.py's categorical encodings
+    # key off these exact column names regardless of which innings the row is
+    # for, so swapping the values here is required for correct team encoding —
+    # otherwise a 2nd-innings row would be encoded as if inn1's team batted).
+    batting_team_inn2 = next(
+        (r.get("batting_team") for r in inn2_rows if r.get("batting_team")), None
+    )
+    if batting_team_inn2 and _home and str(batting_team_inn2).strip() == str(_home).strip():
+        bowling_team_inn2 = _away
+    elif batting_team_inn2 and _away and str(batting_team_inn2).strip() == str(_away).strip():
+        bowling_team_inn2 = _home
+    else:
+        bowling_team_inn2 = next(
+            (r.get("bowling_team") for r in inn2_rows if r.get("bowling_team")), None
+        )
+
+    common_inn2 = {
+        **common,
+        "batting_team_inn1": batting_team_inn2,
+        "bowling_team_inn1": bowling_team_inn2,
     }
 
     output_rows = []
@@ -687,6 +732,122 @@ def extract_rows_for_event(event_id: str, tracker: Dict, train_cutoff: str = "")
             "label":            label,
             **_traj,
         })
+
+    # ── Market 4: 2nd Innings First 6 Overs ──────────────────────────────────
+    # Same "Runs in First 6 Overs" market, looked up against inn2 snapshots —
+    # confirmed present in real silver data for both innings (bet365 republishes
+    # this market fresh once the 2nd innings starts). Label is self-contained
+    # (score-at-checkpoint vs market line), independent of inn1's actual_total/outcome.
+    if inn2_rows:
+        actual_first6_inn2 = _find_score_at_over(inn2_rows, 6, innings=2)
+
+        for cp in F6_CHECKPOINTS:
+            row = _find_checkpoint_row(inn2_rows, cp, innings=2)
+            if row is None:
+                continue
+
+            snapshot_id = row.get("snapshot_id")
+            if not snapshot_id:
+                continue
+
+            line, ov_odds, un_odds = _get_first6_line(event_id, snapshot_id)
+            if line is None:
+                continue
+
+            score   = row.get("score")
+            wickets = row.get("wickets")
+            balls   = _over_to_balls(row.get("over")) or (cp * 6)
+
+            if score is None or actual_first6_inn2 is None:
+                continue
+
+            balls_remaining_in_6 = max(0, 36 - balls)
+            label = (1 if actual_first6_inn2 > line else 0) if actual_first6_inn2 != line else None
+            if label is None:
+                continue
+
+            _traj = _extract_trajectory_features(inn2_rows, cp, market_total_balls=36, innings=2)
+            output_rows.append({
+                **common_inn2,
+                "market":           "inn2_first_6_overs",
+                "checkpoint_over":  cp,
+                "over_str":         row.get("over"),
+                "balls_completed":  balls,
+                "balls_remaining":  balls_remaining_in_6,
+                "score":            score,
+                "wickets":          wickets,
+                "wickets_in_hand":  (10 - (wickets or 0)),
+                "betting_line":     line,
+                "score_vs_line_pace": round(score - line * balls / 36, 2),
+                "run_rate":         _run_rate(score, balls),
+                "rr_required":      _required_rr(line, score, balls_remaining_in_6),
+                "over_odds":        ov_odds,
+                "under_odds":       un_odds,
+                "implied_prob_over": _implied_prob(ov_odds),
+                "batting_team_win_odds":  row.get("batting_team_odds"),
+                "bowling_team_win_odds":  row.get("bowling_team_odds"),
+                "snapshot_id":      snapshot_id,
+                "actual_value":     actual_first6_inn2,
+                "actual_margin":    round(actual_first6_inn2 - line, 1),
+                "label":            label,
+                **_traj,
+            })
+
+    # ── Market 5: 2nd Innings First 12 Overs ─────────────────────────────────
+    if inn2_rows:
+        actual_first12_inn2 = _find_score_at_over(inn2_rows, 12, innings=2)
+
+        for cp in F12_CHECKPOINTS:
+            row = _find_checkpoint_row(inn2_rows, cp, innings=2)
+            if row is None:
+                continue
+
+            snapshot_id = row.get("snapshot_id")
+            if not snapshot_id:
+                continue
+
+            line, ov_odds, un_odds = _get_first12_line(event_id, snapshot_id)
+            if line is None:
+                continue
+
+            score   = row.get("score")
+            wickets = row.get("wickets")
+            balls   = _over_to_balls(row.get("over")) or (cp * 6)
+
+            if score is None or actual_first12_inn2 is None:
+                continue
+
+            balls_remaining_in_12 = max(0, 72 - balls)
+            label = (1 if actual_first12_inn2 > line else 0) if actual_first12_inn2 != line else None
+            if label is None:
+                continue
+
+            _traj = _extract_trajectory_features(inn2_rows, cp, market_total_balls=72, innings=2)
+            output_rows.append({
+                **common_inn2,
+                "market":           "inn2_first_12_overs",
+                "checkpoint_over":  cp,
+                "over_str":         row.get("over"),
+                "balls_completed":  balls,
+                "balls_remaining":  balls_remaining_in_12,
+                "score":            score,
+                "wickets":          wickets,
+                "wickets_in_hand":  (10 - (wickets or 0)),
+                "betting_line":     line,
+                "score_vs_line_pace": round(score - line * balls / 72, 2),
+                "run_rate":         _run_rate(score, balls),
+                "rr_required":      _required_rr(line, score, balls_remaining_in_12),
+                "over_odds":        ov_odds,
+                "under_odds":       un_odds,
+                "implied_prob_over": _implied_prob(ov_odds),
+                "batting_team_win_odds":  row.get("batting_team_odds"),
+                "bowling_team_win_odds":  row.get("bowling_team_odds"),
+                "snapshot_id":      snapshot_id,
+                "actual_value":     actual_first12_inn2,
+                "actual_margin":    round(actual_first12_inn2 - line, 1),
+                "label":            label,
+                **_traj,
+            })
 
     return output_rows
 
