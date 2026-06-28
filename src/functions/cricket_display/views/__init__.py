@@ -59,6 +59,9 @@ from .over_under_view import (
     view_ml_over_under_config_post,
     view_ml_over_under_market_html,
 )
+from .retrain_summary import (
+    view_ml_retrain_summary_html,
+)
 
 __all__ = [
     "view_prematch_matches", "view_prematch_matches_html", "view_prematch_match_json",
@@ -84,4 +87,5 @@ __all__ = [
     "view_ml_over_under_config_get",
     "view_ml_over_under_config_post",
     "view_ml_over_under_market_html",
+    "view_ml_retrain_summary_html",
 ]

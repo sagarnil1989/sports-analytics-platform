@@ -24,6 +24,18 @@ from league_config import collect_known_leagues, load_disabled_league_ids, save_
 from innings_tracker_writer import extract_innings_snapshot
 
 
+def adf_activity_badge(*activities: str, pipeline: str = "pl_ml_and_hypothesis") -> str:
+    """Small note showing which ADF pipeline/activity populates this page's data.
+    Activity names match the page name, not the underlying notebook/script filename —
+    see infra/8.adf-config/main.tf pl_ml_and_hypothesis for the full mapping."""
+    acts = " + ".join(f"<code>{escape(a)}</code>" for a in activities)
+    return (
+        f'<p style="color:#888;font-size:11px;margin:0 0 10px;">'
+        f'Populated by ADF pipeline <code>{escape(pipeline)}</code> → activity {acts}'
+        f'</p>'
+    )
+
+
 def build_simple_table_page(title: str, headers: List[str], rows_html: str, back_link: Optional[str] = None) -> str:
     back_html = f'<p><a href="{escape(back_link)}">← Back</a></p>' if back_link else ""
     return f"""

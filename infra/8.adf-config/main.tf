@@ -802,25 +802,41 @@ resource "azurerm_data_factory_pipeline" "backfill_databricks" {
 # which ran on the same schedule. Hypothesis activities use ls_azure_batch
 # (Custom/Batch), ML activities use ls_databricks (DatabricksNotebook).
 #
+# Activity names match the website page each one feeds (see cricket_display
+# function app routes), not the underlying notebook/script filename:
+#   HypothesisInn2Over6        -> /api/hypothesis/inn2-over6
+#   HypothesisTimeoutWicket    -> /api/hypothesis/timeout-wicket
+#   HypothesisInn1Prematch     -> /api/hypothesis/inn1-prematch
+#   MlRetrainSummaryFeatureExtraction / MlRetrainSummaryModelTraining
+#                               -> /api/ml/retrain-summary
+#   MlWinPredictor              -> /api/ml/win-predictor
+#   MlScorePredictor             -> /api/ml/score-predictor
+#   MlOverUnderFeatureExtraction / MlOverUnderModelTraining
+#                               -> /api/ml/over-under
+#   MlCutoffGetConfig / MlCutoffCheckStale / MlCutoffUpdate
+#                               -> no page of their own; shared plumbing that
+#                                  refreshes gold/ml/train_config.json before
+#                                  every ML activity that reads it.
+#
 # Dependency groups (only chained where actually necessary):
-#   - hypothesis_inn2_over6 / hypothesis_timeout_wicket / hypothesis_inn1_prematch
+#   - HypothesisInn2Over6 / HypothesisTimeoutWicket / HypothesisInn1Prematch
 #       — independent of everything else, run in parallel. Don't use the
 #         train/test cutoff at all.
-#   - GetTrainConfig -> CheckCutoffStale
+#   - MlCutoffGetConfig -> MlCutoffCheckStale
 #       — runs first for every ML activity below. Reads gold/ml/train_config.json
 #         via the display function's GET /api/ml/over-under/config endpoint.
 #         If that cutoff is older than (run date - 7 days), POSTs an update so
 #         the cutoff always trails the run date by at most 7 days. This is the
 #         ONE standard cutoff every ML notebook reads — no per-notebook cutoffs.
-#   - CheckCutoffStale -> RunMLFeatureExtraction -> RunMLModelTraining
+#   - MlCutoffCheckStale -> MlRetrainSummaryFeatureExtraction -> MlRetrainSummaryModelTraining
 #       — feature extraction tags each row with split=train/test from the
 #         cutoff; model training fits on train only and evaluates held-out
 #         on test.
-#   - CheckCutoffStale -> RunMLWinPredictor
-#   - CheckCutoffStale -> RunInn1ScorePredictor
-#       — these two read trackers directly (not ml_feature_extraction's
+#   - MlCutoffCheckStale -> MlWinPredictor
+#   - MlCutoffCheckStale -> MlScorePredictor
+#       — these two read trackers directly (not MlRetrainSummaryFeatureExtraction's
 #         Parquet) but still split train/test on the same cutoff.
-#   - CheckCutoffStale -> ml_extract_over_under_features -> ml_train_over_under
+#   - MlCutoffCheckStale -> MlOverUnderFeatureExtraction -> MlOverUnderModelTraining
 #
 # Train/test split is controlled by gold/ml/train_config.json:
 #   {"train_cutoff_date": "2025-12-31"}
@@ -835,7 +851,7 @@ resource "azurerm_data_factory_pipeline" "ml_and_hypothesis" {
 
   activities_json = jsonencode([
     {
-      name = "hypothesis_inn2_over6"
+      name = "HypothesisInn2Over6"
       type = "Custom"
       policy = {
         timeout = "0.01:00:00"
@@ -860,7 +876,7 @@ resource "azurerm_data_factory_pipeline" "ml_and_hypothesis" {
       }
     },
     {
-      name = "hypothesis_timeout_wicket"
+      name = "HypothesisTimeoutWicket"
       type = "Custom"
       policy = {
         timeout = "0.01:00:00"
@@ -885,7 +901,7 @@ resource "azurerm_data_factory_pipeline" "ml_and_hypothesis" {
       }
     },
     {
-      name = "hypothesis_inn1_prematch"
+      name = "HypothesisInn1Prematch"
       type = "Custom"
       policy = {
         timeout = "0.01:00:00"
@@ -910,14 +926,14 @@ resource "azurerm_data_factory_pipeline" "ml_and_hypothesis" {
       }
     },
     {
-      name = "RunMLFeatureExtraction"
+      name = "MlRetrainSummaryFeatureExtraction"
       type = "DatabricksNotebook"
       policy = {
         timeout = "0.01:00:00"
       }
       dependsOn = [
         {
-          activity             = "CheckCutoffStale"
+          activity             = "MlCutoffCheckStale"
           dependencyConditions = ["Succeeded"]
         }
       ]
@@ -930,14 +946,14 @@ resource "azurerm_data_factory_pipeline" "ml_and_hypothesis" {
       }
     },
     {
-      name = "RunMLModelTraining"
+      name = "MlRetrainSummaryModelTraining"
       type = "DatabricksNotebook"
       policy = {
         timeout = "0.01:00:00"
       }
       dependsOn = [
         {
-          activity             = "RunMLFeatureExtraction"
+          activity             = "MlRetrainSummaryFeatureExtraction"
           dependencyConditions = ["Succeeded"]
         }
       ]
@@ -950,14 +966,14 @@ resource "azurerm_data_factory_pipeline" "ml_and_hypothesis" {
       }
     },
     {
-      name = "RunMLWinPredictor"
+      name = "MlWinPredictor"
       type = "DatabricksNotebook"
       policy = {
         timeout = "0.01:00:00"
       }
       dependsOn = [
         {
-          activity             = "CheckCutoffStale"
+          activity             = "MlCutoffCheckStale"
           dependencyConditions = ["Succeeded"]
         }
       ]
@@ -970,14 +986,14 @@ resource "azurerm_data_factory_pipeline" "ml_and_hypothesis" {
       }
     },
     {
-      name = "RunInn1ScorePredictor"
+      name = "MlScorePredictor"
       type = "DatabricksNotebook"
       policy = {
         timeout = "0.01:00:00"
       }
       dependsOn = [
         {
-          activity             = "CheckCutoffStale"
+          activity             = "MlCutoffCheckStale"
           dependencyConditions = ["Succeeded"]
         }
       ]
@@ -990,7 +1006,7 @@ resource "azurerm_data_factory_pipeline" "ml_and_hypothesis" {
       }
     },
     {
-      name = "GetTrainConfig"
+      name = "MlCutoffGetConfig"
       type = "WebActivity"
       policy = {
         timeout = "0.00:05:00"
@@ -1001,22 +1017,22 @@ resource "azurerm_data_factory_pipeline" "ml_and_hypothesis" {
       }
     },
     {
-      name = "CheckCutoffStale"
+      name = "MlCutoffCheckStale"
       type = "IfCondition"
       dependsOn = [
         {
-          activity             = "GetTrainConfig"
+          activity             = "MlCutoffGetConfig"
           dependencyConditions = ["Succeeded"]
         }
       ]
       typeProperties = {
         expression = {
           type  = "Expression"
-          value = "@less(activity('GetTrainConfig').output.train_cutoff_date, formatDateTime(addDays(pipeline().TriggerTime, -7), 'yyyy-MM-dd'))"
+          value = "@less(activity('MlCutoffGetConfig').output.train_cutoff_date, formatDateTime(addDays(pipeline().TriggerTime, -7), 'yyyy-MM-dd'))"
         }
         ifTrueActivities = [
           {
-            name = "UpdateCutoffDate"
+            name = "MlCutoffUpdate"
             type = "WebActivity"
             policy = {
               timeout = "0.00:05:00"
@@ -1034,7 +1050,7 @@ resource "azurerm_data_factory_pipeline" "ml_and_hypothesis" {
       }
     },
     {
-      name = "ml_extract_over_under_features"
+      name = "MlOverUnderFeatureExtraction"
       type = "DatabricksNotebook"
       linkedServiceName = {
         referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
@@ -1045,7 +1061,7 @@ resource "azurerm_data_factory_pipeline" "ml_and_hypothesis" {
       }
       dependsOn = [
         {
-          activity             = "CheckCutoffStale"
+          activity             = "MlCutoffCheckStale"
           dependencyConditions = ["Succeeded"]
         }
       ]
@@ -1057,7 +1073,7 @@ resource "azurerm_data_factory_pipeline" "ml_and_hypothesis" {
       }
     },
     {
-      name = "ml_train_over_under"
+      name = "MlOverUnderModelTraining"
       type = "DatabricksNotebook"
       linkedServiceName = {
         referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
@@ -1068,7 +1084,7 @@ resource "azurerm_data_factory_pipeline" "ml_and_hypothesis" {
       }
       dependsOn = [
         {
-          activity             = "ml_extract_over_under_features"
+          activity             = "MlOverUnderFeatureExtraction"
           dependencyConditions = ["Succeeded"]
         }
       ]
@@ -1108,7 +1124,7 @@ resource "azurerm_data_factory_pipeline" "hypothesis_databricks" {
 
   activities_json = jsonencode([
     {
-      name = "hypothesis_inn2_over6"
+      name = "HypothesisInn2Over6"
       type = "DatabricksNotebook"
       linkedServiceName = {
         referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
@@ -1125,7 +1141,7 @@ resource "azurerm_data_factory_pipeline" "hypothesis_databricks" {
       }
     },
     {
-      name = "hypothesis_timeout_wicket"
+      name = "HypothesisTimeoutWicket"
       type = "DatabricksNotebook"
       linkedServiceName = {
         referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
@@ -1142,7 +1158,7 @@ resource "azurerm_data_factory_pipeline" "hypothesis_databricks" {
       }
     },
     {
-      name = "hypothesis_inn1_prematch"
+      name = "HypothesisInn1Prematch"
       type = "DatabricksNotebook"
       linkedServiceName = {
         referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name

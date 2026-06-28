@@ -35,6 +35,7 @@ from views import (
     view_ml_over_under_config_get,
     view_ml_over_under_config_post,
     view_ml_over_under_market_html,
+    view_ml_retrain_summary_html,
 )
 
 app = func.FunctionApp()
@@ -197,6 +198,11 @@ def get_ml_score_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="ml/score-matrix", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_ml_score_matrix_html(req: func.HttpRequest) -> func.HttpResponse:
     return view_ml_score_matrix_html(req)
+
+
+@app.route(route="ml/retrain-summary", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_ml_retrain_summary_html(req: func.HttpRequest) -> func.HttpResponse:
+    return view_ml_retrain_summary_html(req)
 
 
 @app.route(route="ml/glossary", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)

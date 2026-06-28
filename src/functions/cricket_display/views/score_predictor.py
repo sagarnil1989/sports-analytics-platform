@@ -1,5 +1,5 @@
 """Inn1 score predictor page — MAE/RMSE per model + per-match test predictions."""
-from .common import json, logging, escape, func, get_named_container_client
+from .common import json, logging, escape, func, get_named_container_client, adf_activity_badge
 
 
 def view_ml_score_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
@@ -254,6 +254,7 @@ def view_ml_score_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
         <a href="/api/ml/glossary">Glossary</a>
     </nav>
     <h1>Inn1 Score Predictor</h1>
+    {adf_activity_badge("MlScorePredictor")}
     <p style="color:#666">Predicts final innings-1 score at three points in the innings — powerplay, halfway, and over 16</p>
     {body}
 </body>

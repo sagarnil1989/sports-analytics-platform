@@ -2,7 +2,7 @@ from .common import (
     json, logging, escape, Any, Dict, List, Optional,
     func,
     get_named_container_client,
-    build_simple_table_page,
+    build_simple_table_page, adf_activity_badge,
 )
 
 # Shared train/test cutoff config — same blob used by ml_extract_over_under_features,
@@ -397,6 +397,7 @@ def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
         <a href="/api/ml/glossary">Glossary</a>
     </nav>
     <h1>ML Win Predictor</h1>
+    {adf_activity_badge("MlWinPredictor")}
     <p style="color:#666">T20 match outcome prediction — three models trained with progressively more match information</p>
 
     <div class="cutoff-card">

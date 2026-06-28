@@ -1,7 +1,7 @@
 from .common import (
     json, logging, escape, Any, Dict, List, Optional,
     func,
-    download_json, get_named_container_client,
+    download_json, get_named_container_client, adf_activity_badge,
 )
 
 _CONFIG_BLOB   = "ml/train_config.json"
@@ -505,6 +505,7 @@ def view_ml_over_under_html(req: func.HttpRequest) -> func.HttpResponse:
 <body>
   {_NAV}
   <h1>T20 Over/Under Runs Model</h1>
+  {adf_activity_badge("MlOverUnderFeatureExtraction", "MlOverUnderModelTraining")}
   <p style="color:#666">LightGBM classifiers predicting Over/Under outcomes for 5 cricket betting markets. Click a market to see per-match predictions.</p>
 
   <div class="meta-grid">
@@ -835,6 +836,7 @@ def view_ml_over_under_market_html(req: func.HttpRequest) -> func.HttpResponse:
   {_NAV}
   <div style="font-size:12px;color:#888;margin-bottom:12px">{sibling_links}</div>
   <h1>{escape(market_def['title'])}</h1>
+  {adf_activity_badge("MlOverUnderFeatureExtraction", "MlOverUnderModelTraining")}
   {body}
 </body>
 </html>"""

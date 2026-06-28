@@ -1,7 +1,7 @@
 from .common import (
     json, logging, escape, func,
     download_json, get_named_container_client,
-    build_simple_table_page,
+    build_simple_table_page, adf_activity_badge,
 )
 
 
@@ -36,6 +36,7 @@ def view_hypothesis_timeout_wicket(req: func.HttpRequest) -> func.HttpResponse:
     summary_html = f"""
     <div style="background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px #ddd;margin-bottom:24px;">
         <h2 style="margin:0 0 10px;">Hypothesis: Wicket After Strategic Timeout</h2>
+        {adf_activity_badge("HypothesisTimeoutWicket")}
         <p style="color:#555;margin:0 0 6px;">After a strategic timeout (game state unchanged for &gt;{threshold}s), a wicket falls in the over that immediately resumes.</p>
         <p style="color:#888;font-size:12px;margin:0 0 14px;">Timeout detection: game paused if over and wickets are unchanged for &gt;{threshold}s. Normal delivery ≈30–60s; wicket fall ≈2–2.5 min; strategic timeout ≈3–5 min. Innings-break pauses (over 0.0 → 0.1) are excluded.</p>
         <table style="border:none;box-shadow:none;background:transparent;width:auto;">
@@ -178,6 +179,7 @@ def view_hypothesis_inn2_over6(req: func.HttpRequest) -> func.HttpResponse:
     summary_and_filter_html = f"""
     <div id="summaryBanner" style="background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px #ddd;margin-bottom:16px;">
         <h2 style="margin:0 0 10px;">Hypothesis: Inn2 Over-6 Favourite Wins</h2>
+        {adf_activity_badge("HypothesisInn2Over6")}
         <p style="color:#555;margin:0 0 14px;">During a chase, the team with lower match-winner odds <strong>after 6 overs of the 2nd innings</strong> wins the match.</p>
         <table style="border:none;box-shadow:none;background:transparent;width:auto;">
             <tr><td style="border:none;padding:4px 16px 4px 0;color:#555;">Total matches</td><td style="border:none;padding:4px 0;font-weight:bold;" id="statTotal">—</td></tr>
@@ -313,6 +315,7 @@ def view_hypothesis_inn1_prematch(req: func.HttpRequest) -> func.HttpResponse:
     summary_and_filter_html = f"""
     <div id="summaryBanner" style="background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px #ddd;margin-bottom:16px;">
         <h2 style="margin:0 0 10px;">Hypothesis: Inn1 Pre-Match Score Over/Under</h2>
+        {adf_activity_badge("HypothesisInn1Prematch")}
         <p style="color:#555;margin:0 0 6px;">The bet365 pre-match "1st Innings Score" Over/Under line is set before a ball is bowled, based purely on team strength, venue and conditions. Does the actual innings-1 total land OVER that line more often than UNDER?</p>
         <p style="color:#888;font-size:12px;margin:0 0 14px;">Only matches with a captured pre-match snapshot AND that specific market are eligible — pre-match capture started partway through the data history, so older matches are excluded.</p>
         <table style="border:none;box-shadow:none;background:transparent;width:auto;">
