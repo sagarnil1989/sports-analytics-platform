@@ -28,6 +28,13 @@ def _dl(path):
     except Exception:
         return None
 
+# Load the shared train/test cutoff (same blob used by every ML notebook).
+# Rows with match_date_utc < cutoff -> split="train", else split="test".
+# If absent, every row is "train" (no held-out set yet).
+_train_config = _dl("ml/train_config.json") or {}
+TRAIN_CUTOFF  = (_train_config.get("train_cutoff_date") or "").strip()
+print(f"[ml_feature_extraction] train_cutoff_date={TRAIN_CUTOFF or '(none — all rows = train)'}")
+
 # COMMAND ----------
 # ═══════════════════════════════════════════════════════════════════
 # STEP 1 — Discover all ended-match gold tracker files
@@ -114,6 +121,9 @@ for t in trackers:
     away_team     = str(t.get("away_team_name") or "")
     outcome_bin   = 1 if outcome == "over" else 0
     is_womens     = 1 if ("women" in match_name.lower() or "(w)" in match_name.lower()) else 0
+    match_date    = str(t.get("match_date_utc") or "")[:10]
+    split         = ("train" if (not TRAIN_CUTOFF or not match_date or match_date < TRAIN_CUTOFF)
+                      else "test")
     stats["matches_used"] += 1
 
     for r in rows:
@@ -155,6 +165,8 @@ for t in trackers:
             "home_team":         home_team,
             "away_team":         away_team,
             "batting_team":      str(r.get("batting_team") or ""),
+            "match_date_utc":    match_date,
+            "split":             split,
             # match-level flags
             "is_womens_match":   is_womens,
             # snapshot position
@@ -203,6 +215,7 @@ if not df.empty:
     print(f"  Innings 1 rows      : {(df['innings']==1).sum():,}")
     print(f"  Innings 2 rows      : {(df['innings']==2).sum():,}")
     print(f"  Outcome split       : {dict(df['outcome'].value_counts())}")
+    print(f"  Train/test split    : {dict(df['split'].value_counts())}  (cutoff={TRAIN_CUTOFF or 'none'})")
 print(f"{'='*55}\n")
 if not df.empty:
     display(df.describe())

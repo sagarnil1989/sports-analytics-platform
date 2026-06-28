@@ -31,8 +31,10 @@
 # chasing_won = 1 if innings-2 final score > innings-1 final score, else 0
 #
 # ── Train/test split ─────────────────────────────────────────────────────────
-# Train : match_date_utc < 2026-05-23
-# Test  : match_date_utc >= 2026-05-23
+# Cutoff date comes from gold/ml/train_config.json (train_cutoff_date) — the
+# single shared cutoff used by every ML notebook in pl_ml_and_hypothesis.
+# Train : match_date_utc <  cutoff
+# Test  : match_date_utc >= cutoff
 
 # COMMAND ----------
 
@@ -65,21 +67,21 @@ silver = svc.get_container_client("silver")
 from datetime import datetime, timedelta, timezone
 IMPORTANCE_THRESHOLD  = 0.005   # drop features below 0.5% of total importance
 
-# Load fixed cutoff from config blob set via the web UI.
-# Falls back to rolling 3-day window if no config has been saved yet.
+# Load the shared train/test cutoff (same blob used by every ML notebook).
+# Falls back to a rolling 7-day window if no config has been saved yet.
 try:
     _cfg = json.loads(gold.get_blob_client(
-        "cricket/ml_features/t20/win_predictor_config.json"
+        "ml/train_config.json"
     ).download_blob().readall())
-    TRAIN_CUTOFF = _cfg.get("train_cutoff") or ""
+    TRAIN_CUTOFF = _cfg.get("train_cutoff_date") or ""
 except Exception:
     TRAIN_CUTOFF = ""
 
 if not TRAIN_CUTOFF:
     TRAIN_CUTOFF = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
-    print(f"No config found — using rolling cutoff: {TRAIN_CUTOFF}")
+    print(f"No shared config found — using rolling cutoff: {TRAIN_CUTOFF}")
 else:
-    print(f"Using fixed cutoff from config: {TRAIN_CUTOFF}")
+    print(f"Using shared train_cutoff_date from gold/ml/train_config.json: {TRAIN_CUTOFF}")
 
 def _dl(path):
     try:

@@ -384,6 +384,17 @@ def _feature_importance_html(imp_raw: Optional[dict], source_label: str) -> str:
 </div>"""
 
 
+# ── CONFIG GET ────────────────────────────────────────────────────────────────
+
+def view_ml_over_under_config_get(req: func.HttpRequest) -> func.HttpResponse:
+    gold = get_named_container_client("gold")
+    cfg = _load_config(gold)
+    return func.HttpResponse(
+        json.dumps({"train_cutoff_date": cfg.get("train_cutoff_date", "")}),
+        mimetype="application/json",
+    )
+
+
 # ── CONFIG POST ───────────────────────────────────────────────────────────────
 
 def view_ml_over_under_config_post(req: func.HttpRequest) -> func.HttpResponse:

@@ -32,6 +32,7 @@ from views import (
     view_hypothesis_timeout_wicket,
     view_hypothesis_inn1_prematch,
     view_ml_over_under_html,
+    view_ml_over_under_config_get,
     view_ml_over_under_config_post,
     view_ml_over_under_market_html,
 )
@@ -210,6 +211,11 @@ def get_glossary_html(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="ml/over-under", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_ml_over_under_html(req: func.HttpRequest) -> func.HttpResponse:
     return view_ml_over_under_html(req)
+
+
+@app.route(route="ml/over-under/config", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_ml_over_under_config(req: func.HttpRequest) -> func.HttpResponse:
+    return view_ml_over_under_config_get(req)
 
 
 @app.route(route="ml/over-under/config", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)

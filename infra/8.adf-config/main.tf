@@ -116,7 +116,7 @@ resource "azapi_resource" "adf_dataset_landing_index" {
   }
 
   schema_validation_enabled = false
-  depends_on = [azurerm_data_factory_linked_service_azure_blob_storage.scripts]
+  depends_on                = [azurerm_data_factory_linked_service_azure_blob_storage.scripts]
 }
 
 # ---------------------------------------------------------------------------
@@ -139,7 +139,7 @@ resource "azurerm_data_factory_linked_service_azure_databricks" "main" {
   }
 
   new_cluster_config {
-    node_type             = "Standard_F4s_v2"   # 4 vCPU, 8 GB — F-series compute-optimized, cheapest supported node for IO-bound workload
+    node_type             = "Standard_F4s_v2" # 4 vCPU, 8 GB — F-series compute-optimized, cheapest supported node for IO-bound workload
     cluster_version       = "15.4.x-scala2.12"
     min_number_of_workers = 1
     max_number_of_workers = 1
@@ -347,98 +347,13 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
   depends_on = [azapi_resource.adf_ls_azure_batch]
 }
 
-# ---------------------------------------------------------------------------
-# ADF — pipeline: pl_hypothesis (Batch, manual trigger)
-#
-# Runs both hypothesis scripts in parallel against already-built gold data.
-# Run this AFTER pl_build_ended_match has succeeded.
-# ---------------------------------------------------------------------------
-
-resource "azurerm_data_factory_pipeline" "hypothesis" {
-  name            = "pl_hypothesis"
-  data_factory_id = data.azurerm_data_factory.main.id
-  description     = "Manual (Batch): runs both hypothesis scripts in parallel. Use after pl_build_ended_match has completed."
-
-  activities_json = jsonencode([
-    {
-      name = "hypothesis_inn2_over6"
-      type = "Custom"
-      policy = {
-        timeout = "0.01:00:00"
-      }
-      linkedServiceName = {
-        referenceName = "ls_azure_batch"
-        type          = "LinkedServiceReference"
-      }
-      typeProperties = {
-        command = "python3 hypothesis_inn2_over6.py"
-        resourceLinkedService = {
-          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
-          type          = "LinkedServiceReference"
-        }
-        folderPath          = "batch-scripts"
-        retentionTimeInDays = 1
-        extendedProperties = {
-          KEY_VAULT_URI              = local.kv_uri
-          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
-          RUN_ID                     = "@pipeline().RunId"
-        }
-      }
-    },
-    {
-      name = "hypothesis_timeout_wicket"
-      type = "Custom"
-      policy = {
-        timeout = "0.01:00:00"
-      }
-      linkedServiceName = {
-        referenceName = "ls_azure_batch"
-        type          = "LinkedServiceReference"
-      }
-      typeProperties = {
-        command = "python3 hypothesis_timeout_wicket.py"
-        resourceLinkedService = {
-          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
-          type          = "LinkedServiceReference"
-        }
-        folderPath          = "batch-scripts"
-        retentionTimeInDays = 1
-        extendedProperties = {
-          KEY_VAULT_URI              = local.kv_uri
-          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
-          RUN_ID                     = "@pipeline().RunId"
-        }
-      }
-    },
-    {
-      name = "hypothesis_inn1_prematch"
-      type = "Custom"
-      policy = {
-        timeout = "0.01:00:00"
-      }
-      linkedServiceName = {
-        referenceName = "ls_azure_batch"
-        type          = "LinkedServiceReference"
-      }
-      typeProperties = {
-        command = "python3 hypothesis_inn1_prematch.py"
-        resourceLinkedService = {
-          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
-          type          = "LinkedServiceReference"
-        }
-        folderPath          = "batch-scripts"
-        retentionTimeInDays = 1
-        extendedProperties = {
-          KEY_VAULT_URI              = local.kv_uri
-          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
-          RUN_ID                     = "@pipeline().RunId"
-        }
-      }
-    }
-  ])
-
-  depends_on = [azapi_resource.adf_ls_azure_batch]
-}
+# NOTE: hypothesis, ML retrain, and Over/Under retrain used to be three
+# separate pipelines (pl_hypothesis, pl_ml_retrain, pl_over_under_retrain),
+# all on the same Saturday 03:00 UTC schedule. Consolidated 2026-06-28 into
+# a single pipeline — see azurerm_data_factory_pipeline.ml_and_hypothesis
+# below. Only the Over/Under branch actually depends on the train/test
+# cutoff date; hypothesis and the other ML notebooks do not, and run
+# independently of it and of each other.
 
 resource "azurerm_data_factory_trigger_schedule" "build_ended_match" {
   name            = "trigger_build_ended_match"
@@ -449,7 +364,7 @@ resource "azurerm_data_factory_trigger_schedule" "build_ended_match" {
   frequency = "Day"
 
   schedule {
-    hours   = [1]   # 01:00 UTC = 02:00 CET / 03:00 CEST
+    hours   = [1] # 01:00 UTC = 02:00 CET / 03:00 CEST
     minutes = [0]
   }
 
@@ -615,7 +530,7 @@ resource "azurerm_data_factory_trigger_schedule" "build_ended_match_databricks" 
   frequency = "Day"
 
   schedule {
-    hours   = [1]   # 01:00 UTC = 02:00 CET / 03:00 CEST
+    hours   = [1] # 01:00 UTC = 02:00 CET / 03:00 CEST
     minutes = [0]
   }
 
@@ -880,24 +795,244 @@ resource "azurerm_data_factory_pipeline" "backfill_databricks" {
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# ADF — pipeline: ML retrain (Databricks, manual trigger)
+# ADF — pipeline: pl_ml_and_hypothesis (weekly, Saturday 03:00 UTC)
 #
-# Runs the two ML notebooks in sequence:
-#   1. ml_extract_over_under_features — scans gold, writes training CSV
-#   2. ml_train_over_under            — trains models, writes DBFS pkl + metadata
+# Single weekly pipeline consolidating what used to be three separate
+# pipelines (pl_hypothesis, pl_ml_retrain, pl_over_under_retrain), all of
+# which ran on the same schedule. Hypothesis activities use ls_azure_batch
+# (Custom/Batch), ML activities use ls_databricks (DatabricksNotebook).
+#
+# Dependency groups (only chained where actually necessary):
+#   - hypothesis_inn2_over6 / hypothesis_timeout_wicket / hypothesis_inn1_prematch
+#       — independent of everything else, run in parallel. Don't use the
+#         train/test cutoff at all.
+#   - GetTrainConfig -> CheckCutoffStale
+#       — runs first for every ML activity below. Reads gold/ml/train_config.json
+#         via the display function's GET /api/ml/over-under/config endpoint.
+#         If that cutoff is older than (run date - 7 days), POSTs an update so
+#         the cutoff always trails the run date by at most 7 days. This is the
+#         ONE standard cutoff every ML notebook reads — no per-notebook cutoffs.
+#   - CheckCutoffStale -> RunMLFeatureExtraction -> RunMLModelTraining
+#       — feature extraction tags each row with split=train/test from the
+#         cutoff; model training fits on train only and evaluates held-out
+#         on test.
+#   - CheckCutoffStale -> RunMLWinPredictor
+#   - CheckCutoffStale -> RunInn1ScorePredictor
+#       — these two read trackers directly (not ml_feature_extraction's
+#         Parquet) but still split train/test on the same cutoff.
+#   - CheckCutoffStale -> ml_extract_over_under_features -> ml_train_over_under
 #
 # Train/test split is controlled by gold/ml/train_config.json:
 #   {"train_cutoff_date": "2025-12-31"}
-# Rows with match_date_utc <= cutoff → split=train, else → split=test.
+# Rows with match_date_utc < cutoff → split=train, else → split=test.
 # If the file is absent, all rows are treated as train.
 # ---------------------------------------------------------------------------
 
-resource "azurerm_data_factory_pipeline" "over_under_retrain" {
-  name            = "pl_over_under_retrain"
+resource "azurerm_data_factory_pipeline" "ml_and_hypothesis" {
+  name            = "pl_ml_and_hypothesis"
   data_factory_id = data.azurerm_data_factory.main.id
-  description     = "Manual (Databricks): extract Over/Under features from gold then retrain LightGBM models. Train/test split set via gold/ml/train_config.json."
+  description     = "Weekly: hypothesis refresh (Batch) + ML retrain (Databricks) + Over/Under retrain with cutoff-date refresh (Databricks)."
 
   activities_json = jsonencode([
+    {
+      name = "hypothesis_inn2_over6"
+      type = "Custom"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      linkedServiceName = {
+        referenceName = "ls_azure_batch"
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        command = "python3 hypothesis_inn2_over6.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath          = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
+        }
+      }
+    },
+    {
+      name = "hypothesis_timeout_wicket"
+      type = "Custom"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      linkedServiceName = {
+        referenceName = "ls_azure_batch"
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        command = "python3 hypothesis_timeout_wicket.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath          = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
+        }
+      }
+    },
+    {
+      name = "hypothesis_inn1_prematch"
+      type = "Custom"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      linkedServiceName = {
+        referenceName = "ls_azure_batch"
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        command = "python3 hypothesis_inn1_prematch.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath          = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
+        }
+      }
+    },
+    {
+      name = "RunMLFeatureExtraction"
+      type = "DatabricksNotebook"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      dependsOn = [
+        {
+          activity             = "CheckCutoffStale"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/ml/ml_feature_extraction"
+      }
+    },
+    {
+      name = "RunMLModelTraining"
+      type = "DatabricksNotebook"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      dependsOn = [
+        {
+          activity             = "RunMLFeatureExtraction"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/ml/ml_model_training"
+      }
+    },
+    {
+      name = "RunMLWinPredictor"
+      type = "DatabricksNotebook"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      dependsOn = [
+        {
+          activity             = "CheckCutoffStale"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/ml/ml_win_predictor"
+      }
+    },
+    {
+      name = "RunInn1ScorePredictor"
+      type = "DatabricksNotebook"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      dependsOn = [
+        {
+          activity             = "CheckCutoffStale"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/ml/inn1_score_predictor"
+      }
+    },
+    {
+      name = "GetTrainConfig"
+      type = "WebActivity"
+      policy = {
+        timeout = "0.00:05:00"
+      }
+      typeProperties = {
+        url    = "https://func-ramanuj-display.azurewebsites.net/api/ml/over-under/config"
+        method = "GET"
+      }
+    },
+    {
+      name = "CheckCutoffStale"
+      type = "IfCondition"
+      dependsOn = [
+        {
+          activity             = "GetTrainConfig"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      typeProperties = {
+        expression = {
+          type  = "Expression"
+          value = "@less(activity('GetTrainConfig').output.train_cutoff_date, formatDateTime(addDays(pipeline().TriggerTime, -7), 'yyyy-MM-dd'))"
+        }
+        ifTrueActivities = [
+          {
+            name = "UpdateCutoffDate"
+            type = "WebActivity"
+            policy = {
+              timeout = "0.00:05:00"
+            }
+            typeProperties = {
+              url    = "https://func-ramanuj-display.azurewebsites.net/api/ml/over-under/config"
+              method = "POST"
+              headers = {
+                "Content-Type" = "application/json"
+              }
+              body = "@concat('{\"train_cutoff_date\":\"', formatDateTime(addDays(pipeline().TriggerTime, -7), 'yyyy-MM-dd'), '\"}')"
+            }
+          }
+        ]
+      }
+    },
     {
       name = "ml_extract_over_under_features"
       type = "DatabricksNotebook"
@@ -908,6 +1043,12 @@ resource "azurerm_data_factory_pipeline" "over_under_retrain" {
       policy = {
         timeout = "0.02:00:00"
       }
+      dependsOn = [
+        {
+          activity             = "CheckCutoffStale"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
       typeProperties = {
         notebookPath = "/cricket-pipeline/ml/extract_over_under_features"
         baseParameters = {
@@ -937,7 +1078,27 @@ resource "azurerm_data_factory_pipeline" "over_under_retrain" {
     }
   ])
 
-  depends_on = [azurerm_data_factory_linked_service_azure_databricks.main]
+  depends_on = [
+    azapi_resource.adf_ls_azure_batch,
+    azurerm_data_factory_linked_service_azure_databricks.main,
+  ]
+}
+
+resource "azurerm_data_factory_trigger_schedule" "ml_and_hypothesis" {
+  name            = "trigger_ml_and_hypothesis"
+  data_factory_id = data.azurerm_data_factory.main.id
+  pipeline_name   = azurerm_data_factory_pipeline.ml_and_hypothesis.name
+
+  interval  = 1
+  frequency = "Week"
+
+  schedule {
+    days_of_week = ["Saturday"]
+    hours        = [3]
+    minutes      = [0]
+  }
+
+  activated = true
 }
 
 resource "azurerm_data_factory_pipeline" "hypothesis_databricks" {

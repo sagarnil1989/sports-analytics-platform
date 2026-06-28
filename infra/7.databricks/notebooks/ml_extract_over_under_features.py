@@ -401,7 +401,7 @@ def extract_rows_for_event(event_id: str, tracker: Dict, train_cutoff: str = "")
 
     match_date = str(tracker.get("match_date_utc") or "")[:10]   # "2025-09-01"
     if train_cutoff and match_date:
-        split = "train" if match_date <= train_cutoff else "test"
+        split = "train" if match_date < train_cutoff else "test"
     else:
         split = "train"
 
@@ -572,9 +572,10 @@ print(f"[ml_extract] event_id_filter={event_id_filter or '(all T20 completed mat
 
 # COMMAND ----------
 
-# Load train/test split config from gold/ml/train_config.json
+# Load train/test split config from gold/ml/train_config.json — the single
+# shared cutoff used by every ML notebook in pl_ml_and_hypothesis.
 # Format: {"train_cutoff_date": "2025-12-31"}
-# Rows with match_date_utc <= train_cutoff_date → split="train", else → split="test"
+# Rows with match_date_utc < train_cutoff_date → split="train", else → split="test"
 # If config absent, all rows are "train".
 _train_config = _download_json(gold, "ml/train_config.json") or {}
 _train_cutoff  = (_train_config.get("train_cutoff_date") or "").strip()

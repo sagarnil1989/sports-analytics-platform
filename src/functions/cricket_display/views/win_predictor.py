@@ -5,7 +5,9 @@ from .common import (
     build_simple_table_page,
 )
 
-_CONFIG_BLOB = "cricket/ml_features/t20/win_predictor_config.json"
+# Shared train/test cutoff config — same blob used by ml_extract_over_under_features,
+# ml_win_predictor, and inn1_score_predictor, so every ML notebook splits on one date.
+_CONFIG_BLOB = "ml/train_config.json"
 
 
 def _load_config(gold) -> dict:
@@ -26,7 +28,7 @@ def view_ml_win_predictor_config_post(req: func.HttpRequest) -> func.HttpRespons
                 mimetype="application/json", status_code=400,
             )
         cfg = _load_config(gold)
-        cfg["train_cutoff"] = cutoff
+        cfg["train_cutoff_date"] = cutoff
         gold.get_blob_client(_CONFIG_BLOB).upload_blob(
             json.dumps(cfg, indent=2).encode(), overwrite=True
         )
@@ -39,7 +41,7 @@ def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
     gold = get_named_container_client("gold")
 
     config = _load_config(gold)
-    saved_cutoff = config.get("train_cutoff", "")
+    saved_cutoff = config.get("train_cutoff_date", "")
 
     try:
         raw = gold.get_blob_client("cricket/ml_features/t20/win_predictor_summary.json").download_blob().readall()

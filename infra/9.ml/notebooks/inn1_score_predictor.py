@@ -19,8 +19,10 @@
 # Feature pruning: same two-pass approach as win predictor
 #
 # ── Train/test split ─────────────────────────────────────────────────────────
-# Train : match_date_utc < today − 5 days
-# Test  : match_date_utc >= today − 5 days
+# Cutoff date comes from gold/ml/train_config.json (train_cutoff_date) — the
+# single shared cutoff used by every ML notebook in pl_ml_and_hypothesis.
+# Train : match_date_utc <  cutoff
+# Test  : match_date_utc >= cutoff
 
 # COMMAND ----------
 
@@ -50,7 +52,23 @@ svc    = BlobServiceClient.from_connection_string(conn_str)
 gold   = svc.get_container_client("gold")
 
 from datetime import datetime, timedelta, timezone
-TRAIN_CUTOFF         = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%d")
+
+# Load the shared train/test cutoff (same blob used by every ML notebook).
+# Falls back to a rolling 7-day window if no config has been saved yet.
+try:
+    _cfg = json.loads(gold.get_blob_client(
+        "ml/train_config.json"
+    ).download_blob().readall())
+    TRAIN_CUTOFF = _cfg.get("train_cutoff_date") or ""
+except Exception:
+    TRAIN_CUTOFF = ""
+
+if not TRAIN_CUTOFF:
+    TRAIN_CUTOFF = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+    print(f"No shared config found — using rolling cutoff: {TRAIN_CUTOFF}")
+else:
+    print(f"Using shared train_cutoff_date from gold/ml/train_config.json: {TRAIN_CUTOFF}")
+
 IMPORTANCE_THRESHOLD = 0.005
 
 def _dl(path):
