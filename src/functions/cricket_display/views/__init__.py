@@ -62,6 +62,9 @@ from .over_under_view import (
 from .retrain_summary import (
     view_ml_retrain_summary_html,
 )
+from .odds_movement import (
+    view_odds_movement_html,
+)
 
 __all__ = [
     "view_prematch_matches", "view_prematch_matches_html", "view_prematch_match_json",
@@ -88,4 +91,5 @@ __all__ = [
     "view_ml_over_under_config_post",
     "view_ml_over_under_market_html",
     "view_ml_retrain_summary_html",
+    "view_odds_movement_html",
 ]

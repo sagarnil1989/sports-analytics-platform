@@ -13,6 +13,10 @@ on:
         description: "Skip Function App deploy (true/false)"
         required: false
         default: "false"
+      skip_live_ml:
+        description: "Skip live-ml Function App deploy (true/false)"
+        required: false
+        default: "false"
 
 env:
   ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
@@ -182,6 +186,25 @@ jobs:
       - name: Apply
         run: terraform apply -auto-approve -lock=false tfplan
 
+  infra_10_live_ml:
+    name: "Infra 10 · Live ML"
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.skip_infra != 'true' }}
+    defaults:
+      run:
+        working-directory: infra/10.live-ml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.9"
+      - name: Init
+        run: terraform init -backend-config="resource_group_name=$TF_BACKEND_RG" -backend-config="storage_account_name=$TF_BACKEND_SA" -backend-config="container_name=$TF_BACKEND_CONTAINER"
+      - name: Plan
+        run: terraform plan -out=tfplan -lock=false
+      - name: Apply
+        run: terraform apply -auto-approve -lock=false tfplan
+
   infra_9_ml:
     name: "Infra 9 · ML"
     needs: infra_8_adf_config
@@ -263,3 +286,32 @@ jobs:
       - name: Deploy func-ramanuj-display
         working-directory: src/functions/cricket_display
         run: func azure functionapp publish func-ramanuj-display --python
+
+  deploy_live_ml:
+    name: "Deploy · func-ramanuj-live-ml"
+    needs: infra_10_live_ml
+    runs-on: ubuntu-latest
+    if: ${{ always() && !failure() && !cancelled() && github.event.inputs.skip_live_ml != 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Azure Functions Core Tools
+        run: npm install -g azure-functions-core-tools@4 --unsafe-perm true
+
+      - uses: azure/login@v2
+        with:
+          creds: >-
+            {
+              "clientId": "${{ vars.AZURE_CLIENT_ID }}",
+              "clientSecret": "${{ secrets.AZURE_CLIENT_SECRET }}",
+              "subscriptionId": "${{ vars.AZURE_SUBSCRIPTION_ID }}",
+              "tenantId": "${{ vars.AZURE_TENANT_ID }}"
+            }
+
+      - name: Deploy func-ramanuj-live-ml
+        working-directory: src/functions/cricket_live_ml
+        run: func azure functionapp publish func-ramanuj-live-ml --python

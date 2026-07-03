@@ -17,6 +17,8 @@
   "ingestion_storage_account_name": "stramanujingweu",
   "display_function_app_name": "func-ramanuj-display",
   "display_storage_account_name": "stramanujdispweu",
+  "live_ml_function_app_name": "func-ramanuj-live-ml",
+  "live_ml_storage_account_name": "stramanujlivemlweu",
   "azure_functions_worker_process_terminate_timeout": "1800",
   "azure_functions_job_host__function_timeout": "00:10:00",
   "static_web_app_name": "swa-ramanuj",

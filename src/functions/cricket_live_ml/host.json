@@ -1,0 +1,19 @@
+{
+  "version": "2.0",
+  "functionTimeout": "00:10:00",
+  "logging": {
+    "logLevel": {
+      "default": "Warning",
+      "Host.Results": "Error",
+      "Function": "Warning",
+      "Host.Aggregator": "Warning"
+    },
+    "applicationInsights": {
+      "samplingSettings": {
+        "isEnabled": true,
+        "maxTelemetryItemsPerSecond": 5,
+        "excludedTypes": "Exception"
+      }
+    }
+  }
+}

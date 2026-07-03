@@ -884,18 +884,21 @@ def xgb_train_pruned(model_name, feature_cols, train_df, test_df):
     train_preds_records = train_preds.rename(columns={"inn1_total_score": "inn1_score",
                                                        "inn2_total_score": "inn2_score"}).to_dict("records")
 
-    return m2, acc, auc, train_acc, train_auc, fi_df, kept, preds_records, train_preds_records
+    # train_meds2 maps each kept feature to its categorical label-encoding dict
+    # (for string columns) or its training median (for numeric columns).
+    # Returned so callers can save it alongside the model for inference at serve time.
+    return m2, acc, auc, train_acc, train_auc, fi_df, kept, preds_records, train_preds_records, train_meds2
 
 if len(train_df) < 5:
     raise ValueError(f"Only {len(train_df)} training matches — need at least 5.")
 if len(test_df) < 2:
     raise ValueError(f"Only {len(test_df)} test matches — need at least 2.")
 
-xgb_inn1,  xgb_acc_inn1,  xgb_auc_inn1,  xgb_train_acc_inn1,  xgb_train_auc_inn1,  xgb_fi_inn1,  pruned_inn1,  preds_inn1,  train_preds_inn1  = xgb_train_pruned("innings1-only",   INN1_FEATURES,      train_df, test_df)
-xgb_ov2,   xgb_acc_ov2,   xgb_auc_ov2,   xgb_train_acc_ov2,   xgb_train_auc_ov2,   xgb_fi_ov2,   pruned_ov2,   preds_ov2,   train_preds_ov2   = xgb_train_pruned("innings2-2over",  INN2_OV2_FEATURES,  train_df, test_df)
-xgb_ov6,   xgb_acc_ov6,   xgb_auc_ov6,   xgb_train_acc_ov6,   xgb_train_auc_ov6,   xgb_fi_ov6,   pruned_ov6,   preds_ov6,   train_preds_ov6   = xgb_train_pruned("innings2-6over",  INN2_OV6_FEATURES,  train_df, test_df)
-xgb_ov10,  xgb_acc_ov10,  xgb_auc_ov10,  xgb_train_acc_ov10,  xgb_train_auc_ov10,  xgb_fi_ov10,  pruned_ov10,  preds_ov10,  train_preds_ov10  = xgb_train_pruned("innings2-10over", INN2_OV10_FEATURES, train_df, test_df)
-xgb_ov16,  xgb_acc_ov16,  xgb_auc_ov16,  xgb_train_acc_ov16,  xgb_train_auc_ov16,  xgb_fi_ov16,  pruned_ov16,  preds_ov16,  train_preds_ov16  = xgb_train_pruned("innings2-16over", INN2_OV16_FEATURES, train_df, test_df)
+xgb_inn1,  xgb_acc_inn1,  xgb_auc_inn1,  xgb_train_acc_inn1,  xgb_train_auc_inn1,  xgb_fi_inn1,  pruned_inn1,  preds_inn1,  train_preds_inn1,  enc_inn1  = xgb_train_pruned("innings1-only",   INN1_FEATURES,      train_df, test_df)
+xgb_ov2,   xgb_acc_ov2,   xgb_auc_ov2,   xgb_train_acc_ov2,   xgb_train_auc_ov2,   xgb_fi_ov2,   pruned_ov2,   preds_ov2,   train_preds_ov2,   enc_ov2   = xgb_train_pruned("innings2-2over",  INN2_OV2_FEATURES,  train_df, test_df)
+xgb_ov6,   xgb_acc_ov6,   xgb_auc_ov6,   xgb_train_acc_ov6,   xgb_train_auc_ov6,   xgb_fi_ov6,   pruned_ov6,   preds_ov6,   train_preds_ov6,   enc_ov6   = xgb_train_pruned("innings2-6over",  INN2_OV6_FEATURES,  train_df, test_df)
+xgb_ov10,  xgb_acc_ov10,  xgb_auc_ov10,  xgb_train_acc_ov10,  xgb_train_auc_ov10,  xgb_fi_ov10,  pruned_ov10,  preds_ov10,  train_preds_ov10,  enc_ov10  = xgb_train_pruned("innings2-10over", INN2_OV10_FEATURES, train_df, test_df)
+xgb_ov16,  xgb_acc_ov16,  xgb_auc_ov16,  xgb_train_acc_ov16,  xgb_train_auc_ov16,  xgb_fi_ov16,  pruned_ov16,  preds_ov16,  train_preds_ov16,  enc_ov16  = xgb_train_pruned("innings2-16over", INN2_OV16_FEATURES, train_df, test_df)
 
 # COMMAND ----------
 # ═══════════════════════════════════════════════════════════════════
@@ -1064,6 +1067,49 @@ log_rf("innings2-2over-rf",  rf_ov2,  rf_acc_ov2,  rf_auc_ov2,  pruned_ov2,   "i
 log_rf("innings2-6over-rf",  rf_ov6,  rf_acc_ov6,  rf_auc_ov6,  pruned_ov6,   "innings2-6over",  rf_fi_ov6)
 log_rf("innings2-10over-rf", rf_ov10, rf_acc_ov10, rf_auc_ov10, pruned_ov10,  "innings2-10over", rf_fi_ov10)
 log_rf("innings2-16over-rf", rf_ov16, rf_acc_ov16, rf_auc_ov16, pruned_ov16,  "innings2-16over", rf_fi_ov16)
+
+# COMMAND ----------
+# ═══════════════════════════════════════════════════════════════════
+# STEP 10b — Save XGBoost models to blob storage
+#
+# Saves each pruned XGBoost model alongside its feature list and encodings
+# to gold/cricket/ml_features/t20/live_models/win_predictor/ so the
+# cricket_display Function App can load them for what-if inference and
+# the future cricket_live_ml Function App can run live predictions.
+# Written using pickle, same format as the DBFS saves above.
+# ═══════════════════════════════════════════════════════════════════
+
+_BLOB_MODEL_PREFIX = "cricket/ml_features/t20/live_models/win_predictor"
+
+_checkpoints_to_save = [
+    ("innings1-only",   xgb_inn1,  pruned_inn1,  enc_inn1),
+    ("innings2-2over",  xgb_ov2,   pruned_ov2,   enc_ov2),
+    ("innings2-6over",  xgb_ov6,   pruned_ov6,   enc_ov6),
+    ("innings2-10over", xgb_ov10,  pruned_ov10,  enc_ov10),
+    ("innings2-16over", xgb_ov16,  pruned_ov16,  enc_ov16),
+]
+
+for _name, _model, _features, _encodings in _checkpoints_to_save:
+    if _model is None:
+        print(f"[blob save] skip {_name} — model is None (too few training samples)")
+        continue
+    _buf = io.BytesIO()
+    pickle.dump({"model": _model, "features": _features, "encodings": _encodings}, _buf)
+    _buf.seek(0)
+    _path = f"{_BLOB_MODEL_PREFIX}/{_name}.pkl"
+    gold.get_blob_client(_path).upload_blob(_buf, overwrite=True)
+    print(f"[blob save] gold/{_path}  features={len(_features)}")
+
+# Also save a plain-JSON copy of the innings1-only encodings for human inspection
+# (the other checkpoints share the same categorical structure, only numeric medians differ).
+if enc_inn1:
+    _cat_only = {k: v for k, v in enc_inn1.items() if isinstance(v, dict)}
+    gold.get_blob_client(f"{_BLOB_MODEL_PREFIX}/cat_encodings.json").upload_blob(
+        json.dumps(_cat_only, indent=2).encode(), overwrite=True
+    )
+    print(f"[blob save] gold/{_BLOB_MODEL_PREFIX}/cat_encodings.json")
+
+print("Model blob save complete.")
 
 # COMMAND ----------
 # ═══════════════════════════════════════════════════════════════════

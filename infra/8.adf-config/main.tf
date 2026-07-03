@@ -851,6 +851,31 @@ resource "azurerm_data_factory_pipeline" "ml_and_hypothesis" {
 
   activities_json = jsonencode([
     {
+      name = "OddsMovementAnalysis"
+      type = "Custom"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      linkedServiceName = {
+        referenceName = "ls_azure_batch"
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        command = "python3 hypothesis_odds_movement.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath          = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
+        }
+      }
+    },
+    {
       name = "HypothesisInn2Over6"
       type = "Custom"
       policy = {

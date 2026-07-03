@@ -316,14 +316,23 @@ for (mkt, cp), (X_list, y_list, features) in sorted(groups.items()):
     lgb_final.fit(X, y)
     importances = dict(zip(features, lgb_final.feature_importances_.tolist()))
 
-    # ── Save model ───────────────────────────────────────────────────────────
+    # ── Save model (DBFS + blob storage) ─────────────────────────────────────
     model_key  = f"{mkt}_cp{cp}"
     model_path = os.path.join(DBFS_MODEL_DIR, f"{model_key}.pkl")
+    _pkl_payload = {
+        "model": calibrated, "features": features,
+        "cat_encodings": cat_encodings_by_market.get(mkt, {}),
+    }
     with open(model_path, "wb") as f:
-        pickle.dump({
-            "model": calibrated, "features": features,
-            "cat_encodings": cat_encodings_by_market.get(mkt, {}),
-        }, f)
+        pickle.dump(_pkl_payload, f)
+    # Also save to blob so the cricket_display / cricket_live_ml Function Apps
+    # can load models without DBFS access.
+    _blob_buf = io.BytesIO()
+    pickle.dump(_pkl_payload, _blob_buf)
+    _blob_buf.seek(0)
+    gold.get_blob_client(f"ml/live_models/over_under/{model_key}.pkl").upload_blob(
+        _blob_buf, overwrite=True
+    )
 
     meta_entry = {
         "market":             mkt,
@@ -450,11 +459,19 @@ for market, (X_list, y_list) in sorted(pooled_groups.items()):
 
     model_key  = f"{market}_pooled"
     model_path = os.path.join(DBFS_MODEL_DIR, f"{model_key}.pkl")
+    _pkl_payload_pooled = {
+        "model": calibrated_pooled, "features": POOLED_FEATURES,
+        "cat_encodings": cat_encodings_by_market.get(market, {}),
+    }
     with open(model_path, "wb") as f:
-        pickle.dump({
-            "model": calibrated_pooled, "features": POOLED_FEATURES,
-            "cat_encodings": cat_encodings_by_market.get(market, {}),
-        }, f)
+        pickle.dump(_pkl_payload_pooled, f)
+    # Also save to blob for Function App access.
+    _blob_buf_p = io.BytesIO()
+    pickle.dump(_pkl_payload_pooled, _blob_buf_p)
+    _blob_buf_p.seek(0)
+    gold.get_blob_client(f"ml/live_models/over_under/{model_key}.pkl").upload_blob(
+        _blob_buf_p, overwrite=True
+    )
 
     pooled_entry = {
         "market":           market,
