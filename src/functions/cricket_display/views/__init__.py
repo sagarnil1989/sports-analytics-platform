@@ -65,6 +65,10 @@ from .retrain_summary import (
 from .odds_movement import (
     view_odds_movement_html,
 )
+from .win_predictor_whatif import (
+    view_win_predictor_whatif_html,
+    view_win_predictor_whatif_post,
+)
 
 __all__ = [
     "view_prematch_matches", "view_prematch_matches_html", "view_prematch_match_json",
@@ -92,4 +96,6 @@ __all__ = [
     "view_ml_over_under_market_html",
     "view_ml_retrain_summary_html",
     "view_odds_movement_html",
+    "view_win_predictor_whatif_html",
+    "view_win_predictor_whatif_post",
 ]

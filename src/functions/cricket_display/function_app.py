@@ -37,6 +37,8 @@ from views import (
     view_ml_over_under_market_html,
     view_ml_retrain_summary_html,
     view_odds_movement_html,
+    view_win_predictor_whatif_html,
+    view_win_predictor_whatif_post,
 )
 
 app = func.FunctionApp()
@@ -184,6 +186,16 @@ def get_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="ml/win-predictor/config", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
 def post_ml_win_predictor_config(req: func.HttpRequest) -> func.HttpResponse:
     return view_ml_win_predictor_config_post(req)
+
+
+@app.route(route="ml/win-predictor/whatif", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_ml_win_predictor_whatif(req: func.HttpRequest) -> func.HttpResponse:
+    return view_win_predictor_whatif_html(req)
+
+
+@app.route(route="ml/win-predictor/whatif", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+def post_ml_win_predictor_whatif(req: func.HttpRequest) -> func.HttpResponse:
+    return view_win_predictor_whatif_post(req)
 
 
 @app.route(route="ml/feature-matrix", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)

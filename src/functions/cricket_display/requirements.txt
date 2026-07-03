@@ -2,3 +2,6 @@ azure-functions
 azure-identity
 azure-storage-blob
 requests
+xgboost==2.0.3
+scikit-learn==1.4.2
+numpy

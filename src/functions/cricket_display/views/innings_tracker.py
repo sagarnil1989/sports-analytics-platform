@@ -162,6 +162,86 @@ def view_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
 
 
+def _build_live_pred_html(live_preds: Dict) -> str:
+    """
+    Build the live ML O/U predictions panel from live_predictions.json.
+    Written by cricket_live_ml Function App (Phase 5) for currently live matches.
+    Returns empty string if no live predictions exist.
+    """
+    preds = live_preds.get("ou_predictions") or []
+    if not preds:
+        return ""
+
+    gen_time = str(live_preds.get("generated_at_utc", ""))[:16].replace("T", " ")
+    current_over = live_preds.get("current_over", "?")
+    match_name = escape(str(live_preds.get("match_name", "")))
+
+    _market_labels = {
+        "innings_total":  "Innings Total",
+        "first_12_overs": "First 12 Overs",
+        "first_6_overs":  "First 6 Overs",
+        "inn2_first_6":   "2nd Inn — First 6 Overs",
+        "inn2_first_12":  "2nd Inn — First 12 Overs",
+    }
+
+    rows_html = ""
+    for p in sorted(preds, key=lambda x: (x.get("innings", 1), x.get("checkpoint_over", 0))):
+        market  = _market_labels.get(p.get("market", ""), p.get("market", ""))
+        inn     = p.get("innings", 1)
+        cp      = p.get("checkpoint_over", "?")
+        po      = p.get("prob_over", 0.5)
+        pu      = p.get("prob_under", 0.5)
+        line    = p.get("betting_line")
+        score   = p.get("score")
+        wkts    = p.get("wickets", 0)
+        pct_o   = round(po * 100)
+        pct_u   = 100 - pct_o
+
+        line_str  = str(line) if line is not None else "—"
+        score_str = f"{score}/{wkts}" if score is not None else "—"
+        bar = (
+            f'<div style="display:flex;height:22px;border-radius:4px;overflow:hidden;min-width:120px">'
+            f'<div style="width:{pct_o}%;background:#2d7a2d;color:white;font-size:11px;font-weight:bold;display:flex;align-items:center;justify-content:center">{pct_o}%</div>'
+            f'<div style="width:{pct_u}%;background:#cc2200;color:white;font-size:11px;font-weight:bold;display:flex;align-items:center;justify-content:center">{pct_u}%</div>'
+            f'</div>'
+        )
+        rows_html += (
+            f'<tr>'
+            f'<td>{escape(market)}</td>'
+            f'<td style="text-align:center">Inn {inn}</td>'
+            f'<td style="text-align:center"><b>{cp}</b></td>'
+            f'<td style="text-align:center">{score_str}</td>'
+            f'<td style="text-align:center"><b>{escape(line_str)}</b></td>'
+            f'<td>{bar}</td>'
+            f'</tr>'
+        )
+
+    return f"""
+<div style="background:#0d1b2a;border-radius:8px;padding:18px 20px;margin:16px 0;color:#e0e0e0;">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+    <span style="color:#f00;animation:blink 1s step-start infinite">●</span>
+    <strong style="font-size:15px;color:#00e5ff">Live ML Predictions</strong>
+    <span style="font-size:12px;color:#888">Generated {escape(gen_time)} UTC &nbsp;·&nbsp; Over {escape(str(current_over))}</span>
+  </div>
+  <table style="width:100%;border-collapse:collapse;font-size:13px;">
+    <thead>
+      <tr style="background:#1a2a3a;color:#aaa;">
+        <th style="padding:7px 10px;text-align:left">Market</th>
+        <th style="padding:7px 10px;text-align:center">Innings</th>
+        <th style="padding:7px 10px;text-align:center">At Over</th>
+        <th style="padding:7px 10px;text-align:center">Score</th>
+        <th style="padding:7px 10px;text-align:center">Line</th>
+        <th style="padding:7px 10px;text-align:left">P(Over) vs P(Under)</th>
+      </tr>
+    </thead>
+    <tbody style="color:#ccc;">{rows_html}</tbody>
+  </table>
+  <div style="font-size:11px;color:#555;margin-top:6px;">
+    Predictions by <code>func-ramanuj-live-ml</code> · Model loaded from <code>gold/ml/live_models/over_under/</code>
+  </div>
+</div>"""
+
+
 def _build_ou_section_html(ou_preds: Dict, home_team: str, away_team: str) -> str:
     """
     Build the Over/Under predictions HTML section from over_under_predictions.json.
@@ -403,6 +483,10 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
         ou_preds     = download_json(gold, f"event_id={event_id}/over_under_predictions.json") or {}
         ou_section_html = _build_ou_section_html(ou_preds, home_team, away_team)
 
+        # ── Live ML predictions (Phase 5) ──────────────────────────────────────
+        live_preds     = download_json(gold, f"event_id={event_id}/live_predictions.json") or {}
+        live_pred_html = _build_live_pred_html(live_preds)
+
         def ball_pill(b: str) -> str:
             b = str(b).strip()
             if b == "W":
@@ -597,6 +681,7 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
     {scoreboard_html}
     {summary_html}
     {ou_section_html}
+    {live_pred_html}
     <table>
         <thead>
             <tr>

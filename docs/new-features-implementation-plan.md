@@ -125,9 +125,9 @@ gold/ml/live_models/over_under/<market>_cp<over>.pkl
 
 ---
 
-## Phase 3 — Win Predictor What-If / Sensitivity Analysis
+## Phase 3 — Win Predictor What-If / Sensitivity Analysis ✓ DONE
 
-**~2–3 days | Needs Phase 2**
+**Implemented 2026-07-03 | Needs Phase 2**
 
 ### 3.1 — Backend inference endpoint
 
@@ -219,9 +219,9 @@ the existing deploy.
 
 ---
 
-## Phase 5 — Live ML: Over/Under Predictions
+## Phase 5 — Live ML: Over/Under Predictions ✓ DONE
 
-**~2 days | Needs Phases 2 + 4**
+**Implemented 2026-07-03 | Needs Phases 2 + 4**
 
 ### 5.1 — Fix the over_under_predictor feature-vector bug
 

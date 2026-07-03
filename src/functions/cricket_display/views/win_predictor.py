@@ -392,8 +392,8 @@ def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
     <nav>
         <a href="/api/home">Home</a>
         <a href="/api/ended/view">Ended Matches</a>
-        <a href="/api/innings-tracker">Innings Tracker</a>
         <a href="/api/ml/win-predictor">ML Win Predictor</a>
+        <a href="/api/ml/win-predictor/whatif">What-If Analysis</a>
         <a href="/api/ml/glossary">Glossary</a>
     </nav>
     <h1>ML Win Predictor</h1>
