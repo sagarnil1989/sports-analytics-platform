@@ -256,9 +256,9 @@ current checkpoint, betting line, and model AUC.
 
 ---
 
-## Phase 6 — Live ML: Win Predictor Predictions
+## Phase 6 — Live ML: Win Predictor Predictions ✓ DONE
 
-**~3 days | Hardest phase | Needs Phases 2 + 4 + 5**
+**Implemented 2026-07-04 | Hardest phase | Needs Phases 2 + 4 + 5**
 
 ### 6.1 — Live feature extraction module
 

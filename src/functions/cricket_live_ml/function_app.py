@@ -18,7 +18,8 @@ import azure.functions as func
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient
 
-from live_ou_predictor import run_live_ou_predictions
+from live_ou_predictor import run_live_ou_predictions, _list_live_event_ids
+from live_win_predictor import run_live_win_predictions
 
 app = func.FunctionApp()
 
@@ -34,7 +35,7 @@ def live_ml_tick(timer: func.TimerRequest) -> None:
     """
     Runs every 60 seconds.
     Phase 5: O/U predictions for currently live matches.
-    Phase 6 (future): Win predictor live predictions.
+    Phase 6: Win predictor predictions for currently live matches.
     """
     endpoint = os.environ.get("DATA_LAKE_BLOB_ENDPOINT", "")
     if not endpoint:
@@ -44,7 +45,22 @@ def live_ml_tick(timer: func.TimerRequest) -> None:
     try:
         gold   = _get_container(endpoint, "gold")
         silver = _get_container(endpoint, "silver")
-        written = run_live_ou_predictions(gold, silver)
-        logging.info(f"live_ml_tick: phase5 O/U wrote {written} prediction file(s)")
+
+        # Discover live event IDs once — shared by both predictors
+        event_ids = _list_live_event_ids(silver)
+        if not event_ids:
+            logging.info("live_ml_tick: no live events")
+            return
+
+        logging.info(f"live_ml_tick: {len(event_ids)} live event(s)")
+
+        # Phase 5: Over/Under predictions
+        ou_written = run_live_ou_predictions(gold, silver)
+        logging.info(f"live_ml_tick: phase5 O/U wrote {ou_written} file(s)")
+
+        # Phase 6: Win predictor predictions
+        win_written = run_live_win_predictions(gold, silver, event_ids)
+        logging.info(f"live_ml_tick: phase6 win wrote {win_written} file(s)")
+
     except Exception as e:
         logging.exception(f"live_ml_tick: unexpected error: {e}")

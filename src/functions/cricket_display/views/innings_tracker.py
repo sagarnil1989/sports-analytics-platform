@@ -162,19 +162,34 @@ def view_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(f"Error: {str(ex)}", status_code=500)
 
 
+def _prob_bar_html(pct_left: int, label_left: str, label_right: str,
+                   color_left: str = "#2d7a2d", color_right: str = "#cc2200") -> str:
+    pct_right = 100 - pct_left
+    return (
+        f'<div style="display:flex;height:22px;border-radius:4px;overflow:hidden;min-width:120px">'
+        f'<div style="width:{pct_left}%;background:{color_left};color:white;font-size:11px;'
+        f'font-weight:bold;display:flex;align-items:center;justify-content:center">'
+        f'{label_left} {pct_left}%</div>'
+        f'<div style="width:{pct_right}%;background:{color_right};color:white;font-size:11px;'
+        f'font-weight:bold;display:flex;align-items:center;justify-content:center">'
+        f'{label_right} {pct_right}%</div>'
+        f'</div>'
+    )
+
+
 def _build_live_pred_html(live_preds: Dict) -> str:
     """
-    Build the live ML O/U predictions panel from live_predictions.json.
-    Written by cricket_live_ml Function App (Phase 5) for currently live matches.
-    Returns empty string if no live predictions exist.
+    Build the live ML predictions panel from live_predictions.json.
+    Shows Over/Under predictions (Phase 5) and Win Predictor predictions (Phase 6).
+    Returns empty string if neither exists.
     """
-    preds = live_preds.get("ou_predictions") or []
-    if not preds:
+    ou_preds  = live_preds.get("ou_predictions") or []
+    win_preds = live_preds.get("win_predictions") or []
+    if not ou_preds and not win_preds:
         return ""
 
-    gen_time = str(live_preds.get("generated_at_utc", ""))[:16].replace("T", " ")
+    gen_time     = str(live_preds.get("generated_at_utc", ""))[:16].replace("T", " ")
     current_over = live_preds.get("current_over", "?")
-    match_name = escape(str(live_preds.get("match_name", "")))
 
     _market_labels = {
         "innings_total":  "Innings Total",
@@ -184,60 +199,104 @@ def _build_live_pred_html(live_preds: Dict) -> str:
         "inn2_first_12":  "2nd Inn — First 12 Overs",
     }
 
-    rows_html = ""
-    for p in sorted(preds, key=lambda x: (x.get("innings", 1), x.get("checkpoint_over", 0))):
-        market  = _market_labels.get(p.get("market", ""), p.get("market", ""))
-        inn     = p.get("innings", 1)
-        cp      = p.get("checkpoint_over", "?")
-        po      = p.get("prob_over", 0.5)
-        pu      = p.get("prob_under", 0.5)
-        line    = p.get("betting_line")
-        score   = p.get("score")
-        wkts    = p.get("wickets", 0)
-        pct_o   = round(po * 100)
-        pct_u   = 100 - pct_o
+    # ── O/U table ─────────────────────────────────────────────────────────────
+    ou_section = ""
+    if ou_preds:
+        ou_rows = ""
+        for p in sorted(ou_preds, key=lambda x: (x.get("innings", 1), x.get("checkpoint_over", 0))):
+            market    = _market_labels.get(p.get("market", ""), p.get("market", ""))
+            inn       = p.get("innings", 1)
+            cp        = p.get("checkpoint_over", "?")
+            po        = p.get("prob_over", 0.5)
+            line      = p.get("betting_line")
+            score     = p.get("score")
+            wkts      = p.get("wickets", 0)
+            score_str = f"{score}/{wkts}" if score is not None else "—"
+            line_str  = str(line) if line is not None else "—"
+            bar       = _prob_bar_html(round(po * 100), "O", "U")
+            ou_rows  += (
+                f'<tr>'
+                f'<td>{escape(market)}</td>'
+                f'<td style="text-align:center">Inn {inn}</td>'
+                f'<td style="text-align:center"><b>{cp}</b></td>'
+                f'<td style="text-align:center">{score_str}</td>'
+                f'<td style="text-align:center"><b>{escape(line_str)}</b></td>'
+                f'<td>{bar}</td>'
+                f'</tr>'
+            )
+        ou_section = f"""
+  <h4 style="margin:0 0 8px;color:#00e5ff;font-size:13px;font-weight:600">
+    Over / Under Markets
+  </h4>
+  <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:16px;">
+    <thead>
+      <tr style="background:#1a2a3a;color:#aaa;">
+        <th style="padding:6px 10px;text-align:left">Market</th>
+        <th style="padding:6px 10px;text-align:center">Inn</th>
+        <th style="padding:6px 10px;text-align:center">At Over</th>
+        <th style="padding:6px 10px;text-align:center">Score</th>
+        <th style="padding:6px 10px;text-align:center">Line</th>
+        <th style="padding:6px 10px;text-align:left">P(Over) vs P(Under)</th>
+      </tr>
+    </thead>
+    <tbody style="color:#ccc;">{ou_rows}</tbody>
+  </table>"""
 
-        line_str  = str(line) if line is not None else "—"
-        score_str = f"{score}/{wkts}" if score is not None else "—"
-        bar = (
-            f'<div style="display:flex;height:22px;border-radius:4px;overflow:hidden;min-width:120px">'
-            f'<div style="width:{pct_o}%;background:#2d7a2d;color:white;font-size:11px;font-weight:bold;display:flex;align-items:center;justify-content:center">{pct_o}%</div>'
-            f'<div style="width:{pct_u}%;background:#cc2200;color:white;font-size:11px;font-weight:bold;display:flex;align-items:center;justify-content:center">{pct_u}%</div>'
-            f'</div>'
-        )
-        rows_html += (
-            f'<tr>'
-            f'<td>{escape(market)}</td>'
-            f'<td style="text-align:center">Inn {inn}</td>'
-            f'<td style="text-align:center"><b>{cp}</b></td>'
-            f'<td style="text-align:center">{score_str}</td>'
-            f'<td style="text-align:center"><b>{escape(line_str)}</b></td>'
-            f'<td>{bar}</td>'
-            f'</tr>'
-        )
-
-    return f"""
-<div style="background:#0d1b2a;border-radius:8px;padding:18px 20px;margin:16px 0;color:#e0e0e0;">
-  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
-    <span style="color:#f00;animation:blink 1s step-start infinite">●</span>
-    <strong style="font-size:15px;color:#00e5ff">Live ML Predictions</strong>
-    <span style="font-size:12px;color:#888">Generated {escape(gen_time)} UTC &nbsp;·&nbsp; Over {escape(str(current_over))}</span>
-  </div>
+    # ── Win predictor table ────────────────────────────────────────────────────
+    win_section = ""
+    if win_preds:
+        win_gen = str(live_preds.get("win_pred_generated_utc", ""))[:16].replace("T", " ")
+        win_rows = ""
+        for p in win_preds:
+            cp       = escape(p.get("checkpoint", "?"))
+            prob_ch  = p.get("prob_chase_wins", 0.5)
+            inn1_sc  = p.get("inn1_total_score", "?")
+            inn2_sc  = p.get("inn2_score_at_cp")
+            inn2_wk  = p.get("inn2_wickets_at_cp")
+            bat_team = escape(str(p.get("bat_team", "") or ""))
+            bowl_team= escape(str(p.get("bowl_team", "") or ""))
+            ctx_str  = f"Inn2 {inn2_sc}/{inn2_wk}" if inn2_sc is not None else f"Inn1 total {inn1_sc}"
+            bar      = _prob_bar_html(round(prob_ch * 100), "Chase", "Defend",
+                                      "#0066cc", "#7b2d00")
+            win_rows += (
+                f'<tr>'
+                f'<td><b>{cp}</b></td>'
+                f'<td style="font-size:12px;color:#aaa">{bat_team} vs {bowl_team}</td>'
+                f'<td style="text-align:center;font-size:12px">{escape(ctx_str)}</td>'
+                f'<td>{bar}</td>'
+                f'</tr>'
+            )
+        win_section = f"""
+  <h4 style="margin:0 0 8px;color:#00e5ff;font-size:13px;font-weight:600">
+    Win Predictor &nbsp;<span style="font-weight:normal;color:#666;font-size:11px">updated {escape(win_gen)} UTC</span>
+  </h4>
   <table style="width:100%;border-collapse:collapse;font-size:13px;">
     <thead>
       <tr style="background:#1a2a3a;color:#aaa;">
-        <th style="padding:7px 10px;text-align:left">Market</th>
-        <th style="padding:7px 10px;text-align:center">Innings</th>
-        <th style="padding:7px 10px;text-align:center">At Over</th>
-        <th style="padding:7px 10px;text-align:center">Score</th>
-        <th style="padding:7px 10px;text-align:center">Line</th>
-        <th style="padding:7px 10px;text-align:left">P(Over) vs P(Under)</th>
+        <th style="padding:6px 10px;text-align:left">Checkpoint</th>
+        <th style="padding:6px 10px;text-align:left">Teams</th>
+        <th style="padding:6px 10px;text-align:center">State at Checkpoint</th>
+        <th style="padding:6px 10px;text-align:left">P(Chase wins) vs P(Defends)</th>
       </tr>
     </thead>
-    <tbody style="color:#ccc;">{rows_html}</tbody>
-  </table>
-  <div style="font-size:11px;color:#555;margin-top:6px;">
-    Predictions by <code>func-ramanuj-live-ml</code> · Model loaded from <code>gold/ml/live_models/over_under/</code>
+    <tbody style="color:#ccc;">{win_rows}</tbody>
+  </table>"""
+
+    return f"""
+<div style="background:#0d1b2a;border-radius:8px;padding:18px 20px;margin:16px 0;color:#e0e0e0;">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+    <span style="color:#f00;animation:blink 1s step-start infinite">●</span>
+    <strong style="font-size:15px;color:#00e5ff">Live ML Predictions</strong>
+    <span style="font-size:12px;color:#888">
+      Over {escape(str(current_over))} &nbsp;·&nbsp; O/U updated {escape(gen_time)} UTC
+    </span>
+  </div>
+  {ou_section}
+  {win_section}
+  <div style="font-size:11px;color:#555;margin-top:8px;">
+    Predictions by <code>func-ramanuj-live-ml</code> ·
+    O/U: <code>gold/ml/live_models/over_under/</code> ·
+    Win: <code>gold/cricket/ml_features/t20/live_models/win_predictor/</code>
   </div>
 </div>"""
 
