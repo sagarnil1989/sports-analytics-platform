@@ -185,6 +185,14 @@ resource "azurerm_storage_blob" "script_hypothesis_inn1_prematch" {
   content_md5          = filemd5("${path.module}/scripts/hypothesis_inn1_prematch.py")
 }
 
+resource "azurerm_storage_blob" "script_hypothesis_odds_movement" {
+  name                 = "hypothesis_odds_movement.py"
+  storage_container_id = azurerm_storage_container.scripts.id
+  type                 = "Block"
+  source               = "${path.module}/scripts/hypothesis_odds_movement.py"
+  content_md5          = filemd5("${path.module}/scripts/hypothesis_odds_movement.py")
+}
+
 # ---------------------------------------------------------------------------
 # Lib files shared by scripts
 # util.py and league_config.py come from the ingestion function source.
@@ -245,6 +253,14 @@ resource "azurerm_storage_blob" "lib_landing_index" {
   type                 = "Block"
   source               = "${local.lib_path}/landing_index.py"
   content_md5          = filemd5("${local.lib_path}/landing_index.py")
+}
+
+resource "azurerm_storage_blob" "lib_odds_movement" {
+  name                 = "odds_movement.py"
+  storage_container_id = azurerm_storage_container.scripts.id
+  type                 = "Block"
+  source               = "${local.lib_path}/odds_movement.py"
+  content_md5          = filemd5("${local.lib_path}/odds_movement.py")
 }
 
 resource "azurerm_storage_blob" "script_index_new_snapshots" {
