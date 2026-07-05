@@ -61,36 +61,77 @@ def view_odds_movement_html(req: func.HttpRequest) -> func.HttpResponse:
     by_team    = data.get("by_team") or []
 
     # ── Tab 1: Match ranking ─────────────────────────────────────────────────
+    def _state_label(at: dict) -> str:
+        """Compact label: 'Inn1 Ov6.3 · 72/2'"""
+        if not at or at.get("innings") is None:
+            return "—"
+        inn  = at.get("innings", "?")
+        ov   = at.get("over", "?")
+        sc   = at.get("score")
+        wk   = at.get("wickets")
+        score_part = f" · {sc}/{wk}" if sc is not None else ""
+        return f"Inn{inn} Ov{ov}{score_part}"
+
+    def _final_score(m: dict) -> str:
+        s1 = m.get("final_inn1_score")
+        w1 = m.get("final_inn1_wickets")
+        s2 = m.get("final_inn2_score")
+        w2 = m.get("final_inn2_wickets")
+        if s1 is None:
+            return "—"
+        inn1 = f"{s1}/{w1}" if w1 is not None else str(s1)
+        if s2 is None:
+            return inn1
+        inn2 = f"{s2}/{w2}" if w2 is not None else str(s2)
+        return f"{inn1} — {inn2}"
+
     rows1 = ""
     for m in matches[:200]:
-        dbl = m.get("double_opportunity")
+        dbl    = m.get("double_opportunity")
         profit = m.get("net_profit_if_both_backed")
         profit_s = f"+{profit:.3f}" if profit and profit > 0 else ("—" if profit is None else f"{profit:.3f}")
         profit_c = "#2d7a2d" if profit and profit > 0 else "#999"
-        sw = m.get("max_swing", 0)
+        sw     = m.get("max_swing", 0)
+        winner = m.get("winner") or "—"
+        home_at = _state_label(m.get("peak_home_at") or {})
+        away_at = _state_label(m.get("peak_away_at") or {})
+        final   = _final_score(m)
         rows1 += f"""<tr>
-            <td>{escape(m.get("match_date_utc","")[:10])}</td>
-            <td>{escape(m.get("match_name",""))}<br><small style="color:#888">{escape(m.get("league_name",""))}</small></td>
-            <td style="font-family:monospace">{m.get("peak_home_odds","—")}</td>
-            <td style="font-family:monospace">{m.get("peak_away_odds","—")}</td>
+            <td style="white-space:nowrap">{escape(m.get("match_date_utc","")[:10])}</td>
+            <td>{escape(m.get("match_name",""))}<br>
+                <small style="color:#888">{escape(m.get("league_name",""))}</small></td>
+            <td style="font-family:monospace;font-weight:bold">{final}</td>
+            <td style="color:#555;font-size:12px">{escape(winner)}</td>
+            <td>
+                <span style="font-family:monospace;font-weight:bold">{m.get("peak_home_odds","—")}</span><br>
+                <small style="color:#888;font-size:11px">{escape(home_at)}</small>
+            </td>
+            <td>
+                <span style="font-family:monospace;font-weight:bold">{m.get("peak_away_odds","—")}</span><br>
+                <small style="color:#888;font-size:11px">{escape(away_at)}</small>
+            </td>
             <td style="font-weight:bold;color:{_swing_color(sw)}">{sw:.3f}</td>
             <td>{"<span class='badge-yes'>✓ Yes</span>" if dbl else "<span class='badge-no'>No</span>"}</td>
             <td style="color:{profit_c};font-weight:bold;font-family:monospace">{profit_s}</td>
-            <td style="font-size:12px;color:#888">{escape(str(m.get("swing_at_over","")))} inn{m.get("swing_innings","?")}</td>
         </tr>"""
 
     tab1 = f"""<table>
         <thead><tr>
             <th>Date</th><th>Match</th>
-            <th>Peak Home Odds</th><th>Peak Away Odds</th>
+            <th>Final Score</th><th>Winner</th>
+            <th>Peak Home Odds<br><small style="font-weight:normal;color:#aaa">Inn · Over · Score</small></th>
+            <th>Peak Away Odds<br><small style="font-weight:normal;color:#aaa">Inn · Over · Score</small></th>
             <th>Swing ↑</th><th>Double Opp?</th>
             <th>Net Profit<br><small>(if both backed)</small></th>
-            <th>Biggest Move</th>
         </tr></thead>
         <tbody>{rows1}</tbody>
     </table>
-    <p class="hint">Swing = max(peak home odds, peak away odds) − 2.0 — extra return above even-money if you caught the peak.<br>
-    Net profit assumes stake=1 placed on EACH team at their respective peak odds; positive = profitable.</p>"""
+    <p class="hint">
+        <b>Final Score</b> = Inn1 score — Inn2 score &nbsp;|&nbsp;
+        <b>Inn · Over · Score</b> = match state when that team's odds peaked &nbsp;|&nbsp;
+        <b>Swing</b> = peak odds − 2.0 &nbsp;|&nbsp;
+        Net profit assumes stake=1 on each team at their peak; positive = profitable if winning team was backed.
+    </p>"""
 
     # ── Tab 2: By league ─────────────────────────────────────────────────────
     rows2 = ""
