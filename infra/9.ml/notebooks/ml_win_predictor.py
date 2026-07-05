@@ -47,7 +47,7 @@ subprocess.run([
 
 # COMMAND ----------
 
-import json, io, tempfile, os
+import json, io, pickle, tempfile, os
 import numpy as np
 import pandas as pd
 import mlflow
