@@ -204,10 +204,15 @@ def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
                                 ("Inn2 final", "inn2_score", None)],
         }
 
-        def _pred_table(preds, ctx, split_label, split_color):
+        def _pred_table(preds, ctx, split_label, split_color, model_name="", fi_list=None):
             if not preds:
                 return f"<p style='color:#999'>No {split_label.lower()} predictions — run pl_ml_retrain.</p>"
+
+            # Feature importance lookup: {feature_name: pct_of_total}
+            fi_map = {row["feature"]: row["pct_of_total"] for row in (fi_list or [])}
+
             ctx_headers = "".join(f"<th>{lbl}</th>" for lbl, _, _ in ctx)
+            ncols = 8 + len(ctx)  # total columns for colspan
             html = f"""<table class="cmp-table"><thead>
                 <tr><th>Event ID</th><th>Match</th><th>Date</th><th>Inn1 batting</th>
                     {ctx_headers}
@@ -223,6 +228,86 @@ def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
                 if s is None: return "—"
                 return f"{int(s)}/{int(w)}" if w is not None else str(int(s))
 
+            def _wi_panel(p, panel_id, model_nm):
+                """Build the collapsible What-If panel for one prediction row."""
+                feat_vals = p.get("feature_values") or {}
+                if not feat_vals:
+                    return '<tr id="{}" style="display:none"><td colspan="{}"><em style="color:#999;font-size:12px">No feature values stored — re-run pl_ml_and_hypothesis.</em></td></tr>'.format(panel_id, ncols)
+
+                orig_json = json.dumps(feat_vals)
+                orig_conf = p.get("confidence_pct", 50.0) or 50.0
+                orig_pred = "Chase won" if p.get("predicted") == 1 else "Defended"
+
+                # Sort features: those with importance first, then rest alphabetically
+                sorted_feats = sorted(feat_vals.keys(),
+                    key=lambda f: -fi_map.get(f, 0))
+
+                rows_html = ""
+                for feat in sorted_feats:
+                    val = feat_vals[feat]
+                    pct = fi_map.get(feat, 0)
+                    bar_w = min(int(pct * 6), 80)
+                    bar_html = f'<div style="display:inline-block;background:#0066cc;height:8px;width:{bar_w}px;border-radius:2px;vertical-align:middle;margin-right:4px"></div>'
+                    val_str = "" if val is None else str(val)
+                    input_type = "text" if isinstance(val, str) else "number"
+                    step_attr  = 'step="0.01"' if isinstance(val, float) else ""
+                    rows_html += f"""<tr>
+                        <td style="font-family:monospace;font-size:12px;color:#333">{escape(feat)}</td>
+                        <td style="white-space:nowrap">{bar_html}<span style="font-size:11px;color:#666">{pct:.1f}%</span></td>
+                        <td><input type="{input_type}" {step_attr}
+                                   class="wi-input" data-feat="{escape(feat)}"
+                                   data-panel="{panel_id}"
+                                   value="{escape(val_str)}"
+                                   style="width:90px;padding:3px 6px;border:1px solid #ccc;border-radius:3px;font-size:12px;font-family:monospace;"
+                                   oninput="wiSchedule('{panel_id}','{escape(model_nm)}')">
+                        </td>
+                    </tr>"""
+
+                return f"""<tr id="{panel_id}" style="display:none;background:#f8f8ff;">
+                  <td colspan="{ncols}" style="padding:0;">
+                    <div class="wi-panel">
+                      <div class="wi-panel-header">
+                        <strong>What-If Analysis</strong>
+                        <span style="font-size:12px;color:#666;margin-left:10px">
+                          Edit values → prediction updates in real-time
+                        </span>
+                        <button class="wi-reset-btn" onclick="wiReset('{panel_id}',{orig_json})">↺ Reset</button>
+                      </div>
+
+                      <div style="display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap;">
+                        <div>
+                          <table class="wi-feat-table">
+                            <thead><tr>
+                              <th>Feature</th><th>Importance</th><th>Value</th>
+                            </tr></thead>
+                            <tbody>{rows_html}</tbody>
+                          </table>
+                        </div>
+
+                        <div class="wi-result-col" id="{panel_id}-result">
+                          <div class="wi-result-label">Current prediction</div>
+                          <div class="wi-prob-bar" id="{panel_id}-bar">
+                            <div class="wi-prob-chase"  id="{panel_id}-chase"
+                                 style="width:{round(orig_conf if p.get('predicted')==1 else 100-orig_conf)}%">
+                              Chase {round(orig_conf if p.get('predicted')==1 else 100-orig_conf)}%
+                            </div>
+                            <div class="wi-prob-defend" id="{panel_id}-defend"
+                                 style="width:{round(orig_conf if p.get('predicted')==0 else 100-orig_conf)}%">
+                              Defend {round(orig_conf if p.get('predicted')==0 else 100-orig_conf)}%
+                            </div>
+                          </div>
+                          <div id="{panel_id}-delta" class="wi-delta"></div>
+                          <div id="{panel_id}-status" class="wi-status"></div>
+                          <div style="font-size:11px;color:#999;margin-top:8px;">
+                            Original: <b>{orig_pred}</b> @ {orig_conf:.1f}%
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </td>
+                </tr>"""
+
+            row_num = 0
             for p in sorted(preds, key=lambda p: p.get("match_date") or "", reverse=True):
                 predicted = p.get("predicted")
                 actual    = p.get("chasing_won")
@@ -238,7 +323,11 @@ def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
                     for _, sk, wk in ctx
                 )
                 event_id_val = escape(str(p.get("event_id") or ""))
-                html += f"""<tr>
+                safe_model   = model_name.replace("-", "_")
+                panel_id     = f"wi_{safe_model}_{split_label}_{row_num}"
+                has_feat_vals = bool(p.get("feature_values"))
+
+                html += f"""<tr style="cursor:default">
                     <td style="font-family:monospace;color:#888;font-size:12px">{event_id_val}</td>
                     <td>{escape(str(p.get("match_name","")))}</td>
                     <td style="color:#666">{escape(str(p.get("match_date",""))[:10])}</td>
@@ -248,18 +337,25 @@ def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
                     <td style="color:#555">{act_lbl}</td>
                     <td style="font-weight:bold">{f"{conf:.1f}%" if conf else "—"}{conf_bar}</td>
                     <td style="color:{tick_col};font-size:18px;font-weight:bold;text-align:center">{tick}</td>
+                    <td><button class="wi-toggle-btn" onclick="wiToggle('{panel_id}')"
+                                title="What-If: edit features and see how prediction changes"
+                                {'style="opacity:0.35;cursor:not-allowed"' if not has_feat_vals else ""}>▼</button></td>
                 </tr>"""
+                html += _wi_panel(p, panel_id, model_name)
+                row_num += 1
+
             html += "</tbody></table><br>"
             return html
 
         # ── test predictions ──────────────────────────────────────
         body += "<h2>Test Match Predictions (XGBoost)</h2>"
-        body += "<p style='color:#555;margin-bottom:20px'>Matches <strong>after</strong> the train/test cutoff — the model never saw these during training. <b>Predicted</b> and <b>Actual</b> refer to whether the chasing team (batting 2nd) won.</p>"
+        body += "<p style='color:#555;margin-bottom:20px'>Matches <strong>after</strong> the train/test cutoff — the model never saw these during training. <b>Predicted</b> and <b>Actual</b> refer to whether the chasing team (batting 2nd) won. Click <b>▼</b> on any row to open the What-If panel.</p>"
         for m in summary.get("models", []):
             name = m.get("name", "")
             ctx  = _score_ctx.get(name, [("Inn1 final", "inn1_score", None)])
             body += f"<h3>{escape(name)}</h3>"
-            body += _pred_table(m.get("test_predictions", []), ctx, "Test", "#0066cc")
+            body += _pred_table(m.get("test_predictions", []), ctx, "Test", "#0066cc",
+                                model_name=name, fi_list=m.get("feature_importance", []))
 
         # ── train predictions ─────────────────────────────────────
         body += "<h2>Training Match Predictions (XGBoost)</h2>"
@@ -268,7 +364,8 @@ def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
             name = m.get("name", "")
             ctx  = _score_ctx.get(name, [("Inn1 final", "inn1_score", None)])
             body += f"<h3>{escape(name)}</h3>"
-            body += _pred_table(m.get("train_predictions", []), ctx, "Train", "#888")
+            body += _pred_table(m.get("train_predictions", []), ctx, "Train", "#888",
+                                model_name=name, fi_list=m.get("feature_importance", []))
 
         # ── feature importance per model ──────────────────────────
         body += "<h2>Feature Importances (XGBoost)</h2>"
@@ -376,6 +473,57 @@ def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
         nav {{ margin-bottom:24px; font-size:14px; }}
         nav a {{ color:#0066cc; text-decoration:none; margin-right:16px; }}
         nav a:hover {{ text-decoration:underline; }}
+
+        /* What-If panel */
+        .wi-toggle-btn {{
+            background:#f0f4ff; border:1px solid #99b; border-radius:4px;
+            padding:3px 8px; cursor:pointer; font-size:12px; color:#336;
+        }}
+        .wi-toggle-btn:hover {{ background:#dde8ff; }}
+        .wi-panel {{
+            background:#f8f8ff; border-top:2px solid #99b; padding:16px 20px 14px;
+        }}
+        .wi-panel-header {{
+            display:flex; align-items:center; gap:8px; margin-bottom:12px;
+            font-size:14px; color:#333;
+        }}
+        .wi-reset-btn {{
+            margin-left:auto; background:white; border:1px solid #ccc;
+            border-radius:4px; padding:3px 10px; cursor:pointer; font-size:12px;
+            color:#555;
+        }}
+        .wi-reset-btn:hover {{ background:#f0f0f0; }}
+        .wi-feat-table {{ border-collapse:collapse; font-size:13px; }}
+        .wi-feat-table th {{
+            background:#eef; padding:5px 10px; text-align:left;
+            font-size:11px; color:#446; font-weight:600;
+        }}
+        .wi-feat-table td {{ padding:4px 10px; border-bottom:1px solid #eee; }}
+        .wi-result-col {{
+            min-width:240px; padding:8px 0;
+        }}
+        .wi-result-label {{
+            font-size:12px; color:#666; font-weight:600;
+            text-transform:uppercase; letter-spacing:.5px; margin-bottom:8px;
+        }}
+        .wi-prob-bar {{
+            display:flex; height:32px; border-radius:6px;
+            overflow:hidden; width:100%; margin-bottom:8px;
+        }}
+        .wi-prob-chase {{
+            background:#0066cc; color:white; font-size:12px; font-weight:bold;
+            display:flex; align-items:center; justify-content:center;
+            transition:width .3s ease;
+        }}
+        .wi-prob-defend {{
+            background:#7b2d00; color:white; font-size:12px; font-weight:bold;
+            display:flex; align-items:center; justify-content:center;
+            transition:width .3s ease;
+        }}
+        .wi-delta {{
+            font-size:13px; font-weight:bold; min-height:18px; margin-bottom:4px;
+        }}
+        .wi-status {{ font-size:11px; color:#999; min-height:16px; }}
         .cutoff-card {{ background:white; border:1px solid #e0e0e0; border-radius:8px;
                         padding:16px 20px; margin-bottom:24px; box-shadow:0 1px 4px #ccc;
                         display:flex; align-items:center; gap:16px; flex-wrap:wrap; }}
@@ -426,6 +574,112 @@ def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
             else       {{ s.style.color='#c00';    s.textContent='Error: ' + (j.error || 'unknown'); }}
         }})
         .catch(e => {{ s.style.color='#c00'; s.textContent='Network error: ' + e; }});
+    }}
+
+    /* ── What-If panel JS ─────────────────────────────────── */
+    var _wiTimers = {{}};
+    var _wiOrigConf = {{}};  // panelId → {{prob_chase, prob_defend}}
+
+    function wiToggle(panelId) {{
+        var row = document.getElementById(panelId);
+        if (!row) return;
+        var open = row.style.display !== 'none';
+        row.style.display = open ? 'none' : 'table-row';
+        // Store original probs on first open
+        if (!open && !_wiOrigConf[panelId]) {{
+            var ch = document.getElementById(panelId + '-chase');
+            var de = document.getElementById(panelId + '-defend');
+            if (ch && de) {{
+                _wiOrigConf[panelId] = {{
+                    chaseW: ch.style.width, chaseT: ch.textContent,
+                    defendW: de.style.width, defendT: de.textContent
+                }};
+            }}
+        }}
+    }}
+
+    function wiSchedule(panelId, model) {{
+        clearTimeout(_wiTimers[panelId]);
+        document.getElementById(panelId + '-status').textContent = 'Calculating…';
+        _wiTimers[panelId] = setTimeout(function() {{
+            wiRun(panelId, model);
+        }}, 450);
+    }}
+
+    function wiRun(panelId, model) {{
+        // Collect current values from all inputs in this panel
+        var inputs = document.querySelectorAll('[data-panel="' + panelId + '"]');
+        var rawFeatures = {{}};
+        inputs.forEach(function(inp) {{
+            var feat = inp.getAttribute('data-feat');
+            var v = inp.value.trim();
+            if (v === '') {{ rawFeatures[feat] = null; return; }}
+            var n = Number(v);
+            rawFeatures[feat] = isNaN(n) ? v : n;
+        }});
+
+        fetch('/api/ml/win-predictor/whatif', {{
+            method: 'POST',
+            headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{ model: model, raw_features: rawFeatures }})
+        }})
+        .then(function(r) {{ return r.json(); }})
+        .then(function(d) {{
+            document.getElementById(panelId + '-status').textContent = '';
+            if (!d.ok) {{
+                document.getElementById(panelId + '-status').textContent = 'Error: ' + (d.error || '?');
+                return;
+            }}
+            var pChase  = Math.round(d.prob_chase_wins * 100);
+            var pDefend = Math.round(d.prob_defends * 100);
+            var ch = document.getElementById(panelId + '-chase');
+            var de = document.getElementById(panelId + '-defend');
+            ch.style.width = pChase  + '%';
+            de.style.width = pDefend + '%';
+            ch.textContent = pChase  > 8 ? 'Chase '  + pChase  + '%' : '';
+            de.textContent = pDefend > 8 ? 'Defend ' + pDefend + '%' : '';
+
+            // Delta badge
+            var orig = _wiOrigConf[panelId];
+            if (orig) {{
+                var origChase = parseInt(orig.chaseW);
+                var delta = pChase - origChase;
+                var deltaEl = document.getElementById(panelId + '-delta');
+                if (Math.abs(delta) < 1) {{
+                    deltaEl.textContent = '— no change';
+                    deltaEl.style.color = '#999';
+                }} else {{
+                    var sign = delta > 0 ? '+' : '';
+                    deltaEl.textContent = sign + delta + 'pp vs original';
+                    deltaEl.style.color = delta > 0 ? '#0066cc' : '#7b2d00';
+                }}
+            }}
+        }})
+        .catch(function(e) {{
+            document.getElementById(panelId + '-status').textContent = 'Network error: ' + e;
+        }});
+    }}
+
+    function wiReset(panelId, origVals) {{
+        var inputs = document.querySelectorAll('[data-panel="' + panelId + '"]');
+        inputs.forEach(function(inp) {{
+            var feat = inp.getAttribute('data-feat');
+            var v = origVals[feat];
+            inp.value = (v === null || v === undefined) ? '' : v;
+        }});
+        // Restore original bar
+        var orig = _wiOrigConf[panelId];
+        if (orig) {{
+            var ch = document.getElementById(panelId + '-chase');
+            var de = document.getElementById(panelId + '-defend');
+            ch.style.width = orig.chaseW;  ch.textContent = orig.chaseT;
+            de.style.width = orig.defendW; de.textContent = orig.defendT;
+            document.getElementById(panelId + '-delta').textContent = '';
+            document.getElementById(panelId + '-status').textContent = 'Reset to original values';
+            setTimeout(function() {{
+                document.getElementById(panelId + '-status').textContent = '';
+            }}, 1500);
+        }}
     }}
     </script>
 

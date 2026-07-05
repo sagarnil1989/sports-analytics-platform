@@ -859,6 +859,31 @@ def xgb_train_pruned(model_name, feature_cols, train_df, test_df):
         "inn2_total_score", "inn2_score_display",
     ] if c in test_df.columns]
 
+    # Top features for the what-if panel (top 20 by importance, original values)
+    top_feats = fi_df.head(20)["feature"].tolist()
+
+    def _feat_vals(df_slice, idx_list):
+        """Extract original (pre-encoding) feature values for what-if display."""
+        result = []
+        for idx in idx_list:
+            row = {}
+            for feat in top_feats:
+                if feat not in df_slice.columns:
+                    continue
+                v = df_slice.iloc[idx][feat]
+                try:
+                    if pd.isna(v):
+                        v = None
+                    elif hasattr(v, 'item'):
+                        v = v.item()
+                    elif isinstance(v, float):
+                        v = round(v, 4)
+                except Exception:
+                    pass
+                row[feat] = v
+            result.append(row)
+        return result
+
     # Test predictions
     preds = test_df[["event_id", "match_name", "match_date", "inn1_bat_team", "inn1_bowl_team",
                       "chasing_won"] + score_ctx].copy()
@@ -870,6 +895,9 @@ def xgb_train_pruned(model_name, feature_cols, train_df, test_df):
     preds["correct"] = (y_pred == y_test).map({True: True, False: False})
     preds_records = preds.rename(columns={"inn1_total_score": "inn1_score",
                                           "inn2_total_score": "inn2_score"}).to_dict("records")
+    feat_vals_test = _feat_vals(test_df.reset_index(drop=True), list(range(len(test_df))))
+    for rec, fv in zip(preds_records, feat_vals_test):
+        rec["feature_values"] = fv
 
     # Train predictions
     score_ctx_train = [c for c in score_ctx if c in train_df.columns]
@@ -883,6 +911,9 @@ def xgb_train_pruned(model_name, feature_cols, train_df, test_df):
     train_preds["correct"] = (y_train_pred == y_train.to_numpy())
     train_preds_records = train_preds.rename(columns={"inn1_total_score": "inn1_score",
                                                        "inn2_total_score": "inn2_score"}).to_dict("records")
+    feat_vals_train = _feat_vals(train_df.reset_index(drop=True), list(range(len(train_df))))
+    for rec, fv in zip(train_preds_records, feat_vals_train):
+        rec["feature_values"] = fv
 
     # train_meds2 maps each kept feature to its categorical label-encoding dict
     # (for string columns) or its training median (for numeric columns).

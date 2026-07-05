@@ -228,7 +228,34 @@ def view_win_predictor_whatif_post(req: func.HttpRequest) -> func.HttpResponse:
     encodings = model_obj.get("encodings") or {}
 
     try:
-        X, feature_details = _build_feature_vector(body, features, encodings)
+        if "raw_features" in body:
+            # Direct path: caller supplies the actual feature values (pre-encoding),
+            # as stored in prediction records' feature_values dict.  Missing features
+            # are filled with training-set medians from the encodings dict.
+            raw = body["raw_features"]
+            X: List[float] = []
+            feature_details = []
+            for feat in features:
+                enc = encodings.get(feat)
+                val_raw = raw.get(feat)
+                if isinstance(enc, dict):
+                    key = str(val_raw) if val_raw is not None else None
+                    if key is not None and key in enc:
+                        val, src = float(enc[key]), "user"
+                    elif val_raw is not None and val_raw in enc:
+                        val, src = float(enc[val_raw]), "user"
+                    else:
+                        val, src = -1.0, "unknown_cat" if val_raw is not None else "median"
+                else:
+                    if val_raw is not None:
+                        val, src = float(val_raw), "user"
+                    else:
+                        val, src = float(enc) if enc is not None else 0.0, "median"
+                X.append(val)
+                feature_details.append({"name": feat, "value": round(val, 4), "source": src})
+        else:
+            X, feature_details = _build_feature_vector(body, features, encodings)
+
         X_arr = np.array(X, dtype=float).reshape(1, -1)
         model = model_obj["model"]
         proba = model.predict_proba(X_arr)[0]
