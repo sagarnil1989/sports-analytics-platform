@@ -239,7 +239,16 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
                 s = p.get(score_key)
                 w = p.get(wkt_key) if wkt_key else None
                 if s is None: return "—"
-                return f"{int(s)}/{int(w)}" if w is not None else str(int(s))
+                try:
+                    si = int(s)
+                except (ValueError, TypeError):
+                    return "—"  # NaN or unconvertible
+                if w is not None:
+                    try:
+                        return f"{si}/{int(w)}"
+                    except (ValueError, TypeError):
+                        return str(si)
+                return str(si)
 
             def _wi_panel(p, panel_id, model_nm):
                 """Build the collapsible What-If panel for one prediction row."""
