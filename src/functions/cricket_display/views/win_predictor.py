@@ -46,7 +46,7 @@ def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
         logging.exception("win_predictor page error")
         return func.HttpResponse(
             f"<pre style='color:red;padding:20px'>Win Predictor error:\n{escape(str(_ex))}\n\n{escape(_tb)}</pre>",
-            mimetype="text/html", status_code=500,
+            mimetype="text/html", status_code=200,
         )
 
 
@@ -352,7 +352,7 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
                     <td style="color:{tick_col};font-size:18px;font-weight:bold;text-align:center">{tick}</td>
                     <td><button class="wi-toggle-btn" onclick="wiToggle('{panel_id}')"
                                 title="What-If: edit features and see how prediction changes"
-                                {'style="opacity:0.35;cursor:not-allowed"' if not has_feat_vals else ""}>▼</button></td>
+                                {'style="opacity:0.35;cursor:not-allowed"' if not has_feat_vals else ''}>▼</button></td>
                 </tr>"""
                 html += _wi_panel(p, panel_id, model_name)
                 row_num += 1

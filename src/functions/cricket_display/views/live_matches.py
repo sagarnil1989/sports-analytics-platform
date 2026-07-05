@@ -274,7 +274,7 @@ def _view_live_matches_html_inner(req: func.HttpRequest) -> func.HttpResponse:
   </div>
   <div class="sub-meta">
     {f"{active_count} match{'es' if active_count != 1 else ''} in progress" if matches else "No live matches"}
-    {f"&nbsp;·&nbsp; ML updated {escape(gen_time)} UTC" if gen_time else ""}
+    {('&nbsp;·&nbsp; ML updated ' + escape(gen_time) + ' UTC') if gen_time else ''}
     <span class="auto-refresh-note">(page auto-refreshes every 60 s)</span>
   </div>
 
