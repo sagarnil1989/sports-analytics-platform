@@ -91,15 +91,20 @@ def view_odds_movement_html(req: func.HttpRequest) -> func.HttpResponse:
         profit = m.get("net_profit_if_both_backed")
         profit_s = f"+{profit:.3f}" if profit and profit > 0 else ("—" if profit is None else f"{profit:.3f}")
         profit_c = "#2d7a2d" if profit and profit > 0 else "#999"
-        sw     = m.get("max_swing", 0)
-        winner = m.get("winner") or "—"
+        sw      = m.get("max_swing", 0)
+        winner  = m.get("winner") or "—"
         home_at = _state_label(m.get("peak_home_at") or {})
         away_at = _state_label(m.get("peak_away_at") or {})
         final   = _final_score(m)
+        eid     = escape(str(m.get("event_id") or ""))
+        tracker_url = f"/api/matches/{eid}/innings-tracker/view"
         rows1 += f"""<tr>
             <td style="white-space:nowrap">{escape(m.get("match_date_utc","")[:10])}</td>
-            <td>{escape(m.get("match_name",""))}<br>
-                <small style="color:#888">{escape(m.get("league_name",""))}</small></td>
+            <td>
+                {escape(m.get("match_name",""))}<br>
+                <small style="color:#888">{escape(m.get("league_name",""))}</small><br>
+                <a href="{tracker_url}" style="font-size:11px;color:#888;font-family:monospace">{eid}</a>
+            </td>
             <td style="font-family:monospace;font-weight:bold">{final}</td>
             <td style="color:#555;font-size:12px">{escape(winner)}</td>
             <td>
@@ -117,7 +122,7 @@ def view_odds_movement_html(req: func.HttpRequest) -> func.HttpResponse:
 
     tab1 = f"""<table>
         <thead><tr>
-            <th>Date</th><th>Match</th>
+            <th>Date</th><th>Match / Event ID</th>
             <th>Final Score</th><th>Winner</th>
             <th>Peak Home Odds<br><small style="font-weight:normal;color:#aaa">Inn · Over · Score</small></th>
             <th>Peak Away Odds<br><small style="font-weight:normal;color:#aaa">Inn · Over · Score</small></th>
