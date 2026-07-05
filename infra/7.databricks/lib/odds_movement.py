@@ -90,6 +90,8 @@ def _process_match(tracker: Dict) -> Optional[Dict]:
     swing_over = None
     swing_inn  = None
     prev_home  = None
+    peak_home_row: Optional[Dict] = None   # row where home peaked
+    peak_away_row: Optional[Dict] = None   # row where away peaked
 
     for r in rows:
         h = r.get("home_team_odds")
@@ -101,38 +103,53 @@ def _process_match(tracker: Dict) -> Optional[Dict]:
             home_open = h
             away_open = a
 
-        # Track peak odds per team
+        # Track peak odds per team and capture the row for context
         if h > home_peak:
-            if prev_home is not None and h - prev_home > 0.5:   # notable single-snap move
+            if prev_home is not None and h - prev_home > 0.5:
                 swing_over = r.get("over")
                 swing_inn  = r.get("innings", 1)
-            home_peak = h
+            home_peak     = h
+            peak_home_row = r
 
         if a > away_peak:
-            away_peak = a
+            away_peak     = a
+            peak_away_row = r
 
         prev_home = h
 
     if home_open is None:
         return None  # no valid odds captured at all
 
+    def _row_state(r: Optional[Dict]) -> Dict:
+        if r is None:
+            return {"innings": None, "over": None, "score": None, "wickets": None}
+        return {
+            "innings": r.get("innings", 1),
+            "over":    r.get("over"),
+            "score":   r.get("score"),
+            "wickets": r.get("wickets"),
+        }
+
+    # Final scores from the last row of each innings
+    inn1_rows = [r for r in rows if r.get("innings") == 1]
+    inn2_rows = [r for r in rows if r.get("innings") == 2]
+    final_inn1_score   = inn1_rows[-1].get("score")   if inn1_rows else None
+    final_inn1_wickets = inn1_rows[-1].get("wickets") if inn1_rows else None
+    final_inn2_score   = inn2_rows[-1].get("score")   if inn2_rows else None
+    final_inn2_wickets = inn2_rows[-1].get("wickets") if inn2_rows else None
+
     # Swing = how far the biggest peak went above even-money
     max_peak  = max(home_peak, away_peak)
     swing_mag = round(max(0.0, max_peak - _DOUBLE_OPP_THRESHOLD), 3)
 
-    # Double-opportunity: at some point BOTH teams had odds > 2.0
-    # (they can't have this simultaneously — so this must span different moments)
     double_opp = home_peak > _DOUBLE_OPP_THRESHOLD and away_peak > _DOUBLE_OPP_THRESHOLD
 
-    # Net profit if both peak bets were placed on the winning side
     winner = _infer_winner(rows, home_team, away_team)
     net_profit: Optional[float] = None
     if double_opp and winner is not None:
         winning_peak = home_peak if winner == home_team else away_peak
-        # Placed stake=1 on each side; net = winning_odds − 2 stake units total
         net_profit = round(winning_peak - 2.0, 3)
 
-    # Opening odds gap (as proxy for pre-match closeness)
     opening_gap = round(abs(home_open - away_open), 3) if home_open and away_open else None
 
     return {
@@ -144,8 +161,18 @@ def _process_match(tracker: Dict) -> Optional[Dict]:
         "home_team":        home_team,
         "away_team":        away_team,
         "winner":           winner,
+        # Final scores
+        "final_inn1_score":   final_inn1_score,
+        "final_inn1_wickets": final_inn1_wickets,
+        "final_inn2_score":   final_inn2_score,
+        "final_inn2_wickets": final_inn2_wickets,
+        # Peak odds
         "peak_home_odds":   round(home_peak, 3),
         "peak_away_odds":   round(away_peak, 3),
+        # State when peak odds occurred
+        "peak_home_at":     _row_state(peak_home_row),
+        "peak_away_at":     _row_state(peak_away_row),
+        # Opening odds
         "opening_home_odds": round(home_open, 3) if home_open else None,
         "opening_away_odds": round(away_open, 3) if away_open else None,
         "opening_odds_gap": opening_gap,

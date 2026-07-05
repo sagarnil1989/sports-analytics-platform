@@ -38,6 +38,19 @@ def view_ml_win_predictor_config_post(req: func.HttpRequest) -> func.HttpRespons
 
 
 def view_ml_win_predictor_html(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        return _view_ml_win_predictor_html_inner(req)
+    except Exception as _ex:
+        import traceback
+        _tb = traceback.format_exc()
+        logging.exception("win_predictor page error")
+        return func.HttpResponse(
+            f"<pre style='color:red;padding:20px'>Win Predictor error:\n{escape(str(_ex))}\n\n{escape(_tb)}</pre>",
+            mimetype="text/html", status_code=500,
+        )
+
+
+def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpResponse:
     gold = get_named_container_client("gold")
 
     config = _load_config(gold)

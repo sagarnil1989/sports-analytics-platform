@@ -92,6 +92,19 @@ def _win_summary_html(win: Optional[Dict]) -> str:
 
 
 def view_live_matches_html(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        return _view_live_matches_html_inner(req)
+    except Exception as _ex:
+        import traceback
+        _tb = traceback.format_exc()
+        logging.exception("live_matches page error")
+        return func.HttpResponse(
+            f"<pre style='color:red;padding:20px'>Live Matches error:\n{escape(str(_ex))}\n\n{escape(_tb)}</pre>",
+            mimetype="text/html", status_code=200,
+        )
+
+
+def _view_live_matches_html_inner(req: func.HttpRequest) -> func.HttpResponse:
     gold  = get_named_container_client("gold")
     index = download_json(gold, _LIVE_INDEX_BLOB) or {}
 
