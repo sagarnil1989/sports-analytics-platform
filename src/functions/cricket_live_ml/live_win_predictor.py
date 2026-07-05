@@ -26,7 +26,7 @@ from live_feature_extractor import (
 
 _MODEL_PREFIX  = "cricket/ml_features/t20/live_models/win_predictor"
 _LIVE_PRED_KEY = "event_id={eid}/live_predictions.json"
-_ACCUM_PREFIX  = "cricket/inplay/event_id="
+_ACCUM_PREFIX  = "event_id="
 _ACCUM_SUFFIX  = "/innings_accumulator.json"
 
 _CHECKPOINT_INN2_OVER = {

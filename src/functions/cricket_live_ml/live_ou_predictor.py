@@ -26,7 +26,7 @@ import numpy as np
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-_ACCUM_PREFIX  = "cricket/inplay/event_id="
+_ACCUM_PREFIX  = "event_id="
 _ACCUM_SUFFIX  = "/innings_accumulator.json"
 _MODEL_PREFIX  = "ml/live_models/over_under"
 _LIVE_PRED_KEY = "event_id={eid}/live_predictions.json"
