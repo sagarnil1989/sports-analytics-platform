@@ -140,7 +140,7 @@ def view_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse:
     </style>
 </head>
 <body>
-    <p><a href="/api/matches/{escape(str(event_id))}/view">← Back to match</a> | <a href="/api/matches/{escape(str(event_id))}/heatmap">Heatmap</a> | <a href="/api/matches/{escape(str(event_id))}/detailed-analysis">Detailed Analysis</a> | <a href="/api/innings-tracker">All matches analytics</a></p>
+    <p><a href="/api/live/view" style="color:#c00;font-weight:bold;">🔴 Live</a> | <a href="/api/matches/{escape(str(event_id))}/view">← Back to match</a> | <a href="/api/matches/{escape(str(event_id))}/heatmap">Heatmap</a> | <a href="/api/matches/{escape(str(event_id))}/detailed-analysis">Detailed Analysis</a> | <a href="/api/innings-tracker">All matches analytics</a></p>
     <h1>Innings Tracker — {match_name}</h1>
     {f'<div class="meta">📍 {venue}</div>' if venue else ""}
     {f'<div class="meta">📅 {match_date} &nbsp;|&nbsp; {league}</div>' if match_date else ""}
@@ -733,7 +733,7 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
     </style>
 </head>
 <body>
-    <p><a href="/api/matches/{escape(str(event_id))}/view">← Back to match</a> | <a href="/api/matches/{escape(str(event_id))}/heatmap">Heatmap</a> | <a href="/api/matches/{escape(str(event_id))}/detailed-analysis">Detailed Analysis</a> | <a href="/api/innings-tracker">All matches analytics</a></p>
+    <p><a href="/api/live/view" style="color:#c00;font-weight:bold;">🔴 Live</a> | <a href="/api/matches/{escape(str(event_id))}/view">← Back to match</a> | <a href="/api/matches/{escape(str(event_id))}/heatmap">Heatmap</a> | <a href="/api/matches/{escape(str(event_id))}/detailed-analysis">Detailed Analysis</a> | <a href="/api/innings-tracker">All matches analytics</a></p>
     <h1>Innings Tracker — {display_match_name}</h1>
     <div class="meta">📅 {match_date} &nbsp;|&nbsp; {league}</div>
     <div class="meta">{display_match_name} &nbsp;|&nbsp; {len(rows_data)} snapshots captured</div>

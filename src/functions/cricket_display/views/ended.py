@@ -256,6 +256,10 @@ def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
     </style>
 </head>
 <body>
+    <nav style="font-size:14px;margin-bottom:16px;">
+        <a href="/api/home">Home</a>
+        <a href="/api/live/view" style="color:#c00;font-weight:bold;">🔴 Live</a>
+    </nav>
     <h1>Ended Cricket Matches</h1>
     <p class="hint">{total} total &nbsp;·&nbsp; <b>{t20_count} T20</b> &nbsp;·&nbsp; <b>{odi_count} ODI</b></p>
 

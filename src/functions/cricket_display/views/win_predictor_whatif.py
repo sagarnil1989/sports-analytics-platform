@@ -335,6 +335,7 @@ def view_win_predictor_whatif_html(req: func.HttpRequest) -> func.HttpResponse:
 <body>
   <nav>
     <a href="/api/home">Home</a>
+    <a href="/api/live/view" style="color:#c00;font-weight:bold;">🔴 Live</a>
     <a href="/api/ml/win-predictor">Win Predictor</a>
     <a href="/api/ml/glossary">Glossary</a>
   </nav>

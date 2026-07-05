@@ -4,6 +4,7 @@ from .common import json, logging, escape, func, download_json, get_named_contai
 
 _NAV = """<nav style="font-size:14px;margin-bottom:24px;">
   <a href="/api/home">Home</a>
+  <a href="/api/live/view" style="color:#c00;font-weight:bold;">🔴 Live</a>
   <a href="/api/analysis/odds-movement">Odds Movement</a>
   <a href="/api/ml/win-predictor">Win Predictor</a>
   <a href="/api/ml/over-under">Over/Under</a>

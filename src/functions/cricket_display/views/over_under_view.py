@@ -63,6 +63,7 @@ _SLUG_TO_MARKET = {m["slug"]: m for m in _MARKETS}
 
 _NAV = """<nav>
   <a href="/api/home">Home</a>
+  <a href="/api/live/view" style="color:#c00;font-weight:bold;">🔴 Live</a>
   <a href="/api/ml/over-under">T20 Over/Under Runs</a>
   <a href="/api/ml/win-predictor">ML Win Predictor</a>
   <a href="/api/ml/glossary">Glossary</a>

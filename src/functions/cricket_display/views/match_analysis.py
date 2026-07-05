@@ -612,6 +612,7 @@ def view_detailed_analysis_html(req: func.HttpRequest) -> func.HttpResponse:
         target_str = f"Target: {target}" if target else ""
 
         nav = (
+            f'<a href="/api/live/view" style="color:#c00;font-weight:bold;">🔴 Live</a> | '
             f'<a href="/api/matches/{escape(event_id)}/view">← Match</a> | '
             f'<a href="/api/matches/{escape(event_id)}/innings-tracker/view">Innings Tracker</a> | '
             f'<a href="/api/matches/{escape(event_id)}/heatmap">Heatmap</a>'
