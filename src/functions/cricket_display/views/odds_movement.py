@@ -98,14 +98,16 @@ def view_odds_movement_html(req: func.HttpRequest) -> func.HttpResponse:
         home_at   = _state_label(m.get("peak_home_at") or {})
         away_at   = _state_label(m.get("peak_away_at") or {})
         final     = _final_score(m)
-        eid       = escape(str(m.get("event_id") or ""))
+        eid         = escape(str(m.get("event_id") or ""))
+        venue_str   = escape(str(m.get("venue") or ""))
         tracker_url = f"/api/matches/{eid}/innings-tracker/view"
         rows1 += f"""<tr>
             <td style="white-space:nowrap">{escape(m.get("match_date_utc","")[:10])}</td>
             <td>
                 {escape(m.get("match_name",""))}<br>
-                <small style="color:#888">{escape(m.get("league_name",""))}</small><br>
-                <a href="{tracker_url}" style="font-size:11px;color:#888;font-family:monospace">{eid}</a>
+                <small style="color:#888">{escape(m.get("league_name",""))}</small>
+                {('<br><small style="color:#aaa">📍 ' + venue_str + '</small>') if venue_str else ''}
+                <br><a href="{tracker_url}" style="font-size:11px;color:#888;font-family:monospace">{eid}</a>
             </td>
             <td style="font-family:monospace;font-weight:bold">{final}</td>
             <td style="color:#555;font-size:12px">{escape(winner)}</td>

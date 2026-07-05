@@ -130,13 +130,40 @@ def _process_match(tracker: Dict) -> Optional[Dict]:
             "wickets": r.get("wickets"),
         }
 
-    # Final scores from the last row of each innings
-    inn1_rows = [r for r in rows if r.get("innings") == 1]
-    inn2_rows = [r for r in rows if r.get("innings") == 2]
-    final_inn1_score   = inn1_rows[-1].get("score")   if inn1_rows else None
-    final_inn1_wickets = inn1_rows[-1].get("wickets") if inn1_rows else None
-    final_inn2_score   = inn2_rows[-1].get("score")   if inn2_rows else None
-    final_inn2_wickets = inn2_rows[-1].get("wickets") if inn2_rows else None
+    # Final scores — handle both int and string innings field, and both
+    # "score" (older trackers) and "runs" (newer trackers) field names.
+    def _inn_num(r: Dict) -> Optional[int]:
+        v = r.get("innings")
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    def _score_of(r: Dict) -> Optional[int]:
+        """Return cumulative score from row, trying both field names."""
+        v = r.get("runs") if r.get("runs") is not None else r.get("score")
+        try:
+            return int(str(v).split("/")[0]) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _wickets_of(r: Dict) -> Optional[int]:
+        v = r.get("wickets")
+        try:
+            return int(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    inn1_rows = [r for r in rows if _inn_num(r) == 1]
+    inn2_rows = [r for r in rows if _inn_num(r) == 2]
+    final_inn1_score   = _score_of(inn1_rows[-1])   if inn1_rows else None
+    final_inn1_wickets = _wickets_of(inn1_rows[-1]) if inn1_rows else None
+    final_inn2_score   = _score_of(inn2_rows[-1])   if inn2_rows else None
+    final_inn2_wickets = _wickets_of(inn2_rows[-1]) if inn2_rows else None
+
+    # Venue
+    _sd    = tracker.get("stadium_data") or {}
+    venue  = str(tracker.get("venue") or _sd.get("name") or "").strip()
 
     # Swing = how far the biggest peak went above even-money
     max_peak  = max(home_peak, away_peak)
@@ -158,6 +185,7 @@ def _process_match(tracker: Dict) -> Optional[Dict]:
         "match_date_utc":   (tracker.get("match_date_utc") or "")[:10],
         "league_id":        tracker.get("league_id"),
         "league_name":      tracker.get("league_name") or "",
+        "venue":            venue,
         "home_team":        home_team,
         "away_team":        away_team,
         "winner":           winner,
