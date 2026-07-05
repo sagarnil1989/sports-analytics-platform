@@ -91,12 +91,14 @@ def view_odds_movement_html(req: func.HttpRequest) -> func.HttpResponse:
         profit = m.get("net_profit_if_both_backed")
         profit_s = f"+{profit:.3f}" if profit and profit > 0 else ("—" if profit is None else f"{profit:.3f}")
         profit_c = "#2d7a2d" if profit and profit > 0 else "#999"
-        sw      = m.get("max_swing", 0)
-        winner  = m.get("winner") or "—"
-        home_at = _state_label(m.get("peak_home_at") or {})
-        away_at = _state_label(m.get("peak_away_at") or {})
-        final   = _final_score(m)
-        eid     = escape(str(m.get("event_id") or ""))
+        sw        = m.get("max_swing", 0)
+        winner    = m.get("winner") or "—"
+        home_team = escape(str(m.get("home_team") or "Home"))
+        away_team = escape(str(m.get("away_team") or "Away"))
+        home_at   = _state_label(m.get("peak_home_at") or {})
+        away_at   = _state_label(m.get("peak_away_at") or {})
+        final     = _final_score(m)
+        eid       = escape(str(m.get("event_id") or ""))
         tracker_url = f"/api/matches/{eid}/innings-tracker/view"
         rows1 += f"""<tr>
             <td style="white-space:nowrap">{escape(m.get("match_date_utc","")[:10])}</td>
@@ -108,10 +110,12 @@ def view_odds_movement_html(req: func.HttpRequest) -> func.HttpResponse:
             <td style="font-family:monospace;font-weight:bold">{final}</td>
             <td style="color:#555;font-size:12px">{escape(winner)}</td>
             <td>
+                <span style="font-size:11px;color:#555;font-weight:bold">{home_team}</span><br>
                 <span style="font-family:monospace;font-weight:bold">{m.get("peak_home_odds","—")}</span><br>
                 <small style="color:#888;font-size:11px">{escape(home_at)}</small>
             </td>
             <td>
+                <span style="font-size:11px;color:#555;font-weight:bold">{away_team}</span><br>
                 <span style="font-family:monospace;font-weight:bold">{m.get("peak_away_odds","—")}</span><br>
                 <small style="color:#888;font-size:11px">{escape(away_at)}</small>
             </td>
