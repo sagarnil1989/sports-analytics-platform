@@ -20,6 +20,7 @@ def view_home(req: func.HttpRequest) -> func.HttpResponse:
     <body>
         <h1>🏏 Cricket Analytics Platform</h1>
         <p>Browse upcoming and historical betting data</p>
+        <div class="card" style="border-left:4px solid #c00;"><a href="/api/live/view" style="color:#c00;">🔴 Live Matches</a><p>Currently in-progress matches with real-time ML predictions — Over/Under and Win Predictor updated every 60 s</p></div>
         <div class="card"><a href="/api/prematch/view">Upcoming Matches</a><p>Prematch odds and markets before the game starts</p></div>
         <div class="card"><a href="/api/ended/view">Ended Matches</a><p>Recently finished matches with final results</p></div>
         <h2 style="margin:24px 0 4px; color:#333;">T20</h2>

@@ -39,6 +39,7 @@ from views import (
     view_odds_movement_html,
     view_win_predictor_whatif_html,
     view_win_predictor_whatif_post,
+    view_live_matches_html,
 )
 
 app = func.FunctionApp()
@@ -176,6 +177,11 @@ def get_home(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def root(req: func.HttpRequest) -> func.HttpResponse:
     return view_home(req)
+
+
+@app.route(route="live/view", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_live_matches(req: func.HttpRequest) -> func.HttpResponse:
+    return view_live_matches_html(req)
 
 
 @app.route(route="ml/win-predictor", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
