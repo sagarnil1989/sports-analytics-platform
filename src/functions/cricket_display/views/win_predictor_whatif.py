@@ -9,10 +9,6 @@ user-supplied aggregate inputs (venue, teams, phase scores, odds), fills
 per-over granular features with their training-set medians, and returns
 P(chase wins).
 """
-import io
-import pickle
-import numpy as np
-
 from .common import (
     json, logging, escape, Any, Dict, List, Optional,
     func,
@@ -42,6 +38,7 @@ _CHECKPOINT_OVER = {
 
 def _load_model_obj(gold, checkpoint: str) -> Optional[Dict]:
     try:
+        import pickle
         raw = gold.get_blob_client(f"{_MODEL_PREFIX}/{checkpoint}.pkl").download_blob().readall()
         return pickle.loads(raw)
     except Exception:
@@ -256,6 +253,7 @@ def view_win_predictor_whatif_post(req: func.HttpRequest) -> func.HttpResponse:
         else:
             X, feature_details = _build_feature_vector(body, features, encodings)
 
+        import numpy as np
         X_arr = np.array(X, dtype=float).reshape(1, -1)
         model = model_obj["model"]
         proba = model.predict_proba(X_arr)[0]
