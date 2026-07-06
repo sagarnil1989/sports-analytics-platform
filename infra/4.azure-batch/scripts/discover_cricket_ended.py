@@ -63,6 +63,9 @@ def _ul(container, path, data):
 
 def _detect_format(match_name="", league_name="", extra_length=None, max_over=0, score_ss=""):
     combined = f"{match_name} {league_name}".lower()
+    # Test must come before ODI/T20 — "test match" contains neither "t20" nor "odi"
+    if "test" in combined or "test match" in combined:
+        return "Test"
     if "t20" in combined or "twenty20" in combined:
         return "T20"
     if "odi" in combined or "one day" in combined:
@@ -73,13 +76,20 @@ def _detect_format(match_name="", league_name="", extra_length=None, max_over=0,
         if length == 50: return "ODI"
     except (TypeError, ValueError):
         pass
+    if max_over > 50:
+        return "Test"
     if max_over > 0:
         return "T20" if max_over <= 20 else "ODI"
     if score_ss:
         import re as _re
         overs_in_ss = [float(m) for m in _re.findall(r'\((\d+(?:\.\d+)?)\)', score_ss)]
         if overs_in_ss:
+            if max(overs_in_ss) > 50: return "Test"
             return "T20" if max(overs_in_ss) <= 20 else "ODI"
+        # Test scores often have 4 comma-separated parts (4 innings)
+        parts = [p.strip() for p in score_ss.replace("-", ",").split(",") if p.strip()]
+        if len(parts) >= 3:
+            return "Test"
     return ""
 
 def _fetch_final_score(event_id):

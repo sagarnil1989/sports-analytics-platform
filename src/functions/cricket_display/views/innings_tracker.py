@@ -437,8 +437,13 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
         final_ss = final_ss.replace("-", ",")
 
         rows_data: List[Dict[str, Any]] = tracker.get("rows", [])
-        inn1_rows = [r for r in rows_data if r.get("innings", 1) == 1]
-        inn2_rows = [r for r in rows_data if r.get("innings", 1) == 2]
+        inn1_rows = [r for r in rows_data if r.get("innings") in (1, "1")]
+        inn2_rows = [r for r in rows_data if r.get("innings") in (2, "2")]
+        inn3_rows = [r for r in rows_data if r.get("innings") in (3, "3")]
+        inn4_rows = [r for r in rows_data if r.get("innings") in (4, "4")]
+        is_test   = bool(inn3_rows or inn4_rows or
+                         "test" in match_name.lower() or
+                         "test" in league.lower())
 
         def _last_over(rows):
             for r in reversed(rows):
@@ -453,7 +458,7 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
         # Detect whether away team batted first
         inn1_bat_team = None
         for r in rows_data:
-            if r.get("innings") == 1 and r.get("batting_team"):
+            if r.get("innings") in (1, "1") and r.get("batting_team"):
                 inn1_bat_team = str(r["batting_team"]).strip()
                 break
         away_batted_first = bool(inn1_bat_team and away_team and inn1_bat_team == away_team.strip())
@@ -467,14 +472,14 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
 
         scoreboard_html = ""
         if final_ss and "," in final_ss:
-            sc_parts = [p.strip() for p in final_ss.split(",", 1)]
+            sc_parts = [p.strip() for p in final_ss.split(",")]
             def _parse_score(s):
                 m = _re.match(r'^(\d+)(?:/(\d+))?', s)
                 if m:
                     return int(m.group(1)), int(m.group(2)) if m.group(2) else 0, s
                 return None, 0, s
             home_runs, home_wkts, home_raw = _parse_score(sc_parts[0])
-            away_runs, away_wkts, away_raw = _parse_score(sc_parts[1])
+            away_runs, away_wkts, away_raw = _parse_score(sc_parts[1] if len(sc_parts) > 1 else "")
 
             # Assign 1st/2nd innings display based on batting order
             if away_batted_first:
@@ -515,23 +520,51 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
             else:
                 venue_line = f'<div class="sb-venue" style="color:#aaa;">📍 Stadium unknown — <a href="/api/mgmt/stadium-override?event_id={escape(str(event_id))}">Add override</a></div>'
 
-            scoreboard_html = f"""
-            <div class="scoreboard">
-                <div class="sb-innings">
-                    <div class="sb-team-score">
-                        <span class="sb-teamname">{escape(inn1_team)}</span>
-                        <span class="sb-runs">{escape(inn1_raw)}</span>
-                        <span class="sb-overs">{_ov_str(inn1_ov, inn1_wkts)}</span>
+            if is_test and len(sc_parts) >= 3:
+                # Test match scoreboard: show each innings separately
+                # sc_parts order: [team_a_inn1, team_b_inn1, team_a_inn2?, team_b_inn2?]
+                # Batting order: team_a batted 1st (inn1+inn3), team_b batted 2nd (inn2+inn4)
+                team_a = escape(inn1_team if not away_batted_first else inn2_team)
+                team_b = escape(inn2_team if not away_batted_first else inn1_team)
+                def _inn_cell(raw):
+                    return f'<span style="font-family:monospace;font-size:15px;font-weight:bold">{escape(raw)}</span>'
+                inn_rows_sb = ""
+                for idx, label in enumerate(["1st Inn", "2nd Inn", "3rd Inn", "4th Inn"]):
+                    if idx >= len(sc_parts):
+                        break
+                    team = team_a if idx % 2 == 0 else team_b
+                    inn_rows_sb += (
+                        f'<div style="display:flex;gap:16px;align-items:baseline;margin-bottom:4px">'
+                        f'<span style="font-size:11px;color:#888;min-width:55px">{label}</span>'
+                        f'<span style="font-size:12px;color:#555;min-width:100px">{team}</span>'
+                        f'{_inn_cell(sc_parts[idx])}'
+                        f'</div>'
+                    )
+                scoreboard_html = f"""
+                <div class="scoreboard">
+                    <div style="font-size:11px;font-weight:bold;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Test Match</div>
+                    {inn_rows_sb}
+                    {f'<div class="sb-result">{result_text}</div>' if result_text else ""}
+                    {venue_line}
+                </div>"""
+            else:
+                scoreboard_html = f"""
+                <div class="scoreboard">
+                    <div class="sb-innings">
+                        <div class="sb-team-score">
+                            <span class="sb-teamname">{escape(inn1_team)}</span>
+                            <span class="sb-runs">{escape(inn1_raw)}</span>
+                            <span class="sb-overs">{_ov_str(inn1_ov, inn1_wkts)}</span>
+                        </div>
+                        <div class="sb-team-score">
+                            <span class="sb-teamname">{escape(inn2_team)}</span>
+                            <span class="sb-runs">{escape(inn2_raw)}</span>
+                            <span class="sb-overs">{_ov_str(inn2_ov, inn2_wkts)}</span>
+                        </div>
                     </div>
-                    <div class="sb-team-score">
-                        <span class="sb-teamname">{escape(inn2_team)}</span>
-                        <span class="sb-runs">{escape(inn2_raw)}</span>
-                        <span class="sb-overs">{_ov_str(inn2_ov, inn2_wkts)}</span>
-                    </div>
-                </div>
-                {f'<div class="sb-result">{result_text}</div>' if result_text else ""}
-                {venue_line}
-            </div>"""
+                    {f'<div class="sb-result">{result_text}</div>' if result_text else ""}
+                    {venue_line}
+                </div>"""
         actual_total = tracker.get("actual_total")
         if actual_total is None and "_ended2" in dir() and _ended2:
             _es2 = parse_ss_final_scores(_ended2.get("score", ""))
@@ -615,9 +648,15 @@ def view_silver_innings_tracker_html(req: func.HttpRequest) -> func.HttpResponse
             # Innings divider
             if innings != prev_innings:
                 prev_innings = innings
-                inn_label = "1st Innings" if innings == 1 else f"2nd Innings (chasing {target})"
-                bat_label = escape(innings_batting.get(innings, bat_team))
-                bowl_label= escape(innings_bowling.get(innings, bowl_team))
+                _inn_ord = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th"}
+                if is_test:
+                    inn_label = f'{_inn_ord.get(innings, str(innings))} Innings'
+                elif innings == 1:
+                    inn_label = "1st Innings"
+                else:
+                    inn_label = f'2nd Innings (chasing {target})'
+                bat_label  = escape(innings_batting.get(innings, bat_team))
+                bowl_label = escape(innings_bowling.get(innings, bowl_team))
                 table_rows += f'<tr class="inn-divider"><td colspan="10">📌 {inn_label} — {bat_label} batting vs {bowl_label}</td></tr>'
 
             row_class = ""

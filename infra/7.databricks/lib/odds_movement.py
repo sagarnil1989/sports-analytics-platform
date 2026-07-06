@@ -41,14 +41,26 @@ def _scan_event_ids(gold) -> List[str]:
     ]
 
 
-def _is_t20(rows: List[Dict]) -> bool:
+def _match_format(rows: List[Dict]) -> str:
+    """Infer match format from the max completed over across all innings."""
     max_over = 0
     for r in rows:
         try:
             max_over = max(max_over, int(str(r.get("over") or "0").split(".")[0]))
         except Exception:
             pass
-    return 15 <= max_over <= 20
+    if max_over > 50:
+        return "Test"
+    if max_over > 20:
+        return "ODI"
+    if max_over >= 15:
+        return "T20"
+    return "Unknown"
+
+
+def _is_t20(rows: List[Dict]) -> bool:
+    """Legacy alias kept for callers outside this module."""
+    return _match_format(rows) == "T20"
 
 
 def _infer_winner(rows: List[Dict], home_team: str, away_team: str) -> Optional[str]:
@@ -74,8 +86,9 @@ def _infer_winner(rows: List[Dict], home_team: str, away_team: str) -> Optional[
 def _process_match(tracker: Dict) -> Optional[Dict]:
     """Compute odds swing metrics for one match. Returns None if unusable."""
     rows: List[Dict] = tracker.get("rows") or []
-    if not rows or not _is_t20(rows):
-        return None
+    fmt = _match_format(rows)
+    if not rows or fmt == "Unknown":
+        return None   # too few overs captured to be useful
 
     home_team  = tracker.get("home_team_name") or ""
     away_team  = tracker.get("away_team_name") or ""
@@ -186,6 +199,7 @@ def _process_match(tracker: Dict) -> Optional[Dict]:
         "league_id":        tracker.get("league_id"),
         "league_name":      tracker.get("league_name") or "",
         "venue":            venue,
+        "format":           fmt,
         "home_team":        home_team,
         "away_team":        away_team,
         "winner":           winner,

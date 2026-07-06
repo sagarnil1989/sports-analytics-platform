@@ -18,6 +18,8 @@ def _load_match_overrides(gold) -> Dict[str, Dict]:
 
 def _detect_format(match_name="", league_name="", score_ss=""):
     combined = f"{match_name} {league_name}".lower()
+    if "test" in combined or "test match" in combined:
+        return "Test"
     if "t20" in combined or "twenty20" in combined:
         return "T20"
     if "odi" in combined or "one day" in combined:
@@ -25,7 +27,11 @@ def _detect_format(match_name="", league_name="", score_ss=""):
     if score_ss:
         overs = [float(m) for m in _re.findall(r'\((\d+(?:\.\d+)?)\)', score_ss)]
         if overs:
+            if max(overs) > 50: return "Test"
             return "T20" if max(overs) <= 20 else "ODI"
+        parts = [p.strip() for p in score_ss.replace("-", ",").split(",") if p.strip()]
+        if len(parts) >= 3:
+            return "Test"
     return ""
 
 
@@ -144,9 +150,10 @@ def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
     try:
         matches = _build_matches()
 
-        t20_matches = [m for m in matches if m.get("format") == "T20"]
-        odi_matches = [m for m in matches if m.get("format") == "ODI"]
-        oth_matches = [m for m in matches if m.get("format") not in ("T20", "ODI")]
+        t20_matches  = [m for m in matches if m.get("format") == "T20"]
+        odi_matches  = [m for m in matches if m.get("format") == "ODI"]
+        test_matches = [m for m in matches if m.get("format") == "Test"]
+        oth_matches  = [m for m in matches if m.get("format") not in ("T20", "ODI", "Test")]
 
         def _sort(lst):
             return sorted(lst, key=lambda m: m.get("event_time_utc") or "", reverse=True)
@@ -171,7 +178,10 @@ def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
                 league_esc  = escape(league_name)
                 actual_fmt  = str(m.get("format") or fmt or "")
                 fmt_esc     = escape(actual_fmt)
-                badge_cls   = "badge-t20" if actual_fmt == "T20" else ("badge-odi" if actual_fmt == "ODI" else "badge-other")
+                badge_cls   = ("badge-t20" if actual_fmt == "T20"
+                               else "badge-odi"  if actual_fmt == "ODI"
+                               else "badge-test" if actual_fmt == "Test"
+                               else "badge-other")
                 gender      = escape(str(m.get("gender") or "M"))
                 score_raw   = str(m.get("score") or "")
                 score_disp  = escape(_fmt_score(score_raw) or "-")
@@ -197,15 +207,18 @@ def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
                 """
             return html
 
-        t20_count = len(t20_matches)
-        odi_count = len(odi_matches)
-        oth_count = len(oth_matches)
-        total     = len(matches)
+        t20_count  = len(t20_matches)
+        odi_count  = len(odi_matches)
+        test_count = len(test_matches)
+        oth_count  = len(oth_matches)
+        total      = len(matches)
 
-        odi_tab_btn = (f'<button class="tab" onclick="filterFormat(\'ODI\', this)">ODI ({odi_count})</button>'
-                       if odi_count else "")
-        oth_tab_btn = (f'<button class="tab" onclick="filterFormat(\'Other\', this)">Other ({oth_count})</button>'
-                       if oth_count else "")
+        odi_tab_btn  = (f'<button class="tab" onclick="filterFormat(\'ODI\', this)">ODI ({odi_count})</button>'
+                        if odi_count else "")
+        test_tab_btn = (f'<button class="tab" onclick="filterFormat(\'Test\', this)">Test ({test_count})</button>'
+                        if test_count else "")
+        oth_tab_btn  = (f'<button class="tab" onclick="filterFormat(\'Other\', this)">Other ({oth_count})</button>'
+                        if oth_count else "")
 
         rows_html = ""
         if t20_matches:
@@ -214,6 +227,9 @@ def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
         if odi_matches:
             rows_html += f'<tr class="format-header" data-format-header="ODI"><td colspan="13">ODI — {odi_count} matches</td></tr>'
             rows_html += _rows_html(_sort(odi_matches), "ODI")
+        if test_matches:
+            rows_html += f'<tr class="format-header" data-format-header="Test"><td colspan="13">Test — {test_count} matches</td></tr>'
+            rows_html += _rows_html(_sort(test_matches), "Test")
         if oth_matches:
             rows_html += f'<tr class="format-header" data-format-header="Other"><td colspan="13">Other — {oth_count} matches</td></tr>'
             rows_html += _rows_html(_sort(oth_matches), "")
@@ -239,6 +255,7 @@ def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
                              font-size: 13px; padding: 8px 10px; border-top: 2px solid #c7d7f5; }}
         .badge-t20   {{ background: #dbeafe; color: #1d4ed8; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }}
         .badge-odi   {{ background: #dcfce7; color: #15803d; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }}
+        .badge-test  {{ background: #fce7f3; color: #9d174d; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }}
         .badge-other {{ background: #fef9c3; color: #854d0e; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }}
         a {{ color: #2563eb; font-weight: 600; text-decoration: none; }}
         a:hover {{ text-decoration: underline; }}
@@ -261,12 +278,13 @@ def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
         <a href="/api/live/view" style="color:#c00;font-weight:bold;">🔴 Live</a>
     </nav>
     <h1>Ended Cricket Matches</h1>
-    <p class="hint">{total} total &nbsp;·&nbsp; <b>{t20_count} T20</b> &nbsp;·&nbsp; <b>{odi_count} ODI</b></p>
+    <p class="hint">{total} total &nbsp;·&nbsp; <b>{t20_count} T20</b> &nbsp;·&nbsp; <b>{odi_count} ODI</b> &nbsp;·&nbsp; <b>{test_count} Test</b></p>
 
     <div class="tab-bar">
         <button class="tab active" onclick="filterFormat('ALL', this)">All ({total})</button>
         <button class="tab" onclick="filterFormat('T20', this)">T20 ({t20_count})</button>
         {odi_tab_btn}
+        {test_tab_btn}
         {oth_tab_btn}
     </div>
 
@@ -322,7 +340,7 @@ def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
         }}
 
         var BADGE_MAP = {{
-            T20: 'badge-t20', ODI: 'badge-odi', Other: 'badge-other', '': 'badge-other'
+            T20: 'badge-t20', ODI: 'badge-odi', Test: 'badge-test', Other: 'badge-other', '': 'badge-other'
         }};
 
         document.querySelectorAll('td.ec').forEach(function(td) {{
@@ -337,7 +355,7 @@ def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
             var inp;
             if (field === 'format') {{
                 inp = document.createElement('select');
-                ['T20','ODI','Other'].forEach(function(v) {{
+                ['T20','ODI','Test','Other'].forEach(function(v) {{
                     var o = document.createElement('option');
                     o.value = v; o.textContent = v;
                     if (v === raw) o.selected = true;
