@@ -23,11 +23,18 @@ from azure.storage.blob import BlobServiceClient
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-CONN_STR     = os.environ.get("DATA_STORAGE_CONNECTION_STRING", "")
+CONN_STR      = os.environ.get("DATA_STORAGE_CONNECTION_STRING", "")
 BETSAPI_TOKEN = os.environ.get("BETSAPI_TOKEN", "162910-KsjYPbwBieot6s")
-BRONZE       = "bronze"
-GOLD         = "gold"
-DRY_RUN      = "--dry-run" in sys.argv   # pass --dry-run to preview without writing
+BRONZE        = "bronze"
+GOLD          = "gold"
+DRY_RUN       = "--dry-run" in sys.argv   # pass --dry-run to preview without writing
+FORCE_ALL     = "--force-all" in sys.argv  # re-fetch every blob, even if valid
+
+# --force-ids 11180248,12037245  → re-fetch specific event IDs regardless of validity
+FORCE_IDS: set = set()
+for i, arg in enumerate(sys.argv):
+    if arg == "--force-ids" and i + 1 < len(sys.argv):
+        FORCE_IDS = {e.strip() for e in sys.argv[i + 1].split(",") if e.strip()}
 
 if not CONN_STR:
     print("ERROR: DATA_STORAGE_CONNECTION_STRING not set.")
@@ -106,11 +113,13 @@ for blob_name in sorted(all_blobs):
     total += 1
 
     existing = _dl(bronze, blob_name)
-    if _is_valid(existing):
+    force    = FORCE_ALL or eid in FORCE_IDS
+
+    if _is_valid(existing) and not force:
         skipped += 1
         continue
 
-    # Bad data — show what we have
+    # Bad data or forced re-fetch — show current value
     old_ss = "MISSING"
     if existing:
         ef_body  = (existing.get("response") or {}).get("body") or {}
@@ -118,7 +127,8 @@ for blob_name in sorted(all_blobs):
         if results:
             old_ss = results[0].get("ss") or "(empty)"
 
-    print(f"  NEEDS REPAIR: {eid}  current ss={old_ss!r}")
+    reason = "FORCED" if force and _is_valid(existing) else "NEEDS REPAIR"
+    print(f"  {reason}: {eid}  current ss={old_ss!r}")
 
     if DRY_RUN:
         print(f"    [dry-run] would re-fetch")
@@ -137,8 +147,12 @@ for blob_name in sorted(all_blobs):
     time_status = str(result.get("time_status") or "")
     ss         = result.get("ss") or ""
 
-    if not results or time_status != "3" or not ss:
-        print(f"    [SKIP] API returned time_status={time_status!r}  ss={ss!r}")
+    if not results or time_status != "3":
+        print(f"    [SKIP] API returned time_status={time_status!r}  ss={ss!r} — not ended")
+        api_not_ended += 1
+        continue
+    if not ss:
+        print(f"    [SKIP] API returned time_status=3 but ss is empty — BetsAPI has no score")
         api_not_ended += 1
         continue
 
