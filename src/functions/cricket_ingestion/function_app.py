@@ -2,7 +2,7 @@ import azure.functions as func
 
 from capture_inplay import bronze_discover_cricket_inplay, bronze_capture_cricket_inplay_snapshot
 from capture_prematch import bronze_discover_cricket_upcoming, bronze_capture_cricket_prematch_odds
-from capture_ended import bronze_capture_ended_event_view, bronze_repair_event_finals
+from capture_ended import bronze_capture_ended_event_view
 from prematch_page_builder import gold_build_prematch_pages
 
 app = func.FunctionApp()
@@ -47,22 +47,3 @@ def capture_ended_event_view(timer: func.TimerRequest) -> None:
     bronze_capture_ended_event_view()
 
 
-@app.route(route="admin/repair-event-finals", methods=["GET", "POST"], auth_level=func.AuthLevel.ANONYMOUS)
-def repair_event_finals(req: func.HttpRequest) -> func.HttpResponse:
-    """Admin: scan ALL event_final blobs, re-fetch any with wrong/missing scores,
-    then rebuild the ended index. Safe to call multiple times — skips valid blobs.
-    Takes ~30-60 s per 100 bad matches due to BetsAPI rate-limit sleep."""
-    import json as _json
-    try:
-        result = bronze_repair_event_finals()
-        return func.HttpResponse(
-            _json.dumps(result, indent=2),
-            mimetype="application/json",
-        )
-    except Exception as e:
-        import traceback
-        return func.HttpResponse(
-            _json.dumps({"error": str(e), "trace": traceback.format_exc()}),
-            mimetype="application/json",
-            status_code=500,
-        )
