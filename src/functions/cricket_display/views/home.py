@@ -34,6 +34,7 @@ def view_home(req: func.HttpRequest) -> func.HttpResponse:
         <div class="card"><a href="/api/ml/score-matrix">Score Feature Matrix</a><p>All matches × score-predictor features — three cutoff tabs (over 6 / 10 / 16), train/test highlighted</p></div>
         <div class="card"><a href="/api/mgmt/leagues/view">League Filter</a><p>Select which leagues to capture — excluded leagues skip bronze, silver and gold entirely</p></div>
         <div class="card"><a href="/api/mgmt/stadium-override">Stadium Overrides</a><p>Manually set a stadium name for a match when venue data is missing</p></div>
+        <div class="card" style="border-left:4px solid #e67e00;"><a href="https://func-ramanuj-ingestion.azurewebsites.net/api/admin/repair-event-finals" target="_blank" style="color:#e67e00;">🔧 Repair Final Scores</a><p>Re-fetches BetsAPI final score for any match whose event_final blob has a missing or stale score. Rebuilds the ended index. Run once after deploying the fix — safe to call multiple times.</p></div>
         <h3 style="margin:20px 0 4px; color:#555; font-size:15px; text-transform:uppercase; letter-spacing:1px;">Analysis</h3>
         <div class="card"><a href="/api/analysis/odds-movement">Odds Movement Analysis</a><p>Per-match peak odds, swing magnitude, double-opportunity flag and net profit — aggregated by league and team to find which competitions produce the biggest in-play swings</p></div>
         <h3 style="margin:20px 0 4px; color:#555; font-size:15px; text-transform:uppercase; letter-spacing:1px;">Hypothesis</h3>

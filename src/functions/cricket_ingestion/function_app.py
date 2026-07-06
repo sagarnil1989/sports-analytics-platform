@@ -47,7 +47,7 @@ def capture_ended_event_view(timer: func.TimerRequest) -> None:
     bronze_capture_ended_event_view()
 
 
-@app.route(route="admin/repair-event-finals", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+@app.route(route="admin/repair-event-finals", methods=["GET", "POST"], auth_level=func.AuthLevel.ANONYMOUS)
 def repair_event_finals(req: func.HttpRequest) -> func.HttpResponse:
     """Admin: scan ALL event_final blobs, re-fetch any with wrong/missing scores,
     then rebuild the ended index. Safe to call multiple times — skips valid blobs.
