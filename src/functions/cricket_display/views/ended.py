@@ -186,10 +186,14 @@ def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
                 score_raw   = str(m.get("score") or "")
                 score_disp  = escape(_fmt_score(score_raw) or "-")
                 stadium     = escape(str(m.get("stadium") or ""))
+                match_name_d= escape(str(m.get("match_name") or ""))
+                date_val    = escape(str(m.get("event_time_utc") or "")[:10])
                 has_ov      = m.get("has_override", False)
                 row_style   = ' style="background:#fffde7"' if has_ov else ""
                 html += f"""
-                <tr data-league="{league_esc}" data-format="{fmt_esc}"{row_style}>
+                <tr data-league="{league_esc}" data-format="{fmt_esc}"
+                    data-gender="{gender}" data-date="{date_val}"
+                    data-stadium="{stadium.lower()}" data-match="{match_name_d.lower()}"{row_style}>
                     <td>{event_id}</td>
                     <td>{escape(str(m.get("fi") or "-"))}</td>
                     {_editable(event_id, "match_name", escape(str(m.get("match_name") or "-")))}
@@ -241,8 +245,21 @@ def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
     <style>
         body {{ font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }}
         .hint {{ color: #666; margin-bottom: 16px; font-size: 13px; }}
-        .filter-bar {{ margin-bottom: 16px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }}
-        select {{ padding: 8px 12px; font-size: 14px; border: 1px solid #ccc; border-radius: 6px; }}
+        .filter-bar {{ margin-bottom: 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }}
+        .filter-bar label {{ font-size: 12px; font-weight: 700; color: #555; white-space: nowrap; }}
+        .filter-bar input[type=text], .filter-bar input[type=date] {{
+            padding: 6px 10px; font-size: 13px; border: 1px solid #ccc; border-radius: 6px;
+            background: white; }}
+        .filter-bar input[type=text] {{ width: 160px; }}
+        .filter-bar input[type=date] {{ width: 140px; }}
+        select {{ padding: 6px 10px; font-size: 13px; border: 1px solid #ccc; border-radius: 6px; }}
+        .gender-btn {{ padding: 5px 12px; border: 1px solid #ccc; border-radius: 6px; background: white;
+                       cursor: pointer; font-size: 13px; font-weight: 600; color: #555; }}
+        .gender-btn.active {{ background: #1e293b; color: white; border-color: #1e293b; }}
+        .clear-btn {{ padding: 6px 14px; border: 1px solid #dc2626; border-radius: 6px; background: white;
+                      cursor: pointer; font-size: 13px; color: #dc2626; font-weight: 600; }}
+        .clear-btn:hover {{ background: #fee2e2; }}
+        .match-count {{ font-size: 12px; color: #888; font-style: italic; }}
         .tab-bar {{ display: flex; gap: 8px; margin-bottom: 16px; }}
         .tab {{ padding: 7px 18px; border-radius: 20px; border: 1px solid #ccc; background: #fff;
                 cursor: pointer; font-size: 14px; font-weight: 600; color: #444; }}
@@ -289,8 +306,22 @@ def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
     </div>
 
     <div class="filter-bar">
-        <label><b>League:</b></label>
+        <label>Match:</label>
+        <input type="text" id="matchFilter" placeholder="Search match…" oninput="applyFilters()">
+        <label>League:</label>
         <select id="leagueFilter" onchange="applyFilters()">{league_options}</select>
+        <label>Gender:</label>
+        <button class="gender-btn active" id="genderAll" onclick="setGender('ALL',this)">All</button>
+        <button class="gender-btn" id="genderM" onclick="setGender('M',this)">Men</button>
+        <button class="gender-btn" id="genderF" onclick="setGender('F',this)">Women</button>
+        <label>Stadium:</label>
+        <input type="text" id="stadiumFilter" placeholder="Search stadium…" oninput="applyFilters()">
+        <label>Date from:</label>
+        <input type="date" id="dateFrom" onchange="applyFilters()">
+        <label>to:</label>
+        <input type="date" id="dateTo" onchange="applyFilters()">
+        <button class="clear-btn" onclick="clearFilters()">✕ Clear</button>
+        <span class="match-count" id="matchCount"></span>
     </div>
 
     <p class="hint" style="margin-top:0;font-size:12px;">💡 Click any <b>Match, League, Format, Gender, Score</b> or <b>Stadium</b> cell to edit it inline. Changes are saved immediately. Rows with overrides are highlighted in yellow.</p>
@@ -307,18 +338,52 @@ def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
 
     <script>
         var activeFormat = 'ALL';
+        var activeGender = 'ALL';
+
         function filterFormat(fmt, btn) {{
             activeFormat = fmt;
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             btn.classList.add('active');
             applyFilters();
         }}
+        function setGender(g, btn) {{
+            activeGender = g;
+            document.querySelectorAll('.gender-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            applyFilters();
+        }}
+        function clearFilters() {{
+            document.getElementById('matchFilter').value   = '';
+            document.getElementById('leagueFilter').value  = 'ALL';
+            document.getElementById('stadiumFilter').value = '';
+            document.getElementById('dateFrom').value      = '';
+            document.getElementById('dateTo').value        = '';
+            activeFormat = 'ALL';
+            activeGender = 'ALL';
+            document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', i===0));
+            document.getElementById('genderAll').classList.add('active');
+            document.getElementById('genderM').classList.remove('active');
+            document.getElementById('genderF').classList.remove('active');
+            applyFilters();
+        }}
         function applyFilters() {{
-            var league = document.getElementById('leagueFilter').value;
+            var league  = document.getElementById('leagueFilter').value;
+            var match   = document.getElementById('matchFilter').value.toLowerCase().trim();
+            var stadium = document.getElementById('stadiumFilter').value.toLowerCase().trim();
+            var dateFrom= document.getElementById('dateFrom').value;
+            var dateTo  = document.getElementById('dateTo').value;
+            var visible = 0;
             document.querySelectorAll('tr[data-format]').forEach(function(r) {{
-                var fmtOk    = activeFormat === 'ALL' || r.dataset.format === activeFormat;
-                var leagueOk = league === 'ALL' || r.dataset.league === league;
-                r.style.display = (fmtOk && leagueOk) ? '' : 'none';
+                var fmtOk     = activeFormat === 'ALL' || r.dataset.format === activeFormat;
+                var leagueOk  = league === 'ALL'       || r.dataset.league  === league;
+                var genderOk  = activeGender === 'ALL' || r.dataset.gender  === activeGender;
+                var matchOk   = !match   || (r.dataset.match   || '').includes(match);
+                var stadiumOk = !stadium || (r.dataset.stadium || '').includes(stadium);
+                var d         = r.dataset.date || '';
+                var dateOk    = (!dateFrom || d >= dateFrom) && (!dateTo || d <= dateTo);
+                var show = fmtOk && leagueOk && genderOk && matchOk && stadiumOk && dateOk;
+                r.style.display = show ? '' : 'none';
+                if (show) visible++;
             }});
             document.querySelectorAll('tr[data-format-header]').forEach(function(hdr) {{
                 var fmt = hdr.dataset.formatHeader;
@@ -326,6 +391,8 @@ def view_ended_matches_html(req: func.HttpRequest) -> func.HttpResponse:
                                       .some(r => r.style.display !== 'none');
                 hdr.style.display = hasSibling ? '' : 'none';
             }});
+            var cEl = document.getElementById('matchCount');
+            if (cEl) cEl.textContent = visible < {total} ? visible + ' matches shown' : '';
         }}
 
         // ---- Inline editing ----
