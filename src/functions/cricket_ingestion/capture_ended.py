@@ -169,25 +169,35 @@ def bronze_discover_cricket_ended() -> None:
     }))
 
 
+def _event_final_is_valid(payload: Optional[Dict]) -> bool:
+    """Return True only if the stored event_final has time_status=3 AND a non-empty ss."""
+    if not payload:
+        return False
+    ef_body   = (payload.get("response") or {}).get("body") or {}
+    results   = ef_body.get("results") or payload.get("results") or []
+    if not results:
+        return False
+    r = results[0]
+    return str(r.get("time_status") or "") == "3" and bool(r.get("ss"))
+
+
 def bronze_capture_ended_event_view() -> None:
     """Capture /v1/event/view for events whose latest inplay snapshot is > 1 hr old.
 
-    Scans bronze inplay_snapshot for all tracked event_ids. If the most recent
-    snapshot blob for an event is older than 1 hour (no new data arriving = match
-    likely over) AND no event_final file exists yet, calls BetsAPI /v1/event/view.
-    If time_status=3 (ended), writes the full response to:
-        bronze/betsapi/event_final/event_id={id}/event_view.json
+    Scans bronze inplay_snapshot for all tracked event_ids. For each candidate:
+      - If no event_final blob exists → fetch and write.
+      - If event_final exists but has empty ss or time_status != 3 (stale/wrong
+        data written mid-match) → re-fetch and OVERWRITE with the correct score.
+      - If event_final exists and is valid (time_status=3 + non-empty ss) → skip.
 
-    Idempotent — skips any event_id whose event_final file already exists.
-    Source is pure bronze — no dependency on silver or gold.
+    This replaces the old simple idempotency check that let stale blobs persist
+    permanently and blocked future corrections.
     """
     bronze = get_bronze_container_client()
     sport_id = get_env("SPORT_ID", "3")
     now = utc_now()
     cutoff = now - timedelta(hours=1)
 
-    # Scan inplay snapshots — track latest blob last_modified per event_id.
-    # No file downloads needed; last_modified comes from list metadata.
     prefix = f"betsapi/inplay_snapshot/sport_id={sport_id}/event_id="
     latest_ts: Dict[str, Any] = {}
     for blob in bronze.list_blobs(name_starts_with=prefix):
@@ -199,7 +209,6 @@ def bronze_capture_ended_event_view() -> None:
         if eid not in latest_ts or blob.last_modified > latest_ts[eid]:
             latest_ts[eid] = blob.last_modified
 
-    # Events whose latest snapshot is older than 1 hour = likely ended
     candidates = [eid for eid, ts in latest_ts.items() if ts <= cutoff]
 
     logging.info(json.dumps({
@@ -208,15 +217,19 @@ def bronze_capture_ended_event_view() -> None:
         "candidates_over_1hr": len(candidates),
     }))
 
-    created = skipped = not_ended = failed = 0
+    created = repaired = skipped = not_ended = failed = 0
 
     for eid in sorted(candidates):
         final_blob = f"betsapi/event_final/event_id={eid}/event_view.json"
 
-        if blob_exists(bronze, final_blob):
+        # Check existing blob validity — only skip if data is good
+        existing = download_json(bronze, final_blob) if blob_exists(bronze, final_blob) else None
+        if existing is not None and _event_final_is_valid(existing):
             skipped += 1
             continue
 
+        # Existing blob is missing, empty, or has wrong data — (re-)fetch
+        is_repair = existing is not None
         try:
             payload = call_betsapi("/v1/event/view", {"event_id": eid})
             results = extract_results(payload)
@@ -224,39 +237,120 @@ def bronze_capture_ended_event_view() -> None:
             time_status = str(result.get("time_status") or "")
             ss = result.get("ss") or ""
 
-            logging.warning(json.dumps({
-                "event": "bronze_event_final_api_response",
-                "event_id": eid,
-                "has_results": bool(results),
-                "time_status": time_status,
-                "ss": ss,
-            }))
-
             if not results or time_status != "3":
                 not_ended += 1
                 continue
 
-            upload_json(bronze, final_blob, payload, overwrite=False)
-            created += 1
-            logging.info(json.dumps({
-                "event": "bronze_event_final_created",
-                "event_id": eid,
-                "ss": ss,
-            }))
+            upload_json(bronze, final_blob, payload, overwrite=True)
+            if is_repair:
+                repaired += 1
+                logging.warning(json.dumps({
+                    "event": "bronze_event_final_repaired",
+                    "event_id": eid, "ss": ss,
+                }))
+            else:
+                created += 1
+                logging.info(json.dumps({
+                    "event": "bronze_event_final_created",
+                    "event_id": eid, "ss": ss,
+                }))
 
         except Exception:
             failed += 1
             logging.exception(json.dumps({
-                "event": "bronze_event_final_failed",
-                "event_id": eid,
+                "event": "bronze_event_final_failed", "event_id": eid,
             }))
 
     logging.warning(json.dumps({
         "event": "bronze_capture_ended_event_view_done",
         "created": created,
-        "skipped_already_exist": skipped,
+        "repaired_stale": repaired,
+        "skipped_valid": skipped,
         "not_ended_or_not_found": not_ended,
         "failed": failed,
     }))
 
     bronze_discover_cricket_ended()
+
+
+def bronze_repair_event_finals() -> Dict[str, Any]:
+    """One-time (and on-demand) repair of ALL existing event_final blobs.
+
+    Scans the entire bronze/betsapi/event_final/ prefix — not just recent
+    inplay_snapshot candidates — so older matches with stale blobs are also
+    corrected.  For each blob:
+      - If valid (time_status=3 + non-empty ss) → skip.
+      - If invalid → re-fetch /v1/event/view; overwrite only if the API now
+        returns time_status=3 with a non-empty ss.
+
+    Returns a summary dict for the admin HTTP response.
+    Calls bronze_discover_cricket_ended() at the end to rebuild the ended index.
+    """
+    import time as _time
+
+    bronze   = get_bronze_container_client()
+    prefix   = "betsapi/event_final/event_id="
+
+    total = skipped = repaired = api_not_ended = failed = 0
+    repaired_list: List[str] = []
+
+    for blob in bronze.list_blobs(name_starts_with=prefix):
+        if not blob.name.endswith("/event_view.json"):
+            continue
+        parts    = blob.name.split("/")
+        eid_part = next((p for p in parts if p.startswith("event_id=")), None)
+        if not eid_part:
+            continue
+        eid        = eid_part[9:]
+        final_blob = f"betsapi/event_final/event_id={eid}/event_view.json"
+        total += 1
+
+        existing = download_json(bronze, final_blob)
+        if _event_final_is_valid(existing):
+            skipped += 1
+            continue
+
+        # Bad data — re-fetch
+        try:
+            _time.sleep(0.15)   # gentle BetsAPI rate-limit respect
+            payload    = call_betsapi("/v1/event/view", {"event_id": eid})
+            results    = extract_results(payload)
+            result     = results[0] if results else {}
+            time_status = str(result.get("time_status") or "")
+            ss         = result.get("ss") or ""
+
+            if not results or time_status != "3" or not ss:
+                api_not_ended += 1
+                continue
+
+            upload_json(bronze, final_blob, payload, overwrite=True)
+            repaired += 1
+            repaired_list.append(eid)
+            logging.warning(json.dumps({
+                "event": "bronze_event_final_bulk_repaired",
+                "event_id": eid, "ss": ss,
+            }))
+
+        except Exception:
+            failed += 1
+            logging.exception(json.dumps({
+                "event": "bronze_event_final_bulk_repair_failed", "event_id": eid,
+            }))
+
+    logging.warning(json.dumps({
+        "event": "bronze_repair_event_finals_done",
+        "total_scanned": total, "skipped_valid": skipped,
+        "repaired": repaired, "api_not_ended": api_not_ended, "failed": failed,
+    }))
+
+    # Rebuild the ended index so all corrected scores propagate immediately
+    bronze_discover_cricket_ended()
+
+    return {
+        "total_scanned": total,
+        "skipped_valid": skipped,
+        "repaired": repaired,
+        "repaired_event_ids": repaired_list,
+        "api_not_ended_or_no_ss": api_not_ended,
+        "failed": failed,
+    }
