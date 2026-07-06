@@ -279,6 +279,37 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
       }
     },
     {
+      name = "refresh_event_finals"
+      type = "Custom"
+      policy = {
+        timeout = "0.00:30:00"
+      }
+      dependsOn = [
+        {
+          activity             = "silver_to_gold"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      linkedServiceName = {
+        referenceName = "ls_azure_batch"
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        command = "python3 refresh_event_finals.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath          = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
+        }
+      }
+    },
+    {
       name = "discover_cricket_ended"
       type = "Custom"
       policy = {
@@ -286,7 +317,7 @@ resource "azurerm_data_factory_pipeline" "build_ended_match" {
       }
       dependsOn = [
         {
-          activity             = "silver_to_gold"
+          activity             = "refresh_event_finals"
           dependencyConditions = ["Succeeded"]
         }
       ]
@@ -468,6 +499,37 @@ resource "azurerm_data_factory_pipeline" "build_ended_match_databricks" {
       }
     },
     {
+      name = "refresh_event_finals"
+      type = "Custom"
+      policy = {
+        timeout = "0.00:30:00"
+      }
+      dependsOn = [
+        {
+          activity             = "silver_to_gold"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      linkedServiceName = {
+        referenceName = "ls_azure_batch"
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        command = "python3 refresh_event_finals.py"
+        resourceLinkedService = {
+          referenceName = azurerm_data_factory_linked_service_azure_blob_storage.scripts.name
+          type          = "LinkedServiceReference"
+        }
+        folderPath          = "batch-scripts"
+        retentionTimeInDays = 1
+        extendedProperties = {
+          KEY_VAULT_URI              = local.kv_uri
+          MANAGED_IDENTITY_CLIENT_ID = data.azurerm_user_assigned_identity.batch_pool.client_id
+          RUN_ID                     = "@pipeline().RunId"
+        }
+      }
+    },
+    {
       name = "discover_cricket_ended"
       type = "DatabricksNotebook"
       linkedServiceName = {
@@ -479,7 +541,7 @@ resource "azurerm_data_factory_pipeline" "build_ended_match_databricks" {
       }
       dependsOn = [
         {
-          activity             = "silver_to_gold"
+          activity             = "refresh_event_finals"
           dependencyConditions = ["Succeeded"]
         }
       ]

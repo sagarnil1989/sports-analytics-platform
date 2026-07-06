@@ -185,6 +185,14 @@ resource "azurerm_storage_blob" "script_hypothesis_inn1_prematch" {
   content_md5          = filemd5("${path.module}/scripts/hypothesis_inn1_prematch.py")
 }
 
+resource "azurerm_storage_blob" "script_refresh_event_finals" {
+  name                 = "refresh_event_finals.py"
+  storage_container_id = azurerm_storage_container.scripts.id
+  type                 = "Block"
+  source               = "${path.module}/scripts/refresh_event_finals.py"
+  content_md5          = filemd5("${path.module}/scripts/refresh_event_finals.py")
+}
+
 resource "azurerm_storage_blob" "script_hypothesis_odds_movement" {
   name                 = "hypothesis_odds_movement.py"
   storage_container_id = azurerm_storage_container.scripts.id

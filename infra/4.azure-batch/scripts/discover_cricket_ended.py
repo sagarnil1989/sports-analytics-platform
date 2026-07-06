@@ -92,34 +92,20 @@ def _detect_format(match_name="", league_name="", extra_length=None, max_over=0,
             return "Test"
     return ""
 
-def _refresh_event_final(event_id) -> tuple:
-    """
-    Always call /v1/event/view for event_id and overwrite the event_final blob.
-    Returns (ss, wrote) where ss is the score string and wrote is True if the
-    blob was updated.  Falls back to whatever is already in the blob on API error.
-    """
-    blob_path = f"betsapi/event_final/event_id={event_id}/event_view.json"
+def _fetch_final_score(event_id):
+    """Fallback: fetch ss directly from API when event_final blob has no score."""
     try:
         r = _requests.get(
             "https://api.b365api.com/v1/event/view",
             params={"event_id": event_id, "token": betsapi_token},
             timeout=8,
         )
-        payload = r.json()
-        results = payload.get("results") or []
-        if results and str(results[0].get("time_status") or "") == "3" and results[0].get("ss"):
-            _ul(bronze, blob_path, payload)
-            return results[0]["ss"], True
-    except Exception as exc:
-        print(f"  [WARN] event/view API failed for {event_id}: {exc}")
-    # API failed or returned incomplete data — fall back to existing blob
-    existing = _dl(bronze, blob_path)
-    if existing:
-        ef_body  = (existing.get("response") or {}).get("body") or {}
-        results  = ef_body.get("results") or existing.get("results") or []
+        results = r.json().get("results") or []
         if results:
-            return results[0].get("ss") or None, False
-    return None, False
+            return results[0].get("ss") or None
+    except Exception:
+        pass
+    return None
 
 # ---------------------------------------------------------------------------
 # 1. Blocked events
@@ -210,12 +196,17 @@ for eid, tracker_blob_name in silver_eids.items():
         print(f"  SKIP no fi: event_id={eid}")
         continue
 
-    # Always refresh event_final from BetsAPI — the match is over (snapshot >1hr old)
-    # so this is the guaranteed authoritative fetch. Overwrites any stale blob.
-    time.sleep(0.15)
-    score, wrote = _refresh_event_final(eid)
-    if score:
-        score_patched += 1
+    # refresh_event_finals (previous activity) has already overwritten this blob
+    # with the latest API response — just read it here.
+    score = None
+    event_final_data = _dl(bronze, f"betsapi/event_final/event_id={eid}/event_view.json")
+    if event_final_data:
+        ef_body    = (event_final_data.get("response") or {}).get("body") or {}
+        ef_results = ef_body.get("results") or event_final_data.get("results") or []
+        if ef_results:
+            score = ef_results[0].get("ss") or None
+            if score:
+                score_patched += 1
 
     if not score:
         score = (
@@ -224,6 +215,12 @@ for eid, tracker_blob_name in silver_eids.items():
             or tracker.get("score_summary")
             or ""
         )
+
+    if not score:
+        fetched = _fetch_final_score(eid)
+        if fetched:
+            print(f"  Patched score via event/view API: event_id={eid}  ss={fetched}")
+            score = fetched
 
     score = score.replace("-", ",") if score else score
 
