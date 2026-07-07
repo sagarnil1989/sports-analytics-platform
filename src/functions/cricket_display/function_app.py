@@ -24,7 +24,9 @@ from views import (
     view_home,
     view_ml_win_predictor_html,
     view_ml_win_predictor_config_post,
+    view_ml_win_predictor_no_odds_html,
     view_ml_feature_matrix_html,
+    view_ml_feature_matrix_no_odds_html,
     view_ml_score_predictor_html,
     view_ml_score_matrix_html,
     view_glossary_html,
@@ -204,9 +206,19 @@ def post_ml_win_predictor_whatif(req: func.HttpRequest) -> func.HttpResponse:
     return view_win_predictor_whatif_post(req)
 
 
+@app.route(route="ml/win-predictor-no-odds", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_ml_win_predictor_no_odds_html(req: func.HttpRequest) -> func.HttpResponse:
+    return view_ml_win_predictor_no_odds_html(req)
+
+
 @app.route(route="ml/feature-matrix", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_ml_feature_matrix_html(req: func.HttpRequest) -> func.HttpResponse:
     return view_ml_feature_matrix_html(req)
+
+
+@app.route(route="ml/feature-matrix-no-odds", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_ml_feature_matrix_no_odds_html(req: func.HttpRequest) -> func.HttpResponse:
+    return view_ml_feature_matrix_no_odds_html(req)
 
 
 @app.route(route="ml/score-predictor", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)

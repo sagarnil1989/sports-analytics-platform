@@ -26,6 +26,8 @@ def view_home(req: func.HttpRequest) -> func.HttpResponse:
         <h2 style="margin:24px 0 4px; color:#333;">T20</h2>
         <h3 style="margin:16px 0 4px; color:#555; font-size:15px; text-transform:uppercase; letter-spacing:1px;">Model</h3>
         <div class="card"><a href="/api/ml/win-predictor">ML Win Predictor</a><p>Model performance, feature importances and algorithm comparison across all three prediction windows</p></div>
+        <div class="card"><a href="/api/ml/win-predictor-no-odds">ML Win Predictor (No Market Odds)</a><p>Same model trained on pure cricket data only — scores, run rates, wickets, venue, teams. No bat/bowl odds features.</p></div>
+        <div class="card"><a href="/api/ml/feature-matrix-no-odds">ML Feature Matrix (No Market Odds)</a><p>All matches × no-odds features — scores, run rates, wickets only. Train/test split highlighted, selected features marked per model.</p></div>
         <div class="card"><a href="/api/ml/win-predictor/whatif">Win Predictor — What-If Analysis</a><p>Adjust match inputs (venue, teams, phase scores, odds) and see how the model probability changes — sensitivity analysis using the live XGBoost model</p></div>
         <div class="card"><a href="/api/ml/over-under">ML Over/Under Predictor</a><p>LightGBM models predicting innings total and first-12-overs Over/Under at checkpoint overs during inn1 — per-checkpoint and pooled models with CV-AUC and held-out test evaluation</p></div>
         <div class="card"><a href="/api/ml/retrain-summary">ML Retrain Summary</a><p>Last training run details — trained-at timestamp, train/test cutoff, row counts, accuracy and AUC for all models, MLflow run IDs and top features</p></div>

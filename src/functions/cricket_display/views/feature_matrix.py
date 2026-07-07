@@ -7,9 +7,9 @@ from .common import json, logging, os, func, get_named_container_client
 
 # ── selected features from last MLflow run (read from summary JSON at request time) ──
 
-def _load_selected(gold):
+def _load_selected(gold, blob="cricket/ml_features/t20/win_predictor_summary.json"):
     try:
-        raw = gold.get_blob_client("cricket/ml_features/t20/win_predictor_summary.json").download_blob().readall()
+        raw = gold.get_blob_client(blob).download_blob().readall()
         summary = json.loads(raw)
         result = {}
         for m in summary.get("models", []):
@@ -261,12 +261,29 @@ FEATURE_COLS = (
     [f"inn2_ov6_{k}" for k in ["score", "wickets", "crr", "rrr", "rr_diff", "runs_needed"]]
 )
 
+FEATURE_COLS_NO_ODDS = (
+    ["venue", "inn1_bat_team", "inn1_bowl_team",
+     "inn1_pp_rp_wkt", "inn1_pp_wickets",
+     "inn1_mid_rp_wkt", "inn1_mid_wickets_only",
+     "inn1_death_runs", "inn1_death_wickets",
+     "inn1_pressure", "inn1_bat_dominance",
+     "inn1_total_score", "inn1_total_wickets"] +
+    [f"inn1_ov{n}{s}" for n in range(1, 21) for s in ["_runs", "_wkts"]] +
+    ["inn2_ov2_rp_wkt", "inn2_ov2_runs_needed_per_wkt", "inn2_ov2_chase_difficulty",
+     "inn2_ov6_rp_wkt", "inn2_ov6_runs_needed_per_wkt", "inn2_ov6_chase_difficulty"] +
+    [f"inn2_ov{n}{s}" for n in range(1, 7) for s in ["_runs", "_wkts"]] +
+    [f"inn2_ov2_{k}" for k in ["score", "wickets", "crr", "rrr", "rr_diff", "runs_needed"]] +
+    [f"inn2_ov6_{k}" for k in ["score", "wickets", "crr", "rrr", "rr_diff", "runs_needed"]]
+)
+
 META_COLS = ["event_id", "match_name", "match_date", "split",
              "inn1_score_final", "inn2_score_final", "chasing_won"]
 
 
-def _render_html(records, selected, train_cutoff):
+def _render_html(records, selected, train_cutoff, feature_cols=None):
     model_short = {"innings1-only": "M1", "innings2-2over": "M2", "innings2-6over": "M3"}
+
+    feature_cols = feature_cols if feature_cols is not None else FEATURE_COLS
 
     def sel_badge(col):
         return ",".join(short for m, short in model_short.items() if col in selected.get(m, []))
@@ -280,14 +297,14 @@ def _render_html(records, selected, train_cutoff):
     for rec in records:
         cls = "test" if rec["split"] == "test" else "train"
         cells = [f"<td class='meta'>{fmt(rec.get(c,''))}</td>" for c in META_COLS]
-        for c in FEATURE_COLS:
+        for c in feature_cols:
             badge = sel_badge(c)
             td_cls = " class='sel'" if badge else ""
             cells.append(f"<td{td_cls}>{fmt(rec.get(c,''))}</td>")
         rows_html.append(f"<tr class='{cls}'>{''.join(cells)}</tr>")
 
     header_cells = [f"<th class='meta'>{c}</th>" for c in META_COLS]
-    for c in FEATURE_COLS:
+    for c in feature_cols:
         badge = sel_badge(c)
         th_cls = " class='sel'" if badge else ""
         label  = f"{c}<br><small>{badge}</small>" if badge else c
@@ -330,7 +347,7 @@ def _render_html(records, selected, train_cutoff):
 
 <div style="font-size:12px; margin-bottom:8px;">
   Train cutoff: <b>{train_cutoff}</b> &nbsp;|&nbsp;
-  <b>{n_train}</b> train &nbsp;|&nbsp; <b>{n_test}</b> test &nbsp;|&nbsp; <b>{len(FEATURE_COLS)}</b> features
+  <b>{n_train}</b> train &nbsp;|&nbsp; <b>{n_test}</b> test &nbsp;|&nbsp; <b>{len(feature_cols)}</b> features
   &nbsp;|&nbsp; <span style="background:#e8f5e9;padding:2px 8px;">■ train row</span>
   &nbsp;<span style="background:#fce4ec;padding:2px 8px;">■ test row</span>
   &nbsp;<span style="background:#c8e6c9;padding:2px 8px;">■ selected feature</span>
@@ -439,9 +456,65 @@ def view_ml_feature_matrix_html(req: func.HttpRequest) -> func.HttpResponse:
 
         records.sort(key=lambda r: r["match_date"])
 
-        html = _render_html(records, selected, train_cutoff)
+        html = _render_html(records, selected, train_cutoff, feature_cols=FEATURE_COLS)
         return func.HttpResponse(html, mimetype="text/html", status_code=200)
 
     except Exception as e:
         logging.exception("feature_matrix error")
+        return func.HttpResponse(f"Error: {e}", status_code=500)
+
+
+def view_ml_feature_matrix_no_odds_html(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        gold = get_named_container_client("gold")
+
+        selected     = _load_selected(gold, blob="cricket/ml_features/t20/win_predictor_no_odds_summary.json")
+        train_cutoff = (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%d")
+
+        blobs = [b.name for b in gold.list_blobs(name_starts_with="event_id=")
+                 if b.name.endswith("/innings_tracker.json")]
+
+        def _dl(path):
+            try:
+                return json.loads(gold.get_blob_client(path).download_blob().readall())
+            except Exception:
+                return None
+
+        trackers = []
+        with ThreadPoolExecutor(max_workers=32) as ex:
+            futs = {ex.submit(_dl, b): b for b in blobs}
+            for fut in as_completed(futs):
+                t = fut.result()
+                if t:
+                    trackers.append((t, futs[fut]))
+
+        def _max_over(rows):
+            mx = 0
+            for r in rows:
+                try: mx = max(mx, int(str(r.get("over") or "0").split(".")[0]))
+                except Exception: pass
+            return mx
+
+        t20 = [(t, path) for t, path in trackers if 15 <= _max_over(t.get("rows") or []) <= 20]
+
+        def _eid(t, path):
+            return str(t.get("event_id") or _event_id_from_path(path) or "")
+
+        dom_results = {_eid(t, path): None for t, path in t20}
+
+        records = []
+        for t, path in t20:
+            eid = _eid(t, path)
+            rec = _build_record(t, train_cutoff, blob_path=path,
+                                bat_dominance=dom_results.get(eid))
+            if rec:
+                records.append(rec)
+
+        records.sort(key=lambda r: r["match_date"])
+
+        html = _render_html(records, selected, train_cutoff, feature_cols=FEATURE_COLS_NO_ODDS)
+        return func.HttpResponse(html, mimetype="text/html", status_code=200)
+
+    except Exception as e:
+        logging.exception("feature_matrix_no_odds error")
         return func.HttpResponse(f"Error: {e}", status_code=500)

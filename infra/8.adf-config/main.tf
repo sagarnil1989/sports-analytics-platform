@@ -1073,6 +1073,26 @@ resource "azurerm_data_factory_pipeline" "ml_and_hypothesis" {
       }
     },
     {
+      name = "MlWinPredictorNoOdds"
+      type = "DatabricksNotebook"
+      policy = {
+        timeout = "0.01:00:00"
+      }
+      dependsOn = [
+        {
+          activity             = "MlCutoffCheckStale"
+          dependencyConditions = ["Succeeded"]
+        }
+      ]
+      linkedServiceName = {
+        referenceName = azurerm_data_factory_linked_service_azure_databricks.main.name
+        type          = "LinkedServiceReference"
+      }
+      typeProperties = {
+        notebookPath = "/cricket-pipeline/ml/ml_win_predictor_no_odds"
+      }
+    },
+    {
       name = "MlScorePredictor"
       type = "DatabricksNotebook"
       policy = {

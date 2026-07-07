@@ -36,18 +36,27 @@ _CHECKPOINT_OVER = {
 }
 
 
-def _load_model_obj(gold, checkpoint: str) -> Optional[Dict]:
+_MODEL_PREFIX_NO_ODDS = "cricket/ml_features/t20/live_models/win_predictor_no_odds"
+
+
+def _resolve_prefix(model_variant: str) -> str:
+    return _MODEL_PREFIX_NO_ODDS if model_variant == "no_odds" else _MODEL_PREFIX
+
+
+def _load_model_obj(gold, checkpoint: str, model_variant: str = "") -> Optional[Dict]:
     try:
         import pickle
-        raw = gold.get_blob_client(f"{_MODEL_PREFIX}/{checkpoint}.pkl").download_blob().readall()
+        prefix = _resolve_prefix(model_variant)
+        raw = gold.get_blob_client(f"{prefix}/{checkpoint}.pkl").download_blob().readall()
         return pickle.loads(raw)
     except Exception:
         return None
 
 
-def _load_cat_encodings(gold) -> Dict:
+def _load_cat_encodings(gold, model_variant: str = "") -> Dict:
     try:
-        return json.loads(gold.get_blob_client(_CAT_ENCODINGS_BLOB).download_blob().readall())
+        prefix = _resolve_prefix(model_variant)
+        return json.loads(gold.get_blob_client(f"{prefix}/cat_encodings.json").download_blob().readall())
     except Exception:
         return {}
 
@@ -206,7 +215,8 @@ def view_win_predictor_whatif_post(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json", status_code=400,
         )
 
-    checkpoint = body.get("model", "innings1-only")
+    checkpoint    = body.get("model", "innings1-only")
+    model_variant = body.get("model_variant", "")
     if checkpoint not in _VALID_CHECKPOINTS:
         return func.HttpResponse(
             json.dumps({"ok": False, "error": f"Unknown model: {checkpoint}"}),
@@ -214,7 +224,7 @@ def view_win_predictor_whatif_post(req: func.HttpRequest) -> func.HttpResponse:
         )
 
     gold = get_named_container_client("gold")
-    model_obj = _load_model_obj(gold, checkpoint)
+    model_obj = _load_model_obj(gold, checkpoint, model_variant)
     if model_obj is None:
         return func.HttpResponse(
             json.dumps({"ok": False, "error": f"Model '{checkpoint}' not found — run pl_ml_and_hypothesis first"}),

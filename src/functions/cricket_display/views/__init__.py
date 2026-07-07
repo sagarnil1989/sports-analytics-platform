@@ -36,8 +36,10 @@ from .win_predictor import (
     view_ml_win_predictor_html,
     view_ml_win_predictor_config_post,
 )
+from .win_predictor_no_odds import view_ml_win_predictor_no_odds_html
 from .feature_matrix import (
     view_ml_feature_matrix_html,
+    view_ml_feature_matrix_no_odds_html,
 )
 from .score_predictor import (
     view_ml_score_predictor_html,
@@ -86,7 +88,9 @@ __all__ = [
     "view_home",
     "view_ml_win_predictor_html",
     "view_ml_win_predictor_config_post",
+    "view_ml_win_predictor_no_odds_html",
     "view_ml_feature_matrix_html",
+    "view_ml_feature_matrix_no_odds_html",
     "view_ml_score_predictor_html",
     "view_ml_score_matrix_html",
     "view_glossary_html",
