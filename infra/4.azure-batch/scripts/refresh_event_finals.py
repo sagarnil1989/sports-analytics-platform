@@ -49,6 +49,10 @@ gold   = svc.get_container_client("gold")
 script_start_utc = datetime.now(timezone.utc)
 run_start        = time.monotonic()
 
+# Matches that ended within this many days are always refreshed.
+# Older matches are only refreshed if they have no valid event_final blob.
+RECENT_DAYS = 7
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -63,14 +67,18 @@ def _ul(container, path, data):
 # 1. Collect event IDs from gold (same set discover_cricket_ended will process)
 # ---------------------------------------------------------------------------
 
+# Map eid → blob last_modified so we can skip old matches with valid scores
 event_ids = []
+blob_modified: dict = {}
 for blob in gold.list_blobs(name_starts_with="event_id="):
     if not blob.name.endswith("/innings_tracker.json"):
         continue
     parts    = blob.name.split("/")
     eid_part = next((p for p in parts if p.startswith("event_id=")), None)
     if eid_part:
-        event_ids.append(eid_part[9:])
+        eid = eid_part[9:]
+        event_ids.append(eid)
+        blob_modified[eid] = blob.last_modified  # timezone-aware datetime
 
 print(f"Events to refresh: {len(event_ids)}")
 
@@ -92,8 +100,36 @@ print(f"After excluding live: {len(event_ids)}  (excluded {len(live_eids)} live)
 # 2. Refresh each event_final blob in parallel
 # ---------------------------------------------------------------------------
 
-refreshed = skipped = failed = 0
+refreshed = skipped = already_valid = failed = 0
 results_log = []
+
+def _has_valid_event_final(eid: str) -> bool:
+    """True if the existing event_final blob already has time_status=3 and a non-empty ss."""
+    try:
+        data    = json.loads(bronze.get_blob_client(
+            f"betsapi/event_final/event_id={eid}/event_view.json"
+        ).download_blob().readall())
+        ef_body = (data.get("response") or {}).get("body") or {}
+        results = ef_body.get("results") or data.get("results") or []
+        if results:
+            r = results[0]
+            return str(r.get("time_status") or "") == "3" and bool(r.get("ss"))
+    except Exception:
+        pass
+    return False
+
+
+def _is_recent(eid: str) -> bool:
+    """True if the gold tracker blob was last modified within RECENT_DAYS."""
+    modified = blob_modified.get(eid)
+    if not modified:
+        return True  # unknown — refresh to be safe
+    try:
+        age_days = (script_start_utc - modified).days
+        return age_days <= RECENT_DAYS
+    except Exception:
+        return True
+
 
 def _update_gold_tracker_score(eid: str, ss: str) -> None:
     """Patch score_summary_events in the gold tracker with the authoritative final score."""
@@ -110,6 +146,11 @@ def _update_gold_tracker_score(eid: str, ss: str) -> None:
 
 
 def _refresh_one(eid: str) -> dict:
+    # Old matches with a valid score already locked in — skip the API call.
+    # Recent matches always refresh in case the score was captured mid-match.
+    if not _is_recent(eid) and _has_valid_event_final(eid):
+        return {"eid": eid, "status": "already_valid"}
+
     blob_path = f"betsapi/event_final/event_id={eid}/event_view.json"
     try:
         r = _requests.get(
@@ -138,6 +179,8 @@ with ThreadPoolExecutor(max_workers=10) as ex:
         results_log.append(res)
         if res["status"] == "refreshed":
             refreshed += 1
+        elif res["status"] == "already_valid":
+            already_valid += 1
         elif res["status"] == "skipped":
             skipped += 1
             print(f"  [SKIP] {res['eid']}: {res.get('reason', '')}")
@@ -150,6 +193,7 @@ script_finished_utc = datetime.now(timezone.utc)
 
 print(f"\n── Done ──")
 print(f"  Refreshed   : {refreshed}")
+print(f"  Already valid (skipped API): {already_valid}")
 print(f"  Skipped     : {skipped}")
 print(f"  Failed      : {failed}")
 print(f"  Duration    : {elapsed:.1f}s")
@@ -170,6 +214,7 @@ try:
         "status":            "ok",
         "total":             len(event_ids),
         "refreshed":         refreshed,
+        "already_valid":     already_valid,
         "skipped":           skipped,
         "failed":            failed,
     })

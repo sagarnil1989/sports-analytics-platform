@@ -155,6 +155,19 @@ def _rebuild_innings_core(event_id: str, snapshot_paths: Optional[List[str]] = N
 
     final_score = silver_score if _2nd_runs(silver_score) >= _2nd_runs(gold_score) else gold_score
 
+    # event_final blob (written by capture_final_scores before this pipeline step)
+    # is the most authoritative source — it comes directly from the BetsAPI at match end.
+    try:
+        bronze = get_named_container_client("bronze")
+        ef = download_json(bronze, f"betsapi/event_final/event_id={event_id}/event_view.json")
+        if ef:
+            ef_body    = (ef.get("response") or {}).get("body") or {}
+            ef_results = ef_body.get("results") or ef.get("results") or []
+            if ef_results and str(ef_results[0].get("time_status") or "") == "3" and ef_results[0].get("ss"):
+                final_score = _norm_score(ef_results[0]["ss"])
+    except Exception:
+        pass
+
     raw_points: List[Dict[str, Any]] = []
     heatmap_balls: List[Dict[str, Any]] = []
     all_heatmap_cats: Dict[str, Dict] = {}
