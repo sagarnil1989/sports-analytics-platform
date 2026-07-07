@@ -95,6 +95,20 @@ print(f"After excluding live: {len(event_ids)}  (excluded {len(live_eids)} live)
 refreshed = skipped = failed = 0
 results_log = []
 
+def _update_gold_tracker_score(eid: str, ss: str) -> None:
+    """Patch score_summary_events in the gold tracker with the authoritative final score."""
+    gold_path = f"event_id={eid}/innings_tracker.json"
+    try:
+        tracker = json.loads(gold.get_blob_client(gold_path).download_blob().readall())
+        tracker["score_summary_events"] = ss.replace("-", ",")
+        gold.get_blob_client(gold_path).upload_blob(
+            json.dumps(tracker, ensure_ascii=False, indent=2).encode(),
+            overwrite=True,
+        )
+    except Exception as exc:
+        print(f"  [WARN] could not patch gold tracker for {eid}: {exc}")
+
+
 def _refresh_one(eid: str) -> dict:
     blob_path = f"betsapi/event_final/event_id={eid}/event_view.json"
     try:
@@ -106,8 +120,10 @@ def _refresh_one(eid: str) -> dict:
         payload  = r.json()
         results  = payload.get("results") or []
         if results and str(results[0].get("time_status") or "") == "3" and results[0].get("ss"):
+            ss = results[0]["ss"]
             _ul(bronze, blob_path, payload)
-            return {"eid": eid, "status": "refreshed", "ss": results[0]["ss"]}
+            _update_gold_tracker_score(eid, ss)
+            return {"eid": eid, "status": "refreshed", "ss": ss}
         else:
             ts = results[0].get("time_status") if results else "no results"
             ss = results[0].get("ss") if results else ""
