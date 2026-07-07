@@ -217,7 +217,16 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
                                 ("Inn2 final", "inn2_score", None)],
         }
 
-        def _pred_table(preds, ctx, split_label, split_color, model_name="", fi_list=None):
+        # odds feature keys at each model's checkpoint (from feature_values dict)
+        _odds_ctx = {
+            "innings1-only":   ("inn1_ov20_bat_odds",  "inn1_ov20_bowl_odds"),
+            "innings2-2over":  ("inn2_ov2_bat_odds",   "inn2_ov2_bowl_odds"),
+            "innings2-6over":  ("inn2_ov6_bat_odds",   "inn2_ov6_bowl_odds"),
+            "innings2-10over": ("inn2_ov10_bat_odds",  "inn2_ov10_bowl_odds"),
+            "innings2-16over": ("inn2_ov16_bat_odds",  "inn2_ov16_bowl_odds"),
+        }
+
+        def _pred_table(preds, ctx, split_label, split_color, model_name="", fi_list=None, odds_keys=None):
             if not preds:
                 return f"<p style='color:#999'>No {split_label.lower()} predictions — run pl_ml_retrain.</p>"
 
@@ -225,10 +234,12 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
             fi_map = {row["feature"]: row["pct_of_total"] for row in (fi_list or [])}
 
             ctx_headers = "".join(f"<th>{lbl}</th>" for lbl, _, _ in ctx)
-            ncols = 8 + len(ctx)  # total columns for colspan
+            odds_headers = '<th>Bat Odds</th><th>Bowl Odds</th>' if odds_keys else ''
+            ncols = 8 + len(ctx) + (2 if odds_keys else 0)
             html = f"""<table class="cmp-table"><thead>
                 <tr><th>Event ID</th><th>Match</th><th>Date</th><th>Inn1 batting</th>
                     {ctx_headers}
+                    {odds_headers}
                     <th>Predicted</th><th>Actual</th><th>Confidence</th><th></th></tr>
             </thead><tbody>"""
 
@@ -344,6 +355,17 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
                     f"<td style='font-family:monospace'>{_score_cell(p, sk, wk)}</td>"
                     for _, sk, wk in ctx
                 )
+                if odds_keys:
+                    fv = p.get("feature_values") or {}
+                    bat_o = fv.get(odds_keys[0])
+                    bowl_o = fv.get(odds_keys[1])
+                    def _fmt_odds(v):
+                        if v is None: return "—"
+                        try: return f"{float(v):.2f}"
+                        except: return "—"
+                    odds_cells = f"<td style='font-family:monospace;text-align:right'>{_fmt_odds(bat_o)}</td><td style='font-family:monospace;text-align:right'>{_fmt_odds(bowl_o)}</td>"
+                else:
+                    odds_cells = ""
                 event_id_val = escape(str(p.get("event_id") or ""))
                 safe_model   = model_name.replace("-", "_")
                 panel_id     = f"wi_{safe_model}_{split_label}_{row_num}"
@@ -355,6 +377,7 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
                     <td style="color:#666">{escape(str(p.get("match_date",""))[:10])}</td>
                     <td style="font-size:13px">{escape(str(p.get("inn1_bat_team","")))}</td>
                     {ctx_cells}
+                    {odds_cells}
                     <td style="font-weight:bold">{pred_lbl}</td>
                     <td style="color:#555">{act_lbl}</td>
                     <td style="font-weight:bold">{f"{conf:.1f}%" if conf else "—"}{conf_bar}</td>
@@ -377,7 +400,8 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
             ctx  = _score_ctx.get(name, [("Inn1 final", "inn1_score", None)])
             body += f"<h3>{escape(name)}</h3>"
             body += _pred_table(m.get("test_predictions", []), ctx, "Test", "#0066cc",
-                                model_name=name, fi_list=m.get("feature_importance", []))
+                                model_name=name, fi_list=m.get("feature_importance", []),
+                                odds_keys=_odds_ctx.get(name))
 
         # ── train predictions ─────────────────────────────────────
         body += "<h2>Training Match Predictions (XGBoost)</h2>"
@@ -387,7 +411,8 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
             ctx  = _score_ctx.get(name, [("Inn1 final", "inn1_score", None)])
             body += f"<h3>{escape(name)}</h3>"
             body += _pred_table(m.get("train_predictions", []), ctx, "Train", "#888",
-                                model_name=name, fi_list=m.get("feature_importance", []))
+                                model_name=name, fi_list=m.get("feature_importance", []),
+                                odds_keys=_odds_ctx.get(name))
 
         # ── feature importance per model ──────────────────────────
         body += "<h2>Feature Importances (XGBoost)</h2>"

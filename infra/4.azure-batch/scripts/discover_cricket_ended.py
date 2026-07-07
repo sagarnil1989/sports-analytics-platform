@@ -230,7 +230,11 @@ for eid, tracker_blob_name in silver_eids.items():
         if r.get("innings") == 1 and r.get("batting_team"):
             inn1_bat = str(r["batting_team"]).strip()
             break
-    if inn1_bat and away_name and inn1_bat == away_name.strip():
+    def _team_match(a, b):
+        a, b = a.lower().strip(), b.lower().strip()
+        return a == b or a in b or b in a
+
+    if inn1_bat and away_name and _team_match(inn1_bat, away_name):
         if score and "," in score:
             p = score.split(",", 1)
             score = f"{p[1].strip()},{p[0].strip()}"

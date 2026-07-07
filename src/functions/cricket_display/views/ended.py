@@ -60,7 +60,12 @@ def _load_one(eid, gold, blocked, live_eids, overrides: Dict[str, Dict]):
          if r.get("innings") == 1 and r.get("batting_team")),
         None,
     )
-    if inn1_bat and away_name and inn1_bat == away_name.strip():
+    def _team_match(a: str, b: str) -> bool:
+        """Partial name match — handles 'Lancashire (W)' vs 'Lancashire Thunder (W)'."""
+        a, b = a.lower().strip(), b.lower().strip()
+        return a == b or a in b or b in a
+
+    if inn1_bat and away_name and _team_match(inn1_bat, away_name):
         if score and "," in score:
             p = score.split(",", 1)
             score = f"{p[1].strip()},{p[0].strip()}"
