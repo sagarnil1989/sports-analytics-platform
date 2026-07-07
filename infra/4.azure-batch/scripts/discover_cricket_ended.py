@@ -232,7 +232,12 @@ for eid, tracker_blob_name in silver_eids.items():
             break
     def _team_match(a, b):
         a, b = a.lower().strip(), b.lower().strip()
-        return a == b or a in b or b in a
+        if a == b or a in b or b in a:
+            return True
+        skip = {"(w)", "(m)", "women", "men", "the", "u19", "u21"}
+        a_words = [w for w in a.split() if w not in skip]
+        b_words = [w for w in b.split() if w not in skip]
+        return bool(a_words and b_words and a_words[0] == b_words[0])
 
     if inn1_bat and away_name and _team_match(inn1_bat, away_name):
         if score and "," in score:

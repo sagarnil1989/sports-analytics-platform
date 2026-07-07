@@ -61,9 +61,16 @@ def _load_one(eid, gold, blocked, live_eids, overrides: Dict[str, Dict]):
         None,
     )
     def _team_match(a: str, b: str) -> bool:
-        """Partial name match — handles 'Lancashire (W)' vs 'Lancashire Thunder (W)'."""
+        """Match team names that differ by a nickname suffix.
+        'Lancashire (W)' vs 'Lancashire Thunder (W)' — exact substring fails
+        because (W) suffix breaks containment; compare first meaningful word instead."""
         a, b = a.lower().strip(), b.lower().strip()
-        return a == b or a in b or b in a
+        if a == b or a in b or b in a:
+            return True
+        skip = {"(w)", "(m)", "women", "men", "the", "u19", "u21"}
+        a_words = [w for w in a.split() if w not in skip]
+        b_words = [w for w in b.split() if w not in skip]
+        return bool(a_words and b_words and a_words[0] == b_words[0])
 
     if inn1_bat and away_name and _team_match(inn1_bat, away_name):
         if score and "," in score:
