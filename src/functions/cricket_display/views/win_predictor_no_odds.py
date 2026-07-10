@@ -468,7 +468,7 @@ def _view_ml_win_predictor_no_odds_html_inner(req: func.HttpRequest) -> func.Htt
     html = f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>ML Win Predictor</title>
+    <title>ML Win Predictor — No Market Odds</title>
     <meta charset="utf-8">
     <style>
         body {{ font-family: Arial, sans-serif; background:#f5f5f5; margin:0; padding:30px; }}
@@ -581,11 +581,12 @@ def _view_ml_win_predictor_no_odds_html_inner(req: func.HttpRequest) -> func.Htt
         <a href="/api/home">Home</a>
         <a href="/api/live/view" style="color:#c00;font-weight:bold;">🔴 Live</a>
         <a href="/api/ended/view">Ended Matches</a>
-        <a href="/api/ml/win-predictor">ML Win Predictor</a>
+        <a href="/api/ml/win-predictor">Win Predictor (With Odds)</a> &nbsp;|&nbsp; <span style="color:#2d7a2d;font-weight:bold">Win Predictor (No Odds)</span>
         <a href="/api/ml/win-predictor/whatif">What-If Analysis</a>
         <a href="/api/ml/glossary">Glossary</a>
     </nav>
-    <h1>ML Win Predictor</h1>
+    <h1>ML Win Predictor — No Market Odds</h1>
+    <p style="color:#2d7a2d;font-size:14px;margin:0 0 16px;font-weight:bold">⚡ Pure cricket data only — scores, run rates, wickets, venue, teams. No bat/bowl odds features.</p>
     {adf_activity_badge("MlWinPredictor")}
     <p style="color:#666">T20 match outcome prediction — three models trained with progressively more match information</p>
 

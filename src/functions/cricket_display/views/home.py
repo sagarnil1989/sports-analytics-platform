@@ -24,16 +24,21 @@ def view_home(req: func.HttpRequest) -> func.HttpResponse:
         <div class="card"><a href="/api/prematch/view">Upcoming Matches</a><p>Prematch odds and markets before the game starts</p></div>
         <div class="card"><a href="/api/ended/view">Ended Matches</a><p>Recently finished matches with final results</p></div>
         <h2 style="margin:24px 0 4px; color:#333;">T20</h2>
-        <h3 style="margin:16px 0 4px; color:#555; font-size:15px; text-transform:uppercase; letter-spacing:1px;">Model</h3>
-        <div class="card"><a href="/api/ml/win-predictor">ML Win Predictor</a><p>Model performance, feature importances and algorithm comparison across all three prediction windows</p></div>
-        <div class="card"><a href="/api/ml/win-predictor-no-odds">ML Win Predictor (No Market Odds)</a><p>Same model trained on pure cricket data only — scores, run rates, wickets, venue, teams. No bat/bowl odds features.</p></div>
-        <div class="card"><a href="/api/ml/feature-matrix-no-odds">ML Feature Matrix (No Market Odds)</a><p>All matches × no-odds features — scores, run rates, wickets only. Train/test split highlighted, selected features marked per model.</p></div>
-        <div class="card"><a href="/api/ml/win-predictor/whatif">Win Predictor — What-If Analysis</a><p>Adjust match inputs (venue, teams, phase scores, odds) and see how the model probability changes — sensitivity analysis using the live XGBoost model</p></div>
-        <div class="card"><a href="/api/ml/over-under">ML Over/Under Predictor</a><p>LightGBM models predicting innings total and first-12-overs Over/Under at checkpoint overs during inn1 — per-checkpoint and pooled models with CV-AUC and held-out test evaluation</p></div>
-        <div class="card"><a href="/api/ml/retrain-summary">ML Retrain Summary</a><p>Last training run details — trained-at timestamp, train/test cutoff, row counts, accuracy and AUC for all models, MLflow run IDs and top features</p></div>
-        <div class="card"><a href="/api/ml/feature-matrix">ML Feature Matrix</a><p>All matches × all features in one table — train/test split highlighted, selected features marked per model</p></div>
-        <div class="card"><a href="/api/ml/score-predictor">Inn1 Score Predictor</a><p>Predicts final innings-1 score at over 6, 10 and 16 — MAE, RMSE, R² and per-match test predictions</p></div>
-        <div class="card"><a href="/api/ml/score-matrix">Score Feature Matrix</a><p>All matches × score-predictor features — three cutoff tabs (over 6 / 10 / 16), train/test highlighted</p></div>
+
+        <h3 style="margin:20px 0 4px; color:#0066cc; font-size:14px; text-transform:uppercase; letter-spacing:1px; border-bottom:2px solid #0066cc; padding-bottom:4px;">ML Predictor — With Market Odds</h3>
+        <div class="card"><a href="/api/ml/win-predictor">Win Predictor (With Odds)</a><p>XGBoost + Random Forest trained on scores, run rates, wickets <strong>and</strong> live bat/bowl market odds at each over checkpoint.</p></div>
+        <div class="card"><a href="/api/ml/win-predictor/whatif">Win Predictor — What-If Analysis</a><p>Edit any feature value and see how the odds-based model probability shifts in real time.</p></div>
+        <div class="card"><a href="/api/ml/feature-matrix">Feature Matrix (With Odds)</a><p>All matches × all features including odds — train/test split highlighted, selected features marked per model.</p></div>
+
+        <h3 style="margin:20px 0 4px; color:#2d7a2d; font-size:14px; text-transform:uppercase; letter-spacing:1px; border-bottom:2px solid #2d7a2d; padding-bottom:4px;">ML Predictor — Without Market Odds</h3>
+        <div class="card"><a href="/api/ml/win-predictor-no-odds">Win Predictor (No Odds)</a><p>Same model but trained on pure cricket data only — scores, run rates, wickets, venue, teams. No bat/bowl odds features. Compare accuracy vs the odds model.</p></div>
+        <div class="card"><a href="/api/ml/feature-matrix-no-odds">Feature Matrix (No Odds)</a><p>All matches × no-odds features only — scores, run rates, wickets. Train/test split highlighted, selected features marked.</p></div>
+
+        <h3 style="margin:20px 0 4px; color:#555; font-size:14px; text-transform:uppercase; letter-spacing:1px; border-bottom:2px solid #ccc; padding-bottom:4px;">Other ML Models</h3>
+        <div class="card"><a href="/api/ml/over-under">Over/Under Predictor</a><p>LightGBM models predicting innings total and first-12-overs Over/Under at checkpoint overs during inn1.</p></div>
+        <div class="card"><a href="/api/ml/score-predictor">Inn1 Score Predictor</a><p>Predicts final innings-1 score at over 6, 10 and 16 — MAE, RMSE, R² and per-match test predictions.</p></div>
+        <div class="card"><a href="/api/ml/score-matrix">Score Feature Matrix</a><p>All matches × score-predictor features — three cutoff tabs (over 6 / 10 / 16), train/test highlighted.</p></div>
+        <div class="card"><a href="/api/ml/retrain-summary">ML Retrain Summary</a><p>Last training run details — trained-at timestamp, train/test cutoff, row counts, accuracy and AUC for all models.</p></div>
         <div class="card"><a href="/api/mgmt/leagues/view">League Filter</a><p>Select which leagues to capture — excluded leagues skip bronze, silver and gold entirely</p></div>
         <div class="card"><a href="/api/mgmt/stadium-override">Stadium Overrides</a><p>Manually set a stadium name for a match when venue data is missing</p></div>
         <h3 style="margin:20px 0 4px; color:#555; font-size:15px; text-transform:uppercase; letter-spacing:1px;">Analysis</h3>
