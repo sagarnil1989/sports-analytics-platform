@@ -135,13 +135,17 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
                 <tr>
                     <th rowspan="2">Model</th>
                     <th rowspan="2">What it knows</th>
-                    <th colspan="2" style="text-align:center;border-bottom:1px solid #ccc;">XGBoost — Accuracy</th>
-                    <th colspan="2" style="text-align:center;border-bottom:1px solid #ccc;">XGBoost — ROC-AUC</th>
-                    <th colspan="2" style="text-align:center;border-bottom:1px solid #ccc;">Random Forest — Accuracy</th>
-                    <th colspan="2" style="text-align:center;border-bottom:1px solid #ccc;">Random Forest — ROC-AUC</th>
-                    <th rowspan="2">Features</th>
+                    <th colspan="2" style="text-align:center;border-bottom:1px solid #ccc;">XGBoost — Acc</th>
+                    <th colspan="2" style="text-align:center;border-bottom:1px solid #ccc;">XGBoost — AUC</th>
+                    <th colspan="2" style="text-align:center;border-bottom:1px solid #ccc;">CatBoost — Acc</th>
+                    <th colspan="2" style="text-align:center;border-bottom:1px solid #ccc;">CatBoost — AUC</th>
+                    <th colspan="2" style="text-align:center;border-bottom:1px solid #ccc;">Rand Forest — Acc</th>
+                    <th colspan="2" style="text-align:center;border-bottom:1px solid #ccc;">Rand Forest — AUC</th>
+                    <th rowspan="2">Feats</th>
                 </tr>
                 <tr>
+                    <th style="color:#888;font-weight:normal">Train</th><th>Test</th>
+                    <th style="color:#888;font-weight:normal">Train</th><th>Test</th>
                     <th style="color:#888;font-weight:normal">Train</th><th>Test</th>
                     <th style="color:#888;font-weight:normal">Train</th><th>Test</th>
                     <th style="color:#888;font-weight:normal">Train</th><th>Test</th>
@@ -171,11 +175,15 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
             desc  = descriptions.get(name, "")
             xgb   = m.get("xgb", {})
             rf    = m.get("rf",  {})
-            # support both old key names (accuracy) and new (test_accuracy)
+            cb    = m.get("cb",  {})
             x_tr_acc = xgb.get("train_accuracy")
             x_te_acc = xgb.get("test_accuracy") or xgb.get("accuracy")
             x_tr_auc = xgb.get("train_roc_auc")
             x_te_auc = xgb.get("test_roc_auc")  or xgb.get("roc_auc")
+            c_tr_acc = cb.get("train_accuracy")
+            c_te_acc = cb.get("test_accuracy")
+            c_tr_auc = cb.get("train_roc_auc")
+            c_te_auc = cb.get("test_roc_auc")
             r_tr_acc = rf.get("train_accuracy")
             r_te_acc = rf.get("test_accuracy")  or rf.get("accuracy")
             r_tr_auc = rf.get("train_roc_auc")
@@ -184,9 +192,11 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
             body += f"""
             <tr>
                 <td><strong>{escape(name)}</strong></td>
-                <td style="color:#555;font-size:13px">{escape(desc)}</td>
+                <td style="color:#555;font-size:12px">{escape(desc)}</td>
                 {_acc_cell(x_tr_acc)}{_acc_cell(x_te_acc, bold=True)}
                 {_auc_cell(x_tr_auc)}{_auc_cell(x_te_auc)}
+                {_acc_cell(c_tr_acc)}{_acc_cell(c_te_acc, bold=True)}
+                {_auc_cell(c_tr_auc)}{_auc_cell(c_te_auc)}
                 {_acc_cell(r_tr_acc)}{_acc_cell(r_te_acc, bold=True)}
                 {_auc_cell(r_tr_auc)}{_auc_cell(r_te_auc)}
                 <td style="text-align:center">{nfeat}</td>

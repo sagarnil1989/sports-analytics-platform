@@ -422,24 +422,79 @@ for t in t20_trackers:
 
     is_womens = 1 if ("women" in match_name.lower() or "(w)" in match_name.lower()) else 0
 
-    # Day-of-week of the match — weekend crowds/conditions can correlate with
-    # more aggressive batting or different pitch/curator behaviour.
+    # Day-of-week of the match
     is_weekend = 0
     try:
-        is_weekend = 1 if datetime.strptime(date_str, "%Y-%m-%d").weekday() >= 5 else 0  # Sat=5, Sun=6
+        is_weekend = 1 if datetime.strptime(date_str, "%Y-%m-%d").weekday() >= 5 else 0
     except Exception:
         pass
+
+    # ── Venue region ─────────────────────────────────────────────────
+    _combined = f"{venue} {league} {match_name}".lower()
+    _asia_kws = ["india","pakistan","sri lanka","bangladesh","afghanistan","nepal",
+                 "karachi","lahore","mumbai","delhi","chennai","kolkata","bangalore",
+                 "hyderabad","ahmedabad","dubai","sharjah","abu dhabi","colombo",
+                 "dhaka","chittagong","kandy","pallekele","galle","dambulla","mirpur"]
+    _uk_kws   = ["england","london","manchester","birmingham","leeds","bristol",
+                 "nottingham","chester","lord","edgbaston","headingley",
+                 "trent bridge","old trafford","the oval","county","t20 blast",
+                 "hundred","vitality"]
+    _aus_kws  = ["australia","sydney","melbourne","brisbane","perth","adelaide",
+                 "hobart","darwin","scg","mcg","gabba","waca","big bash","bbl"]
+    _wi_kws   = ["west indies","barbados","jamaica","trinidad","guyana","antigua",
+                 "st lucia","grenada","dominica","providence","kensington","sabina","cpl"]
+    _sa_kws   = ["south africa","johannesburg","cape town","durban","pretoria",
+                 "centurion","bloemfontein","newlands","wanderers","supersport","sa20"]
+    _nz_kws   = ["new zealand","auckland","christchurch","wellington","hamilton",
+                 "dunedin","eden park"]
+
+    if   any(k in _combined for k in _asia_kws): venue_region = "Asia"
+    elif any(k in _combined for k in _uk_kws):   venue_region = "UK"
+    elif any(k in _combined for k in _aus_kws):  venue_region = "Australia"
+    elif any(k in _combined for k in _wi_kws):   venue_region = "West Indies"
+    elif any(k in _combined for k in _sa_kws):   venue_region = "South Africa"
+    elif any(k in _combined for k in _nz_kws):   venue_region = "New Zealand"
+    else:                                          venue_region = "Other"
+
+    # Asia + UAE = subcontinental dew risk
+    is_subcontinental = 1 if venue_region == "Asia" else 0
+
+    # Evening match: UTC hour >= 13 → evening in subcontinent (19:30 IST+)
+    # or late afternoon in UK/Aus. Good dew-factor proxy.
+    is_evening = 0
+    try:
+        import re as _re_inner
+        _hm = _re_inner.search(r'[T ](\d{2}):', str(t.get("match_date_utc") or ""))
+        if _hm:
+            is_evening = 1 if int(_hm.group(1)) >= 13 else 0
+    except Exception:
+        pass
+
+    # Tournament stage
+    _ml = match_name.lower(); _ll = league.lower()
+    if   "final"   in _ml or "final"   in _ll:                  tourney_stage = "Final"
+    elif any(k in _ml or k in _ll for k in ["semi","  sf "]):   tourney_stage = "Knockout"
+    elif any(k in _ml or k in _ll for k in ["quarter","qf"]):   tourney_stage = "Knockout"
+    elif any(k in _ml or k in _ll for k in ["group","super 8","super 12","qualifier",
+                                              "league phase"]):  tourney_stage = "Group"
+    elif any(k in _ll for k in ["t20 blast","ipl","big bash","cpl","psl","sa20",
+                                  "hundred","major league","shpageeza","lpl",
+                                  "vitality","international league"]):
+                                                                  tourney_stage = "League"
+    else:                                                         tourney_stage = "Bilateral"
 
     rec = {
         "event_id":   event_id,  "match_name": match_name,
         "match_date": date_str,  "split":      split,
         # categorical
-        "venue":          venue,
-        "inn1_bat_team":  inn1_bat_team  or "unknown",
-        "inn1_bowl_team": inn1_bowl_team or "unknown",
+        "venue":            venue,
+        "inn1_bat_team":    inn1_bat_team  or "unknown",
+        "inn1_bowl_team":   inn1_bowl_team or "unknown",
+        "venue_region":     venue_region,
+        "tournament_stage": tourney_stage,
         # match-level flags
-        "is_womens_match": is_womens,
-        "is_weekend_match": is_weekend,
+        "is_womens_match":   is_womens,
+  
         # innings 1 aggregate
         "inn1_total_score":   inn1_total_score,
         "inn1_total_wickets": inn1_total_wickets,
@@ -477,11 +532,63 @@ for t in t20_trackers:
 
     records.append(rec)
 
+# ── Team form (win rate last 5 matches) and H2H ──────────────────
+# Must be computed after all records are collected so each record
+# can look back at earlier matches in the same dataset.
+
+_sorted_recs = sorted(records, key=lambda r: r.get("match_date", ""))
+
+# Build per-team result history
+_team_hist: dict = {}
+for _r in _sorted_recs:
+    _bat = _r.get("inn1_bat_team"); _bowl = _r.get("inn1_bowl_team")
+    _won = _r.get("chasing_won");   _d    = _r.get("match_date")
+    if _won is None or not _d or not _bat or not _bowl:
+        continue
+    _bat_won = 0 if _won else 1   # chasing_won=0 → batting (inn1) team won
+    for _tm, _w in [(_bat, _bat_won), (_bowl, 1 - _bat_won)]:
+        if _tm not in _team_hist: _team_hist[_tm] = []
+        _team_hist[_tm].append((_d, _w))
+
+# Build head-to-head history: key = frozenset{teamA, teamB} → [(date, bat_team_won)]
+_h2h_hist: dict = {}
+for _r in _sorted_recs:
+    _bat = _r.get("inn1_bat_team"); _bowl = _r.get("inn1_bowl_team")
+    _won = _r.get("chasing_won");   _d    = _r.get("match_date")
+    if _won is None or not _d or not _bat or not _bowl:
+        continue
+    _key = frozenset({_bat, _bowl})
+    if _key not in _h2h_hist: _h2h_hist[_key] = []
+    _h2h_hist[_key].append((_d, _bat, 0 if _won else 1))   # (date, bat_team, bat_won)
+
+def _team_form(team, before_date, n=5):
+    hist = [w for d, w in _team_hist.get(team, []) if d < before_date]
+    tail = hist[-n:]
+    return round(sum(tail) / len(tail), 3) if tail else None
+
+def _h2h_rate(bat, bowl, before_date, n=10):
+    key = frozenset({bat, bowl})
+    hist = [(d, b, w) for d, b, w in _h2h_hist.get(key, []) if d < before_date]
+    tail = hist[-n:]
+    if not tail: return None
+    bat_wins = sum(1 for _, b, w in tail if b == bat and w == 1)
+    return round(bat_wins / len(tail), 3)
+
+for _r in _sorted_recs:
+    _d   = _r.get("match_date", "")
+    _bat = _r.get("inn1_bat_team",  "")
+    _bowl= _r.get("inn1_bowl_team", "")
+    _r["bat_team_form5"]  = _team_form(_bat,  _d)
+    _r["bowl_team_form5"] = _team_form(_bowl, _d)
+    _r["h2h_bat_win_rate"] = _h2h_rate(_bat, _bowl, _d)
+
+records = _sorted_recs   # preserve sorted order
+
 df = pd.DataFrame(records)
 
 # COMMAND ----------
 # ═══════════════════════════════════════════════════════════════════
-# STEP 4 — Composite features
+# STEP 4
 #
 # These pre-bake feature interactions that XGBoost would otherwise have
 # to discover from scratch — helping with small datasets.
@@ -579,7 +686,7 @@ df["inn2_ov16_chase_difficulty"] = df.apply(
     lambda r: round((r["inn2_ov16_rrr"] or 0) * ((r["inn2_ov16_wickets"] or 0) + 1), 3), axis=1)
 
 # Categorical encoding
-for col in ["venue", "inn1_bat_team", "inn1_bowl_team"]:
+for col in ["venue", "inn1_bat_team", "inn1_bowl_team", "venue_region", "tournament_stage"]:
     df[col] = df[col].astype("category")
 
 train_df = df[df["split"] == "train"].reset_index(drop=True)
@@ -608,7 +715,21 @@ display(df[["match_name", "match_date", "split",
 # STEP 5 — Feature sets
 # ═══════════════════════════════════════════════════════════════════
 
-CAT_FEATURES = ["venue", "inn1_bat_team", "inn1_bowl_team"]
+CAT_FEATURES = ["venue", "inn1_bat_team", "inn1_bowl_team", "venue_region", "tournament_stage"]
+
+# Context features — venue environment, match timing, team form, head-to-head history.
+# These capture the "before first ball" prior that XGBoost/CatBoost cannot learn from
+# per-over snapshots alone (dew factor, team momentum, historical matchups).
+CONTEXT_FEATURES = [
+    "venue_region",       # Asia / UK / Australia / West Indies / South Africa / NZ / Other
+    "is_subcontinental",  # 1 if Asia — strongest single dew-factor proxy
+    "is_evening_match",   # 1 if match started after 13:00 UTC (evening in subcontinent)
+    "tournament_stage",   # Final / Knockout / League / Group / Bilateral
+    "bat_team_form5",     # batting team win rate in last 5 matches (momentum)
+    "bowl_team_form5",    # bowling team win rate in last 5 matches
+    "h2h_bat_win_rate",   # bat team win rate vs bowl team (last 10 head-to-head meetings)
+]
+
 MATCH_FLAGS  = ["is_womens_match", "is_weekend_match"]
 
 COMPOSITE_INN1 = [
@@ -653,7 +774,7 @@ RAW_INN1 = (
     [f"inn1_ov{n}_wkts" for n in range(1, 21)]
 )
 
-INN1_BASE = CAT_FEATURES + MATCH_FLAGS + COMPOSITE_INN1 + RAW_INN1
+INN1_BASE = CAT_FEATURES + MATCH_FLAGS + CONTEXT_FEATURES + COMPOSITE_INN1 + RAW_INN1
 
 CHASE_OV2 = (
     COMPOSITE_INN2_OV2 +
@@ -994,7 +1115,126 @@ rf_ov16, rf_acc_ov16, rf_auc_ov16, rf_train_acc_ov16, rf_train_auc_ov16, rf_fi_o
 
 # COMMAND ----------
 # ═══════════════════════════════════════════════════════════════════
-# STEP 9 — Algorithm comparison table
+# STEP 9
+# COMMAND ----------
+# ═══════════════════════════════════════════════════════════════════
+# STEP 8b — CatBoost (runs in parallel with XGBoost + Random Forest)
+#
+# Advantage over XGBoost: native categorical handling for venue, team
+# names, venue_region and tournament_stage — no manual label encoding.
+# CatBoost uses ordered target statistics so even rare venues (few
+# matches) get a meaningful probability rather than an arbitrary int.
+# ═══════════════════════════════════════════════════════════════════
+
+subprocess.run(["pip", "install", "--quiet", "catboost"], check=True)
+from catboost import CatBoostClassifier, Pool as CatPool
+
+CB_PARAMS = {
+    "iterations":    300,
+    "learning_rate": 0.05,
+    "depth":         4,
+    "random_seed":   42,
+    "verbose":       0,
+    "eval_metric":   "Accuracy",
+    "loss_function": "Logloss",
+}
+
+def cb_train(model_name, feature_cols, train_df, test_df):
+    print(f"\n{'─'*60}")
+    print(f"  CatBoost — {model_name}  ({len(feature_cols)} features)")
+
+    if len(train_df) < 5:
+        return None, None, None, None, None, None
+
+    feature_cols = list(feature_cols)
+    cat_cols = [c for c in feature_cols if pd.api.types.is_categorical_dtype(train_df[c])]
+    cat_idx  = [feature_cols.index(c) for c in cat_cols]
+
+    def prep_cb(df_in, medians=None):
+        X = df_in[feature_cols].copy()
+        # CatBoost expects strings for categoricals, fill NA numerics with median
+        for col in cat_cols:
+            X[col] = X[col].astype(str).replace("nan", "unknown")
+        num_cols = [c for c in feature_cols if c not in cat_cols]
+        meds = medians or {}
+        for col in num_cols:
+            if col not in meds:
+                meds[col] = float(df_in[col].median()) if df_in[col].notna().any() else 0.0
+            X[col] = X[col].fillna(meds[col])
+        return X, meds
+
+    X_train, meds = prep_cb(train_df)
+    X_test,  _    = prep_cb(test_df, meds)
+    y_train = train_df["chasing_won"].values
+    y_test  = test_df["chasing_won"].values
+
+    train_pool = CatPool(X_train, y_train, cat_features=cat_idx)
+    test_pool  = CatPool(X_test,  y_test,  cat_features=cat_idx)
+
+    cb = CatBoostClassifier(**CB_PARAMS)
+    cb.fit(train_pool, eval_set=test_pool, use_best_model=True)
+
+    y_pred       = cb.predict(test_pool)
+    y_proba      = cb.predict_proba(test_pool)[:, 1]
+    y_train_pred = cb.predict(train_pool)
+    y_train_prob = cb.predict_proba(train_pool)[:, 1]
+
+    acc       = accuracy_score(y_test,  y_pred)
+    auc       = roc_auc_score(y_test,  y_proba)      if len(np.unique(y_test))  > 1 else None
+    train_acc = accuracy_score(y_train, y_train_pred)
+    train_auc = roc_auc_score(y_train, y_train_prob) if len(np.unique(y_train)) > 1 else None
+    cm        = confusion_matrix(y_test, y_pred)
+
+    fi_df = pd.DataFrame({
+        "feature":    feature_cols,
+        "importance": cb.get_feature_importance(),
+    }).sort_values("importance", ascending=False).reset_index(drop=True)
+    fi_df["rank"]       = range(1, len(fi_df) + 1)
+    fi_df["pct_of_total"] = (fi_df["importance"] / fi_df["importance"].sum() * 100).round(3)
+
+    print_results(model_name, "CatBoost", acc, auc, cm, fi_df)
+    print(f"  Train accuracy: {train_acc:.3f}  Train AUC: {f'{train_auc:.3f}' if train_auc else 'n/a'}")
+    display(fi_df[fi_df["importance"] > 0])
+    return cb, acc, auc, train_acc, train_auc, fi_df
+
+cb_inn1, cb_acc_inn1, cb_auc_inn1, cb_train_acc_inn1, cb_train_auc_inn1, cb_fi_inn1 = cb_train("innings1-only",   INN1_FEATURES,      train_df, test_df)
+cb_ov2,  cb_acc_ov2,  cb_auc_ov2,  cb_train_acc_ov2,  cb_train_auc_ov2,  cb_fi_ov2  = cb_train("innings2-2over",  INN2_OV2_FEATURES,  train_df, test_df)
+cb_ov6,  cb_acc_ov6,  cb_auc_ov6,  cb_train_acc_ov6,  cb_train_auc_ov6,  cb_fi_ov6  = cb_train("innings2-6over",  INN2_OV6_FEATURES,  train_df, test_df)
+cb_ov10, cb_acc_ov10, cb_auc_ov10, cb_train_acc_ov10, cb_train_auc_ov10, cb_fi_ov10 = cb_train("innings2-10over", INN2_OV10_FEATURES, train_df, test_df)
+cb_ov16, cb_acc_ov16, cb_auc_ov16, cb_train_acc_ov16, cb_train_auc_ov16, cb_fi_ov16 = cb_train("innings2-16over", INN2_OV16_FEATURES, train_df, test_df)
+
+# COMMAND ----------
+# ═══════════════════════════════════════════════════════════════════
+# STEP 9 — Algorithm comparison table (XGBoost + RF + CatBoost)
+# ═══════════════════════════════════════════════════════════════════
+
+def _fmt(v):
+    return f"{v:.3f}" if v is not None else "n/a"
+
+print("\n" + "="*80)
+print(f"  {'Model':<20}  {'Algorithm':<16}  {'Test Acc':>9}  {'Test AUC':>9}  {'Features':>8}")
+print("  " + "─"*74)
+rows_cmp = [
+    ("innings1-only",   "XGBoost",     xgb_acc_inn1, xgb_auc_inn1, len(pruned_inn1)),
+    ("innings1-only",   "CatBoost",    cb_acc_inn1,  cb_auc_inn1,  len(INN1_FEATURES)),
+    ("innings1-only",   "Rand Forest", rf_acc_inn1,  rf_auc_inn1,  len(pruned_inn1)),
+    ("innings2-2over",  "XGBoost",     xgb_acc_ov2,  xgb_auc_ov2,  len(pruned_ov2)),
+    ("innings2-2over",  "CatBoost",    cb_acc_ov2,   cb_auc_ov2,   len(INN2_OV2_FEATURES)),
+    ("innings2-2over",  "Rand Forest", rf_acc_ov2,   rf_auc_ov2,   len(pruned_ov2)),
+    ("innings2-6over",  "XGBoost",     xgb_acc_ov6,  xgb_auc_ov6,  len(pruned_ov6)),
+    ("innings2-6over",  "CatBoost",    cb_acc_ov6,   cb_auc_ov6,   len(INN2_OV6_FEATURES)),
+    ("innings2-6over",  "Rand Forest", rf_acc_ov6,   rf_auc_ov6,   len(pruned_ov6)),
+    ("innings2-10over", "XGBoost",     xgb_acc_ov10, xgb_auc_ov10, len(pruned_ov10)),
+    ("innings2-10over", "CatBoost",    cb_acc_ov10,  cb_auc_ov10,  len(INN2_OV10_FEATURES)),
+    ("innings2-10over", "Rand Forest", rf_acc_ov10,  rf_auc_ov10,  len(pruned_ov10)),
+    ("innings2-16over", "XGBoost",     xgb_acc_ov16, xgb_auc_ov16, len(pruned_ov16)),
+    ("innings2-16over", "CatBoost",    cb_acc_ov16,  cb_auc_ov16,  len(INN2_OV16_FEATURES)),
+    ("innings2-16over", "Rand Forest", rf_acc_ov16,  rf_auc_ov16,  len(pruned_ov16)),
+]
+for model_nm, algo, acc, auc, nfeat in rows_cmp:
+    print(f"  {model_nm:<20}  {algo:<16}  {_fmt(acc):>9}  {_fmt(auc):>9}  {nfeat:>8}")
+print("="*80)
+ — Algorithm comparison table
 # ═══════════════════════════════════════════════════════════════════
 
 def _fmt(v):
@@ -1276,6 +1516,7 @@ def _r(v): return round(v, 3) if v is not None else None
 def _model_entry(name, desc,
                  xgb_acc, xgb_auc, xgb_train_acc, xgb_train_auc,
                  rf_acc,  rf_auc,  rf_train_acc,  rf_train_auc,
+                 cb_acc,  cb_auc,  cb_train_acc,  cb_train_auc,
                  feats, fi_df, preds_records, train_preds_records):
     return {
         "name": name, "description": desc,
@@ -1291,6 +1532,12 @@ def _model_entry(name, desc,
             "test_roc_auc":   _r(rf_auc),
             "train_accuracy": _r(rf_train_acc),
             "train_roc_auc":  _r(rf_train_auc),
+        },
+        "cb": {
+            "test_accuracy":  _r(cb_acc),
+            "test_roc_auc":   _r(cb_auc),
+            "train_accuracy": _r(cb_train_acc),
+            "train_roc_auc":  _r(cb_train_auc),
         },
         "feature_importance": (
             fi_df[["rank","feature","importance","pct_of_total"]].to_dict("records")
@@ -1310,25 +1557,30 @@ summary = {
         "future":  ["LSTM — activate at 500+ matches, see notebook Step 12"],
     },
     "models": [
-        _model_entry("innings1-only",   "Full innings-1 breakdown; team and venue",
+        _model_entry("innings1-only",   "Full innings-1 breakdown; team, venue and context",
                      xgb_acc_inn1,  xgb_auc_inn1,  xgb_train_acc_inn1,  xgb_train_auc_inn1,
                      rf_acc_inn1,   rf_auc_inn1,   rf_train_acc_inn1,   rf_train_auc_inn1,
+                     cb_acc_inn1,   cb_auc_inn1,   cb_train_acc_inn1,   cb_train_auc_inn1,
                      pruned_inn1,   xgb_fi_inn1,   preds_inn1,  train_preds_inn1),
         _model_entry("innings2-2over",  "Innings-1 + chase through over 2",
                      xgb_acc_ov2,   xgb_auc_ov2,   xgb_train_acc_ov2,   xgb_train_auc_ov2,
                      rf_acc_ov2,    rf_auc_ov2,    rf_train_acc_ov2,    rf_train_auc_ov2,
+                     cb_acc_ov2,    cb_auc_ov2,    cb_train_acc_ov2,    cb_train_auc_ov2,
                      pruned_ov2,    xgb_fi_ov2,    preds_ov2,   train_preds_ov2),
         _model_entry("innings2-6over",  "Innings-1 + chase through over 6 (powerplay)",
                      xgb_acc_ov6,   xgb_auc_ov6,   xgb_train_acc_ov6,   xgb_train_auc_ov6,
                      rf_acc_ov6,    rf_auc_ov6,    rf_train_acc_ov6,    rf_train_auc_ov6,
+                     cb_acc_ov6,    cb_auc_ov6,    cb_train_acc_ov6,    cb_train_auc_ov6,
                      pruned_ov6,    xgb_fi_ov6,    preds_ov6,   train_preds_ov6),
         _model_entry("innings2-10over", "Innings-1 + chase through over 10 (halfway)",
                      xgb_acc_ov10,  xgb_auc_ov10,  xgb_train_acc_ov10,  xgb_train_auc_ov10,
                      rf_acc_ov10,   rf_auc_ov10,   rf_train_acc_ov10,   rf_train_auc_ov10,
+                     cb_acc_ov10,   cb_auc_ov10,   cb_train_acc_ov10,   cb_train_auc_ov10,
                      pruned_ov10,   xgb_fi_ov10,   preds_ov10,  train_preds_ov10),
         _model_entry("innings2-16over", "Innings-1 + chase through over 16 (death approaching)",
                      xgb_acc_ov16,  xgb_auc_ov16,  xgb_train_acc_ov16,  xgb_train_auc_ov16,
                      rf_acc_ov16,   rf_auc_ov16,   rf_train_acc_ov16,   rf_train_auc_ov16,
+                     cb_acc_ov16,   cb_auc_ov16,   cb_train_acc_ov16,   cb_train_auc_ov16,
                      pruned_ov16,   xgb_fi_ov16,   preds_ov16,  train_preds_ov16),
     ],
 }
