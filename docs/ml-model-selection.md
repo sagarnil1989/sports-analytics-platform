@@ -99,20 +99,26 @@ Both produce the same flat-feature row if the over-6 totals are the same.
 
 ---
 
-### 5. LSTM — Long Short-Term Memory (Phase 2, ≥ 300 matches)
+### 5. LSTM — Long Short-Term Memory (Active — small-data adapted)
 
 **What it does:** Reads the match as an ordered time series. After processing over 6, it carries a memory of overs 1–5 into its decision for over 7.
 
 | ✓ Pros | ✗ Cons |
 |---|---|
-| Naturally captures momentum and trajectory | Needs 300–500 matches minimum |
+| Naturally captures momentum and trajectory | Ideal threshold is 300–500 matches |
 | "3 wickets in 2 overs" is a distinct sequence signal | Black box — harder to explain to stakeholders |
 | Handles variable-length innings (rain, early all-out) | Requires careful per-over feature design |
 | Directly addresses the "every moment matters" philosophy | Slow to train and tune |
 
 **This is the right model conceptually.** A match at 80/3 after 6 overs following 0/0 after 4 overs is fundamentally different from 80/3 after 6 overs with wickets spread evenly. Only LSTM (and Transformer) can learn this.
 
-**Decision:** Scaffold already exists in notebook. Activate when training set reaches 300 matches.
+**Current implementation (active):**
+- Bidirectional LSTM, 16 units, Dropout 0.4, Early stopping patience=15
+- Data augmentation: 2 noisy copies per training match to triple effective training set
+- **With-odds variant** — 6D observation per over: `[inc_runs/20, inc_wkts/2, bat_odds/10, bowl_odds/10, crr/20, rrr/20]`. Market odds per over teach the LSTM how market confidence tracks match momentum.
+- **No-odds variant** — stays at 4D: `[inc_runs/20, inc_wkts/2, total/200, pressure/20]` (no odds features)
+
+**Decision:** Active in both notebooks. Expected to improve with more data.
 
 ---
 

@@ -141,6 +141,8 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
                     <th colspan="2" style="text-align:center;border-bottom:1px solid #ccc;">CatBoost — AUC</th>
                     <th colspan="2" style="text-align:center;border-bottom:1px solid #ccc;">Rand Forest — Acc</th>
                     <th colspan="2" style="text-align:center;border-bottom:1px solid #ccc;">Rand Forest — AUC</th>
+                    <th colspan="2" style="text-align:center;border-bottom:1px solid #ccc;background:#f0f8f0;">HMM — Seq</th>
+                    <th colspan="2" style="text-align:center;border-bottom:1px solid #ccc;background:#f0fff0;">LSTM — Seq</th>
                     <th rowspan="2">Feats</th>
                 </tr>
                 <tr>
@@ -150,6 +152,8 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
                     <th style="color:#888;font-weight:normal">Train</th><th>Test</th>
                     <th style="color:#888;font-weight:normal">Train</th><th>Test</th>
                     <th style="color:#888;font-weight:normal">Train</th><th>Test</th>
+                    <th style="color:#888;font-weight:normal;background:#f0f8f0" colspan="2">Test only</th>
+                    <th style="color:#888;font-weight:normal;background:#f0fff0" colspan="2">Test only</th>
                 </tr>
             </thead>
             <tbody>
@@ -176,6 +180,8 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
             xgb   = m.get("xgb", {})
             rf    = m.get("rf",  {})
             cb    = m.get("cb",  {})
+            hmm   = m.get("hmm",  {})
+            lstm  = m.get("lstm", {})
             x_tr_acc = xgb.get("train_accuracy")
             x_te_acc = xgb.get("test_accuracy") or xgb.get("accuracy")
             x_tr_auc = xgb.get("train_roc_auc")
@@ -188,6 +194,10 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
             r_te_acc = rf.get("test_accuracy")  or rf.get("accuracy")
             r_tr_auc = rf.get("train_roc_auc")
             r_te_auc = rf.get("test_roc_auc")   or rf.get("roc_auc")
+            h_te_acc  = hmm.get("test_accuracy")
+            h_te_auc  = hmm.get("test_roc_auc")
+            l_te_acc  = lstm.get("test_accuracy")
+            l_te_auc  = lstm.get("test_roc_auc")
             nfeat = m.get("feature_count", "?")
             body += f"""
             <tr>
@@ -199,6 +209,10 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
                 {_auc_cell(c_tr_auc)}{_auc_cell(c_te_auc)}
                 {_acc_cell(r_tr_acc)}{_acc_cell(r_te_acc, bold=True)}
                 {_auc_cell(r_tr_auc)}{_auc_cell(r_te_auc)}
+                <td style="background:#f0f8f0;font-weight:bold;color:{_acc_color(h_te_acc)}">{f"{h_te_acc:.1%}" if h_te_acc else "—"}</td>
+                <td style="background:#f0f8f0">{f"{h_te_auc:.3f}" if h_te_auc else "—"}</td>
+                <td style="background:#f0fff0;font-weight:bold;color:{_acc_color(l_te_acc)}">{f"{l_te_acc:.1%}" if l_te_acc else "—"}</td>
+                <td style="background:#f0fff0">{f"{l_te_auc:.3f}" if l_te_auc else "—"}</td>
                 <td style="text-align:center">{nfeat}</td>
             </tr>"""
         body += "</tbody></table>"
@@ -281,27 +295,58 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
                 orig_conf = p.get("confidence_pct", 50.0) or 50.0
                 orig_pred = "Chase won" if p.get("predicted") == 1 else "Defended"
 
+                # ── Identify checkpoint odds keys ─────────────────────────────
+                # Detect the checkpoint from the model name (e.g. innings2-6over → ov6)
+                _cp_over = None
+                for _suffix, _ov in [("1-only","20"),("2-2over","2"),("2-6over","6"),
+                                      ("2-10over","10"),("2-16over","16")]:
+                    if model_nm.endswith(_suffix):
+                        _prefix = "inn1" if "1-only" in _suffix else "inn2"
+                        _cp_over = (_prefix, _ov)
+                        break
+                _bat_key  = f"{_cp_over[0]}_ov{_cp_over[1]}_bat_odds"  if _cp_over else None
+                _bowl_key = f"{_cp_over[0]}_ov{_cp_over[1]}_bowl_odds" if _cp_over else None
+                _odds_keys_present = (_bat_key in feat_vals or _bowl_key in feat_vals)
+
                 # Sort features: those with importance first, then rest alphabetically
-                sorted_feats = sorted(feat_vals.keys(),
-                    key=lambda f: -fi_map.get(f, 0))
+                # Pin checkpoint odds to top if present
+                def _sort_key(f):
+                    if f == _bat_key:  return (-9999, f)
+                    if f == _bowl_key: return (-9998, f)
+                    return (-fi_map.get(f, 0), f)
+                sorted_feats = sorted(feat_vals.keys(), key=_sort_key)
 
                 rows_html = ""
+                # Checkpoint odds header if present
+                if _odds_keys_present and _cp_over:
+                    rows_html += f"""<tr><td colspan="3" style="background:#fff8e1;padding:6px 8px;
+                        font-size:12px;color:#7b5800;font-weight:bold;border-top:2px solid #f0c040">
+                        ⚡ Market Odds at checkpoint (inn{_cp_over[0][-1]} over {_cp_over[1]})
+                        — change bat &amp; bowl odds <em>together</em> for reliable results</td></tr>"""
                 for feat in sorted_feats:
                     val = feat_vals[feat]
                     pct = fi_map.get(feat, 0)
-                    bar_w = min(int(pct * 6), 80)
-                    bar_html = f'<div style="display:inline-block;background:#0066cc;height:8px;width:{bar_w}px;border-radius:2px;vertical-align:middle;margin-right:4px"></div>'
-                    val_str = "" if val is None else str(val)
+                    is_odds_feat = feat in (_bat_key, _bowl_key) if _cp_over else False
+                    row_bg  = "background:#fff8e1;" if is_odds_feat else ""
+                    bar_col = "#f0a000" if is_odds_feat else "#0066cc"
+                    bar_w   = min(int(pct * 6), 80)
+                    bar_html = f'<div style="display:inline-block;background:{bar_col};height:8px;width:{bar_w}px;border-radius:2px;vertical-align:middle;margin-right:4px"></div>'
+                    val_str    = "" if val is None else str(val)
                     input_type = "text" if isinstance(val, str) else "number"
-                    step_attr  = 'step="0.01"' if isinstance(val, float) else ""
-                    rows_html += f"""<tr>
-                        <td style="font-family:monospace;font-size:12px;color:#333">{escape(feat)}</td>
+                    step_attr  = 'step="0.001"' if is_odds_feat else ('step="0.01"' if isinstance(val, float) else "")
+                    feat_label = escape(feat)
+                    if feat == _bat_key:
+                        feat_label = f'<strong style="color:#7b5800">{escape(feat)}</strong> <small>(batting team odds)</small>'
+                    elif feat == _bowl_key:
+                        feat_label = f'<strong style="color:#7b5800">{escape(feat)}</strong> <small>(bowling team odds)</small>'
+                    rows_html += f"""<tr style="{row_bg}">
+                        <td style="font-family:monospace;font-size:12px;color:#333">{feat_label}</td>
                         <td style="white-space:nowrap">{bar_html}<span style="font-size:11px;color:#666">{pct:.1f}%</span></td>
                         <td><input type="{input_type}" {step_attr}
                                    class="wi-input" data-feat="{escape(feat)}"
                                    data-panel="{panel_id}"
                                    value="{escape(val_str)}"
-                                   style="width:90px;padding:3px 6px;border:1px solid #ccc;border-radius:3px;font-size:12px;font-family:monospace;"
+                                   style="width:90px;padding:3px 6px;border:1px solid {'#f0a000' if is_odds_feat else '#ccc'};border-radius:3px;font-size:12px;font-family:monospace;{'font-weight:bold;' if is_odds_feat else ''}"
                                    oninput="wiSchedule('{panel_id}','{escape(model_nm)}')">
                         </td>
                     </tr>"""
