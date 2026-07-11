@@ -37,6 +37,11 @@ from .win_predictor import (
     view_ml_win_predictor_config_post,
 )
 from .win_predictor_no_odds import view_ml_win_predictor_no_odds_html
+from .model_insights import (
+    view_model_insights_html,
+    view_model_insights_no_odds_html,
+    view_model_insights_image,
+)
 from .feature_matrix import (
     view_ml_feature_matrix_html,
     view_ml_feature_matrix_no_odds_html,
@@ -86,6 +91,9 @@ __all__ = [
     "view_admin_match_override_save", "view_admin_adf_logs",
     "view_detailed_analysis_html",
     "view_home",
+    "view_model_insights_html",
+    "view_model_insights_no_odds_html",
+    "view_model_insights_image",
     "view_ml_win_predictor_html",
     "view_ml_win_predictor_config_post",
     "view_ml_win_predictor_no_odds_html",

@@ -1130,6 +1130,142 @@ print("Model blob save complete.")
 
 # COMMAND ----------
 # ═══════════════════════════════════════════════════════════════════
+# STEP 10c — Model insight plots (SHAP, PDP, Decision Tree)
+#
+# For each checkpoint generates three PNG files and saves them to:
+#   gold/cricket/ml_features/t20/model_insights/win_predictor/latest/
+#   gold/cricket/ml_features/t20/model_insights/win_predictor/history/{YYYY-MM-DD}/
+#
+# Also updates history_index.json so the insights page can list past runs
+# and show how the model changed over time.
+# ═══════════════════════════════════════════════════════════════════
+
+subprocess.run(["pip", "install", "--quiet", "shap"], check=True)
+
+import shap
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from io import BytesIO as _BytesIO
+
+_INSIGHT_PREFIX = "cricket/ml_features/t20/model_insights/win_predictor_no_odds"
+_RUN_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+_RUN_TS   = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def _upload_fig(fig, path):
+    buf = _BytesIO()
+    fig.savefig(buf, format='png', dpi=120, bbox_inches='tight')
+    buf.seek(0)
+    gold.get_blob_client(path).upload_blob(buf.read(), overwrite=True)
+    plt.close(fig)
+
+def _save_insight(fig, filename):
+    _upload_fig(fig, f"{_INSIGHT_PREFIX}/latest/{filename}")
+    _upload_fig(fig, f"{_INSIGHT_PREFIX}/history/{_RUN_DATE}/{filename}")
+
+_insight_checkpoints = [
+    ("innings1-only",   xgb_inn1,  pruned_inn1,  xgb_fi_inn1,  xgb_acc_inn1,  xgb_auc_inn1,  enc_inn1),
+    ("innings2-2over",  xgb_ov2,   pruned_ov2,   xgb_fi_ov2,   xgb_acc_ov2,   xgb_auc_ov2,   enc_ov2),
+    ("innings2-6over",  xgb_ov6,   pruned_ov6,   xgb_fi_ov6,   xgb_acc_ov6,   xgb_auc_ov6,   enc_ov6),
+    ("innings2-10over", xgb_ov10,  pruned_ov10,  xgb_fi_ov10,  xgb_acc_ov10,  xgb_auc_ov10,  enc_ov10),
+    ("innings2-16over", xgb_ov16,  pruned_ov16,  xgb_fi_ov16,  xgb_acc_ov16,  xgb_auc_ov16,  enc_ov16),
+]
+
+_run_accuracy = {}
+
+for _nm, _mdl, _feats, _fi_df, _acc, _auc, _enc in _insight_checkpoints:
+    if _mdl is None:
+        print(f"[insights] skip {_nm} — model is None")
+        continue
+
+    _run_accuracy[_nm] = {"xgb_test_accuracy": _r(_acc), "xgb_test_auc": _r(_auc)}
+    print(f"\n[insights] {_nm}  ({len(_feats)} features)")
+
+    _X_tr, _tr_meds = prepare_X(train_df, _feats)
+    _X_te, _        = prepare_X(test_df,  _feats, _tr_meds)
+
+    # 1. SHAP Summary Plot
+    try:
+        _expl     = shap.TreeExplainer(_mdl)
+        _shap_arr = _expl.shap_values(_X_te.to_numpy())
+        _fig = plt.figure(figsize=(10, 8))
+        shap.summary_plot(_shap_arr, _X_te, feature_names=list(_feats),
+                          show=False, max_display=20, plot_type="dot")
+        plt.title(f"SHAP Feature Impact — {_nm}\n"
+                  "Red = high value  Blue = low value   Right = pushes toward Chase",
+                  fontsize=11, pad=10)
+        plt.tight_layout()
+        _save_insight(plt.gcf(), f"shap_summary_{_nm}.png")
+        print(f"  [ok] shap summary")
+    except Exception as _e:
+        print(f"  [warn] shap: {_e}")
+
+    # 2. Partial Dependence Plots — top 5 numeric features
+    try:
+        from sklearn.inspection import PartialDependenceDisplay
+        _cat_set  = {"venue", "inn1_bat_team", "inn1_bowl_team"}
+        _fi_rows  = _fi_df.to_dict("records") if _fi_df is not None else []
+        _top_feats = [r["feature"] for r in _fi_rows
+                      if r["feature"] in list(_feats) and r["feature"] not in _cat_set][:5]
+        _feat_idx  = [list(_feats).index(f) for f in _top_feats]
+        if _feat_idx:
+            _fig, _axes = plt.subplots(1, len(_feat_idx), figsize=(4 * len(_feat_idx) + 1, 4))
+            if len(_feat_idx) == 1:
+                _axes = [_axes]
+            PartialDependenceDisplay.from_estimator(
+                _mdl, _X_tr.to_numpy(), _feat_idx,
+                feature_names=list(_feats), ax=_axes, kind="average"
+            )
+            for _ax, _fn in zip(_axes, _top_feats):
+                _ax.set_title(_fn, fontsize=9)
+                _ax.set_ylabel("P(Chase wins)")
+            _fig.suptitle(f"Partial Dependence — {_nm}\n"
+                          "Each curve shows effect of ONE feature (others held at median)",
+                          fontsize=11)
+            plt.tight_layout()
+            _save_insight(_fig, f"pdp_{_nm}.png")
+            print(f"  [ok] pdp  ({', '.join(_top_feats)})")
+    except Exception as _e:
+        print(f"  [warn] pdp: {_e}")
+
+    # 3. First Decision Tree (tree #0, depth capped for readability)
+    try:
+        _fig, _ax = plt.subplots(figsize=(26, 12))
+        xgb.plot_tree(_mdl, num_trees=0, ax=_ax, rankdir='LR')
+        _ax.set_title(f"Decision Tree #0 — {_nm}\n"
+                      "leaf value > 0 → Chase wins,  leaf value < 0 → Defended",
+                      fontsize=11)
+        _save_insight(_fig, f"tree0_{_nm}.png")
+        print(f"  [ok] tree0")
+    except Exception as _e:
+        print(f"  [warn] tree0: {_e}")
+
+# Update history index
+try:
+    _idx_path = f"{_INSIGHT_PREFIX}/history_index.json"
+    try:
+        _idx = json.loads(gold.get_blob_client(_idx_path).download_blob().readall())
+    except Exception:
+        _idx = {"runs": []}
+    _idx["runs"] = [r for r in _idx["runs"] if r.get("date") != _RUN_DATE]
+    _idx["runs"].insert(0, {
+        "date":          _RUN_DATE,
+        "generated_at":  _RUN_TS,
+        "train_matches": int(len(train_df)),
+        "test_matches":  int(len(test_df)),
+        "train_cutoff":  TRAIN_CUTOFF,
+        "accuracy":      _run_accuracy,
+    })
+    gold.get_blob_client(_idx_path).upload_blob(
+        json.dumps(_idx, indent=2).encode(), overwrite=True)
+    print(f"\n[insights] history index → {len(_idx['runs'])} runs recorded")
+except Exception as _e:
+    print(f"\n[insights] history index update failed (non-fatal): {_e}")
+
+print("\nStep 10c complete.")
+
+# COMMAND ----------
+# ═══════════════════════════════════════════════════════════════════
 # STEP 11 — Write summary to gold
 # ═══════════════════════════════════════════════════════════════════
 

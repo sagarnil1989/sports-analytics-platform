@@ -29,10 +29,12 @@ def view_home(req: func.HttpRequest) -> func.HttpResponse:
         <div class="card"><a href="/api/ml/win-predictor">Win Predictor (With Odds)</a><p>XGBoost + Random Forest trained on scores, run rates, wickets <strong>and</strong> live bat/bowl market odds at each over checkpoint.</p></div>
         <div class="card"><a href="/api/ml/win-predictor/whatif">Win Predictor — What-If Analysis</a><p>Edit any feature value and see how the odds-based model probability shifts in real time.</p></div>
         <div class="card"><a href="/api/ml/feature-matrix">Feature Matrix (With Odds)</a><p>All matches × all features including odds — train/test split highlighted, selected features marked per model.</p></div>
+        <div class="card"><a href="/api/ml/model-insights">Model Insights (With Odds)</a><p>SHAP feature impact, Partial Dependence Plots and Decision Tree visualisations per checkpoint — with full training history so you can see how the model changed over time.</p></div>
 
         <h3 style="margin:20px 0 4px; color:#2d7a2d; font-size:14px; text-transform:uppercase; letter-spacing:1px; border-bottom:2px solid #2d7a2d; padding-bottom:4px;">ML Predictor — Without Market Odds</h3>
         <div class="card"><a href="/api/ml/win-predictor-no-odds">Win Predictor (No Odds)</a><p>Same model but trained on pure cricket data only — scores, run rates, wickets, venue, teams. No bat/bowl odds features. Compare accuracy vs the odds model.</p></div>
         <div class="card"><a href="/api/ml/feature-matrix-no-odds">Feature Matrix (No Odds)</a><p>All matches × no-odds features only — scores, run rates, wickets. Train/test split highlighted, selected features marked.</p></div>
+        <div class="card"><a href="/api/ml/model-insights-no-odds">Model Insights (No Odds)</a><p>SHAP, PDP and Decision Tree visualisations for the no-odds model — with history to compare across training runs.</p></div>
 
         <h3 style="margin:20px 0 4px; color:#555; font-size:14px; text-transform:uppercase; letter-spacing:1px; border-bottom:2px solid #ccc; padding-bottom:4px;">Other ML Models</h3>
         <div class="card"><a href="/api/ml/over-under">Over/Under Predictor</a><p>LightGBM models predicting innings total and first-12-overs Over/Under at checkpoint overs during inn1.</p></div>

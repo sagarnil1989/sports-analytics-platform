@@ -296,7 +296,7 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
                         </td>
                     </tr>"""
 
-                return f"""<tr id="{panel_id}" style="display:none;background:#f8f8ff;">
+                return f"""<tr id="{panel_id}" data-orig="{escape(orig_json)}" data-model="{escape(model_nm)}" style="display:none;background:#f8f8ff;">
                   <td colspan="{ncols}" style="padding:0;">
                     <div class="wi-panel">
                       <div class="wi-panel-header">
@@ -304,7 +304,7 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
                         <span style="font-size:12px;color:#666;margin-left:10px">
                           Edit values → prediction updates in real-time
                         </span>
-                        <button class="wi-reset-btn" onclick="wiReset('{panel_id}',{orig_json})">↺ Reset</button>
+                        <button class="wi-reset-btn" onclick="wiReset('{panel_id}')">↺ Reset</button>
                       </div>
 
                       <div style="display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap;">
@@ -707,26 +707,21 @@ def _view_ml_win_predictor_html_inner(req: func.HttpRequest) -> func.HttpRespons
         }});
     }}
 
-    function wiReset(panelId, origVals) {{
+    function wiReset(panelId) {{
+        var row = document.getElementById(panelId);
+        if (!row) return;
+        var origVals = JSON.parse(row.getAttribute('data-orig') || '{{}}');
+        var model    = row.getAttribute('data-model') || '';
         var inputs = document.querySelectorAll('[data-panel="' + panelId + '"]');
         inputs.forEach(function(inp) {{
             var feat = inp.getAttribute('data-feat');
             var v = origVals[feat];
             inp.value = (v === null || v === undefined) ? '' : v;
         }});
-        // Restore original bar
-        var orig = _wiOrigConf[panelId];
-        if (orig) {{
-            var ch = document.getElementById(panelId + '-chase');
-            var de = document.getElementById(panelId + '-defend');
-            ch.style.width = orig.chaseW;  ch.textContent = orig.chaseT;
-            de.style.width = orig.defendW; de.textContent = orig.defendT;
-            document.getElementById(panelId + '-delta').textContent = '';
-            document.getElementById(panelId + '-status').textContent = 'Reset to original values';
-            setTimeout(function() {{
-                document.getElementById(panelId + '-status').textContent = '';
-            }}, 1500);
-        }}
+        document.getElementById(panelId + '-delta').textContent = '';
+        document.getElementById(panelId + '-status').textContent = 'Recalculating…';
+        // Re-run inference from restored values so bar matches exactly
+        wiRun(panelId, model);
     }}
     </script>
 

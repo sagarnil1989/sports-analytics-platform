@@ -22,6 +22,9 @@ from views import (
     view_admin_adf_logs,
     view_detailed_analysis_html,
     view_home,
+    view_model_insights_html,
+    view_model_insights_no_odds_html,
+    view_model_insights_image,
     view_ml_win_predictor_html,
     view_ml_win_predictor_config_post,
     view_ml_win_predictor_no_odds_html,
@@ -209,6 +212,21 @@ def post_ml_win_predictor_whatif(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="ml/win-predictor-no-odds", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_ml_win_predictor_no_odds_html(req: func.HttpRequest) -> func.HttpResponse:
     return view_ml_win_predictor_no_odds_html(req)
+
+
+@app.route(route="ml/model-insights", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_model_insights_html(req: func.HttpRequest) -> func.HttpResponse:
+    return view_model_insights_html(req)
+
+
+@app.route(route="ml/model-insights-no-odds", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_model_insights_no_odds_html(req: func.HttpRequest) -> func.HttpResponse:
+    return view_model_insights_no_odds_html(req)
+
+
+@app.route(route="ml/model-insights/image", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_model_insights_image(req: func.HttpRequest) -> func.HttpResponse:
+    return view_model_insights_image(req)
 
 
 @app.route(route="ml/feature-matrix", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
