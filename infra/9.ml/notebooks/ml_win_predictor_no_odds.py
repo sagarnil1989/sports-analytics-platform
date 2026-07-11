@@ -494,7 +494,10 @@ for t in t20_trackers:
         "tournament_stage": tourney_stage,
         # match-level flags
         "is_womens_match":   is_womens,
-  
+        "is_weekend_match":  is_weekend,
+        "is_evening_match":  is_evening,
+        "is_subcontinental": is_subcontinental,
+
         # innings 1 aggregate
         "inn1_total_score":   inn1_total_score,
         "inn1_total_wickets": inn1_total_wickets,
@@ -833,7 +836,7 @@ def prepare_X(df_in, feature_cols, train_medians=None):
     X = df_in[feature_cols].copy()
     medians = {}
     for col in feature_cols:
-        if pd.api.types.is_categorical_dtype(X[col]) or X[col].dtype == object:
+        if hasattr(X[col].dtype, "categories") or X[col].dtype == object:
             # use stored encoder from train pass, or build one from this column
             enc = (train_medians or {}).get(col)
             if not isinstance(enc, dict):
@@ -1066,7 +1069,7 @@ def rf_train(model_name, feature_cols, train_df, test_df):
         return None, None, None, None
 
     # RF does not support pandas Categorical — label encode for it
-    cat_cols = [c for c in feature_cols if pd.api.types.is_categorical_dtype(train_df[c])]
+    cat_cols = [c for c in feature_cols if hasattr(train_df[c].dtype, "categories")]
     num_cols = [c for c in feature_cols if c not in cat_cols]
 
     def prep_rf(df_in, cat_encoders=None):
@@ -1147,7 +1150,7 @@ def cb_train(model_name, feature_cols, train_df, test_df):
         return None, None, None, None, None, None
 
     feature_cols = list(feature_cols)
-    cat_cols = [c for c in feature_cols if pd.api.types.is_categorical_dtype(train_df[c])]
+    cat_cols = [c for c in feature_cols if hasattr(train_df[c].dtype, "categories")]
     cat_idx  = [feature_cols.index(c) for c in cat_cols]
 
     def prep_cb(df_in, medians=None):
