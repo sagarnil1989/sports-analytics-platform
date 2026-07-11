@@ -33,6 +33,7 @@ def view_home(req: func.HttpRequest) -> func.HttpResponse:
 
         <h3 style="margin:20px 0 4px; color:#2d7a2d; font-size:14px; text-transform:uppercase; letter-spacing:1px; border-bottom:2px solid #2d7a2d; padding-bottom:4px;">ML Predictor — Without Market Odds</h3>
         <div class="card"><a href="/api/ml/win-predictor-no-odds">Win Predictor (No Odds)</a><p>Same model but trained on pure cricket data only — scores, run rates, wickets, venue, teams. No bat/bowl odds features. Compare accuracy vs the odds model.</p></div>
+        <div class="card"><a href="/api/ml/win-predictor-no-odds/whatif">Win Predictor No-Odds — What-If Analysis</a><p>Edit any cricket feature (scores, run rates, wickets, venue) and see how the no-odds model probability shifts. No market odds inputs.</p></div>
         <div class="card"><a href="/api/ml/feature-matrix-no-odds">Feature Matrix (No Odds)</a><p>All matches × no-odds features only — scores, run rates, wickets. Train/test split highlighted, selected features marked.</p></div>
         <div class="card"><a href="/api/ml/model-insights-no-odds">Model Insights (No Odds)</a><p>SHAP, PDP and Decision Tree visualisations for the no-odds model — with history to compare across training runs.</p></div>
 

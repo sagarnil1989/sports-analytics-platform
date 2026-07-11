@@ -724,10 +724,9 @@ CAT_FEATURES = ["venue", "inn1_bat_team", "inn1_bowl_team", "venue_region", "tou
 # These capture the "before first ball" prior that XGBoost/CatBoost cannot learn from
 # per-over snapshots alone (dew factor, team momentum, historical matchups).
 CONTEXT_FEATURES = [
-    "venue_region",       # Asia / UK / Australia / West Indies / South Africa / NZ / Other
+    # venue_region and tournament_stage are already in CAT_FEATURES — omitted here to avoid duplicate columns
     "is_subcontinental",  # 1 if Asia — strongest single dew-factor proxy
     "is_evening_match",   # 1 if match started after 13:00 UTC (evening in subcontinent)
-    "tournament_stage",   # Final / Knockout / League / Group / Bilateral
     "bat_team_form5",     # batting team win rate in last 5 matches (momentum)
     "bowl_team_form5",    # bowling team win rate in last 5 matches
     "h2h_bat_win_rate",   # bat team win rate vs bowl team (last 10 head-to-head meetings)
@@ -833,6 +832,7 @@ print(f"innings2-16over  : {len(INN2_OV16_FEATURES)} features")
 
 def prepare_X(df_in, feature_cols, train_medians=None):
     """Fill NAs and label-encode categoricals. Returns float DataFrame + medians dict."""
+    feature_cols = list(dict.fromkeys(feature_cols))  # deduplicate, preserve order
     X = df_in[feature_cols].copy()
     medians = {}
     for col in feature_cols:
