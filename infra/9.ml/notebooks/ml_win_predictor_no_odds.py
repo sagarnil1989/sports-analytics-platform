@@ -1529,30 +1529,6 @@ rows_cmp = [
 for model_nm, algo, acc, auc, nfeat in rows_cmp:
     print(f"  {model_nm:<20}  {algo:<16}  {_fmt(acc):>9}  {_fmt(auc):>9}  {str(nfeat):>12}")
 print("="*80)
- — Algorithm comparison table
-# ═══════════════════════════════════════════════════════════════════
-
-def _fmt(v):
-    return f"{v:.3f}" if v is not None else "n/a"
-
-print("\n" + "="*72)
-print(f"  {'Model':<20}  {'Algorithm':<16}  {'Accuracy':>9}  {'ROC-AUC':>8}  {'Features':>8}")
-print("  " + "─"*68)
-rows_cmp = [
-    ("innings1-only",   "XGBoost",       xgb_acc_inn1, xgb_auc_inn1, len(pruned_inn1)),
-    ("innings1-only",   "Random Forest", rf_acc_inn1,  rf_auc_inn1,  len(pruned_inn1)),
-    ("innings2-2over",  "XGBoost",       xgb_acc_ov2,  xgb_auc_ov2,  len(pruned_ov2)),
-    ("innings2-2over",  "Random Forest", rf_acc_ov2,   rf_auc_ov2,   len(pruned_ov2)),
-    ("innings2-6over",  "XGBoost",       xgb_acc_ov6,  xgb_auc_ov6,  len(pruned_ov6)),
-    ("innings2-6over",  "Random Forest", rf_acc_ov6,   rf_auc_ov6,   len(pruned_ov6)),
-    ("innings2-10over", "XGBoost",       xgb_acc_ov10, xgb_auc_ov10, len(pruned_ov10)),
-    ("innings2-10over", "Random Forest", rf_acc_ov10,  rf_auc_ov10,  len(pruned_ov10)),
-    ("innings2-16over", "XGBoost",       xgb_acc_ov16, xgb_auc_ov16, len(pruned_ov16)),
-    ("innings2-16over", "Random Forest", rf_acc_ov16,  rf_auc_ov16,  len(pruned_ov16)),
-]
-for model_nm, algo, acc, auc, nfeat in rows_cmp:
-    print(f"  {model_nm:<20}  {algo:<16}  {_fmt(acc):>9}  {_fmt(auc):>8}  {nfeat:>8}")
-print("="*72)
 
 # COMMAND ----------
 # ═══════════════════════════════════════════════════════════════════
