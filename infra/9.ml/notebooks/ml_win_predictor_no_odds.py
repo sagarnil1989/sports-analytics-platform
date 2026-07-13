@@ -1068,6 +1068,7 @@ def rf_train(model_name, feature_cols, train_df, test_df):
     if len(train_df) < 5:
         return None, None, None, None
 
+    feature_cols = list(dict.fromkeys(feature_cols))  # deduplicate, preserve order
     # RF does not support pandas Categorical — label encode for it
     cat_cols = [c for c in feature_cols if hasattr(train_df[c].dtype, "categories")]
     num_cols = [c for c in feature_cols if c not in cat_cols]
@@ -1149,7 +1150,7 @@ def cb_train(model_name, feature_cols, train_df, test_df):
     if len(train_df) < 5:
         return None, None, None, None, None, None
 
-    feature_cols = list(feature_cols)
+    feature_cols = list(dict.fromkeys(feature_cols))  # deduplicate, preserve order
     cat_cols = [c for c in feature_cols if hasattr(train_df[c].dtype, "categories")]
     cat_idx  = [feature_cols.index(c) for c in cat_cols]
 
