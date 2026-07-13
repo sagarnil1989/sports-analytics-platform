@@ -695,6 +695,15 @@ for col in ["venue", "inn1_bat_team", "inn1_bowl_team", "venue_region", "tournam
 train_df = df[df["split"] == "train"].reset_index(drop=True)
 test_df  = df[df["split"] == "test"].reset_index(drop=True)
 
+# Guard: if df somehow acquired duplicate column names, drop extras now
+_dup = [c for c in train_df.columns if list(train_df.columns).count(c) > 1]
+if _dup:
+    print(f"WARNING: duplicate columns detected and removed: {list(dict.fromkeys(_dup))}")
+    train_df = train_df.loc[:, ~train_df.columns.duplicated(keep="first")]
+    test_df  = test_df.loc[:,  ~test_df.columns.duplicated(keep="first")]
+else:
+    print(f"Column check OK — {len(train_df.columns)} unique columns")
+
 print(f"\n{'='*60}")
 print(f"  Total T20 matches      : {len(df)}")
 print(f"  Skipped (incomplete)   : {skipped}")
@@ -832,23 +841,27 @@ print(f"innings2-16over  : {len(INN2_OV16_FEATURES)} features")
 
 def prepare_X(df_in, feature_cols, train_medians=None):
     """Fill NAs and label-encode categoricals. Returns float DataFrame + medians dict."""
-    feature_cols = list(dict.fromkeys(feature_cols))  # deduplicate, preserve order
+    feature_cols = list(dict.fromkeys(feature_cols))  # deduplicate feature list
     X = df_in[feature_cols].copy()
+    if X.columns.duplicated().any():                  # guard if df_in itself had dup cols
+        X = X.loc[:, ~X.columns.duplicated(keep="first")]
     medians = {}
     for col in feature_cols:
-        if hasattr(X[col].dtype, "categories") or X[col].dtype == object:
-            # use stored encoder from train pass, or build one from this column
+        col_s = X[col]
+        if isinstance(col_s, pd.DataFrame):
+            col_s = col_s.iloc[:, 0]
+        if hasattr(col_s.dtype, "categories") or col_s.dtype == object:
             enc = (train_medians or {}).get(col)
             if not isinstance(enc, dict):
-                _, uniq = pd.factorize(X[col])
+                _, uniq = pd.factorize(col_s)
                 enc = {v: i for i, v in enumerate(uniq)}
-            X[col] = X[col].map(enc).fillna(-1).astype(int)
+            X[col] = col_s.map(enc).fillna(-1).astype(int)
             medians[col] = enc
         else:
             fill = (train_medians or {}).get(col)
             if fill is None or isinstance(fill, dict):
-                fill = X[col].median()
-            X[col] = X[col].fillna(fill)
+                fill = col_s.median()
+            X[col] = col_s.fillna(fill)
             medians[col] = fill
     return X.astype(float), medians
 
@@ -1069,8 +1082,10 @@ def rf_train(model_name, feature_cols, train_df, test_df):
         return None, None, None, None
 
     feature_cols = list(dict.fromkeys(feature_cols))  # deduplicate, preserve order
+    def _dtype(df, c):
+        s = df[c]; return s.dtype if isinstance(s, pd.Series) else s.iloc[:, 0].dtype
     # RF does not support pandas Categorical — label encode for it
-    cat_cols = [c for c in feature_cols if hasattr(train_df[c].dtype, "categories")]
+    cat_cols = [c for c in feature_cols if hasattr(_dtype(train_df, c), "categories")]
     num_cols = [c for c in feature_cols if c not in cat_cols]
 
     def prep_rf(df_in, cat_encoders=None):
@@ -1151,7 +1166,9 @@ def cb_train(model_name, feature_cols, train_df, test_df):
         return None, None, None, None, None, None
 
     feature_cols = list(dict.fromkeys(feature_cols))  # deduplicate, preserve order
-    cat_cols = [c for c in feature_cols if hasattr(train_df[c].dtype, "categories")]
+    def _dtype(df, c):
+        s = df[c]; return s.dtype if isinstance(s, pd.Series) else s.iloc[:, 0].dtype
+    cat_cols = [c for c in feature_cols if hasattr(_dtype(train_df, c), "categories")]
     cat_idx  = [feature_cols.index(c) for c in cat_cols]
 
     def prep_cb(df_in, medians=None):
