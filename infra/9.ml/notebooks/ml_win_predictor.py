@@ -1687,6 +1687,8 @@ _INSIGHT_PREFIX = "cricket/ml_features/t20/model_insights/win_predictor"
 _RUN_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 _RUN_TS   = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+def _r(v): return round(v, 3) if v is not None else None
+
 def _upload_fig(fig, path):
     buf = _BytesIO()
     fig.savefig(buf, format='png', dpi=120, bbox_inches='tight')
