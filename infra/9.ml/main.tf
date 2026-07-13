@@ -21,6 +21,12 @@ resource "databricks_notebook" "ml_win_predictor" {
   language = "PYTHON"
 }
 
+resource "databricks_notebook" "ml_win_predictor_no_odds" {
+  source   = "${path.module}/notebooks/ml_win_predictor_no_odds.py"
+  path     = "/cricket-pipeline/ml/ml_win_predictor_no_odds"
+  language = "PYTHON"
+}
+
 resource "databricks_notebook" "inn1_score_predictor" {
   source   = "${path.module}/notebooks/inn1_score_predictor.py"
   path     = "/cricket-pipeline/ml/inn1_score_predictor"
