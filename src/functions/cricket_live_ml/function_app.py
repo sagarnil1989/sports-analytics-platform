@@ -1,85 +1,105 @@
 """
-cricket_live_ml — isolated live ML inference Function App.
+cricket_live_ml — live ML inference Function App.
 
-Reads from silver (read-only) to apply trained Over/Under and Win Predictor
-models to currently live matches.  Per-event results go to:
-  gold/event_id={id}/live_predictions.json
-
-A live index summary (read by the cricket_display live view page) goes to:
-  gold/cricket/inplay/live_index.json
+Architecture:
+  - Reads live match state directly from BetsAPI every 60 seconds (no silver needed).
+  - Builds per-over accumulators in gold (gold/cricket/inplay/live_accumulators/).
+  - Runs Win Predictor at each available checkpoint (inn1-only, inn2-2over, …16over).
+  - Writes per-event live_predictions.json and a live_index.json summary.
+  - Sends email + SMS notifications for new matches and new checkpoint predictions.
 
 ISOLATION RULE: this function may ONLY write to:
   gold/event_id=*/live_predictions.json
   gold/cricket/inplay/live_index.json
+  gold/cricket/inplay/live_accumulators/event_id=*.json
+  gold/cricket/inplay/notification_state.json
+  gold/cricket/config/notification_prefs.json
 It must never touch silver, bronze, or any shared gold ML/training paths.
-
-Phase 5: Over/Under live predictions (live_ou_predictor.py).
-Phase 6: Win predictor live predictions (live_win_predictor.py).
 """
 import json
 import logging
 import os
 from datetime import datetime, timezone
+from typing import Dict, List
 
 import azure.functions as func
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient
 
-from live_ou_predictor import run_live_ou_predictions, _list_live_event_ids
-from live_win_predictor import run_live_win_predictions
+from betsapi_live_parser import fetch_live_accumulators
+from live_win_predictor import run_live_win_predictions_from_accumulators
+from live_notifier import process_notifications
 
 _LIVE_INDEX_PATH = "cricket/inplay/live_index.json"
+_LIVE_PRED_KEY   = "event_id={eid}/live_predictions.json"
 
 app = func.FunctionApp()
 
 
 def _get_container(account_url: str, container_name: str):
-    cred = DefaultAzureCredential()
+    cred   = DefaultAzureCredential()
     client = BlobServiceClient(account_url=account_url, credential=cred)
     return client.get_container_client(container_name)
 
 
-def _write_live_index(gold, event_ids: list) -> None:
-    """
-    Build and write gold/cricket/inplay/live_index.json — a lightweight summary
-    of every currently-live event's latest predictions.  The cricket_display
-    Function App reads this single blob to render the /api/live/view page.
-    """
+def _write_event_predictions(gold, eid: str, accum: Dict, win_preds: List[Dict]) -> None:
+    blob_path = _LIVE_PRED_KEY.format(eid=eid)
+    rows      = accum.get("rows") or []
+    last_row  = rows[-1] if rows else {}
+
+    payload = {
+        "event_id":               eid,
+        "match_name":             accum.get("match_name", ""),
+        "home_team_name":         accum.get("home_team_name", ""),
+        "away_team_name":         accum.get("away_team_name", ""),
+        "league_name":            accum.get("league_name", ""),
+        "current_innings":        last_row.get("innings"),
+        "current_over":           last_row.get("over"),
+        "current_score":          last_row.get("score"),
+        "current_wickets":        last_row.get("wickets"),
+        "batting_team":           last_row.get("batting_team"),
+        "batting_team_odds":      last_row.get("batting_team_odds"),
+        "bowling_team_odds":      last_row.get("bowling_team_odds"),
+        "generated_at_utc":       datetime.now(timezone.utc).isoformat(),
+        "source":                 "live_ml_betsapi",
+        "win_predictions":        win_preds,
+    }
+    gold.get_blob_client(blob_path).upload_blob(
+        json.dumps(payload, indent=2).encode(), overwrite=True
+    )
+
+
+def _write_live_index(gold, event_ids: List[str]) -> None:
+    """Build and write gold/cricket/inplay/live_index.json for the display function."""
     entries = []
     for eid in event_ids:
         try:
-            raw = gold.get_blob_client(
-                f"event_id={eid}/live_predictions.json"
-            ).download_blob().readall()
+            raw  = gold.get_blob_client(_LIVE_PRED_KEY.format(eid=eid)).download_blob().readall()
             preds = json.loads(raw)
         except Exception:
             preds = {}
 
-        # Summarise O/U: pick the highest-checkpoint innings_total prediction
-        latest_ou = None
-        for p in sorted(
-            (p for p in (preds.get("ou_predictions") or []) if p.get("market") == "innings_total"),
-            key=lambda x: x.get("checkpoint_over", 0),
-        ):
-            latest_ou = p  # last = highest checkpoint
-
-        # Summarise win predictor: pick the most informative checkpoint
-        latest_win = None
-        win_order = ["innings2-16over", "innings2-10over", "innings2-6over",
-                     "innings2-2over", "innings1-only"]
-        win_map   = {p["checkpoint"]: p for p in (preds.get("win_predictions") or [])}
-        for cp in win_order:
-            if cp in win_map:
-                latest_win = win_map[cp]
-                break
+        # Pick the most informative win prediction checkpoint
+        win_order = [
+            "innings2-16over", "innings2-10over", "innings2-6over",
+            "innings2-2over", "innings1-only",
+        ]
+        win_map  = {p["checkpoint"]: p for p in (preds.get("win_predictions") or [])}
+        latest_win = next((win_map[cp] for cp in win_order if cp in win_map), None)
 
         entries.append({
             "event_id":       eid,
             "match_name":     preds.get("match_name", ""),
+            "home_team_name": preds.get("home_team_name", ""),
+            "away_team_name": preds.get("away_team_name", ""),
             "current_innings": preds.get("current_innings"),
             "current_over":    preds.get("current_over"),
+            "current_score":   preds.get("current_score"),
+            "current_wickets": preds.get("current_wickets"),
+            "batting_team":    preds.get("batting_team"),
+            "batting_team_odds":  preds.get("batting_team_odds"),
+            "bowling_team_odds":  preds.get("bowling_team_odds"),
             "updated_utc":     preds.get("generated_at_utc", ""),
-            "latest_ou":       latest_ou,
             "latest_win":      latest_win,
         })
 
@@ -93,13 +113,21 @@ def _write_live_index(gold, event_ids: list) -> None:
     )
 
 
-@app.timer_trigger(schedule="0 */1 * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
+@app.timer_trigger(
+    schedule="0 */1 * * * *",
+    arg_name="timer",
+    run_on_startup=False,
+    use_monitor=False,
+)
 def live_ml_tick(timer: func.TimerRequest) -> None:
     """
     Runs every 60 seconds.
-    Phase 5: O/U predictions for currently live matches.
-    Phase 6: Win predictor predictions for currently live matches.
-    Also writes live_index.json so cricket_display can list live matches.
+      1. Fetches live cricket events from BetsAPI; builds/updates per-match
+         accumulators in gold.
+      2. Runs Win Predictor at all available checkpoints.
+      3. Writes per-event live_predictions.json.
+      4. Sends email/SMS notifications for new matches and new predictions.
+      5. Writes live_index.json for the cricket_display live view page.
     """
     endpoint = os.environ.get("DATA_LAKE_BLOB_ENDPOINT", "")
     if not endpoint:
@@ -107,24 +135,38 @@ def live_ml_tick(timer: func.TimerRequest) -> None:
         return
 
     try:
-        gold   = _get_container(endpoint, "gold")
-        silver = _get_container(endpoint, "silver")
+        gold = _get_container(endpoint, "gold")
 
-        event_ids = _list_live_event_ids(silver)
-        if not event_ids:
+        # 1. Fetch live events → build/update accumulators
+        accumulators = fetch_live_accumulators(gold)
+        if not accumulators:
             logging.info("live_ml_tick: no live events")
+            _write_live_index(gold, [])
             return
 
-        logging.info(f"live_ml_tick: {len(event_ids)} live event(s)")
+        logging.info(f"live_ml_tick: {len(accumulators)} live event(s)")
 
-        ou_written  = run_live_ou_predictions(gold, silver)
-        logging.info(f"live_ml_tick: phase5 O/U wrote {ou_written} file(s)")
+        # 2. Run win predictor
+        win_results = run_live_win_predictions_from_accumulators(gold, accumulators)
+        logging.info(f"live_ml_tick: win predictions for {len(win_results)} event(s)")
 
-        win_written = run_live_win_predictions(gold, silver, event_ids)
-        logging.info(f"live_ml_tick: phase6 win wrote {win_written} file(s)")
+        # 3. Write per-event live_predictions.json
+        for eid, accum in accumulators.items():
+            preds = win_results.get(eid) or []
+            try:
+                _write_event_predictions(gold, eid, accum, preds)
+            except Exception as exc:
+                logging.exception(f"live_ml_tick: failed writing predictions for {eid}: {exc}")
 
-        _write_live_index(gold, event_ids)
+        # 4. Notifications
+        try:
+            process_notifications(gold, accumulators, win_results)
+        except Exception as exc:
+            logging.exception(f"live_ml_tick: notification error: {exc}")
+
+        # 5. Write live_index.json
+        _write_live_index(gold, list(accumulators.keys()))
         logging.info("live_ml_tick: live_index.json updated")
 
-    except Exception as e:
-        logging.exception(f"live_ml_tick: unexpected error: {e}")
+    except Exception as exc:
+        logging.exception(f"live_ml_tick: unexpected error: {exc}")

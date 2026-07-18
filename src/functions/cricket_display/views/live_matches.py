@@ -126,42 +126,53 @@ def _view_live_matches_html_inner(req: func.HttpRequest) -> func.HttpResponse:
         cards = ""
         for m in matches:
             eid        = str(m.get("event_id") or "")
-            match_name = escape(str(m.get("match_name") or f"Match {eid}"))
+            home       = escape(str(m.get("home_team_name") or "Home"))
+            away       = escape(str(m.get("away_team_name") or "Away"))
+            match_name = escape(str(m.get("match_name") or f"{home} v {away}"))
             innings    = m.get("current_innings")
             over       = m.get("current_over")
+            score      = m.get("current_score")
+            wickets    = m.get("current_wickets")
+            bat_team   = escape(str(m.get("batting_team") or ""))
+            bat_odds   = m.get("batting_team_odds")
+            bowl_odds  = m.get("bowling_team_odds")
             updated    = str(m.get("updated_utc") or "")[:16].replace("T", " ")
-            tracker_url = f"/api/matches/{escape(eid)}/innings-tracker/view"
 
-            inn_badge   = _innings_badge(innings, over)
-            ou_html     = _ou_summary_html(m.get("latest_ou"))
-            win_html    = _win_summary_html(m.get("latest_win"))
+            inn_badge = _innings_badge(innings, over)
+
+            # Current score row
+            score_str = f"{score}/{wickets} ({over} ov)" if score is not None else "—"
+            odds_str  = ""
+            if bat_odds or bowl_odds:
+                bowl_team = escape(str(m.get("away_team_name") if bat_team == home else m.get("home_team_name") or ""))
+                odds_str = (
+                    f'<span style="color:#aaa;font-size:12px;">'
+                    f'Odds: {bat_team} {bat_odds or "—"} · {bowl_team} {bowl_odds or "—"}'
+                    f'</span>'
+                )
+
+            win_html = _win_summary_html(m.get("latest_win"))
 
             cards += f"""
             <div class="match-card">
               <div class="card-header">
                 <div class="match-title">
-                  <a href="{tracker_url}" class="match-link">{match_name}</a>
+                  <span class="match-link">{match_name}</span>
                   {inn_badge}
                 </div>
-                <div class="card-meta">
+                <div class="score-row">
+                  <span style="color:#fff;font-size:15px;font-weight:bold;">{bat_team} {escape(score_str)}</span>
+                  &nbsp; {odds_str}
+                </div>
+                <div class="card-meta" style="margin-top:4px;">
                   <span class="live-dot">●</span> LIVE
-                  &nbsp;·&nbsp; ML updated {escape(updated)} UTC
-                  &nbsp;·&nbsp;
-                  <a href="{tracker_url}" style="color:#00e5ff;font-size:12px;">
-                    Full tracker →
-                  </a>
+                  &nbsp;·&nbsp; updated {escape(updated)} UTC
                 </div>
               </div>
 
-              <div class="pred-grid">
-                <div class="pred-col">
-                  <div class="pred-label">Over / Under</div>
-                  {ou_html}
-                </div>
-                <div class="pred-col">
-                  <div class="pred-label">Win Predictor</div>
-                  {win_html}
-                </div>
+              <div class="pred-section">
+                <div class="pred-label">Win Predictor</div>
+                {win_html}
               </div>
             </div>"""
 
@@ -233,12 +244,12 @@ def _view_live_matches_html_inner(req: func.HttpRequest) -> func.HttpResponse:
     }}
     @keyframes blink {{ 50% {{ opacity: 0; }} }}
 
-    .pred-grid {{
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 20px;
+    .score-row {{
+      margin: 6px 0 2px;
     }}
-    .pred-col {{ }}
+    .pred-section {{
+      margin-top: 14px;
+    }}
     .pred-label {{
       font-size: 11px; font-weight: bold; color: #667; text-transform: uppercase;
       letter-spacing: 1px; margin-bottom: 8px;
@@ -266,6 +277,7 @@ def _view_live_matches_html_inner(req: func.HttpRequest) -> func.HttpResponse:
     <a href="/api/ml/win-predictor">Win Predictor</a>
     <a href="/api/ml/over-under">Over / Under</a>
     <a href="/api/analysis/odds-movement">Odds Movement</a>
+    <a href="/api/notification/settings" style="color:#f0a500;">⚙ Notifications</a>
   </nav>
 
   <div class="page-header">

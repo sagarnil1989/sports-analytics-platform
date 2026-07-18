@@ -45,6 +45,8 @@ from views import (
     view_win_predictor_whatif_html,
     view_win_predictor_whatif_post,
     view_live_matches_html,
+    view_notification_settings_get,
+    view_notification_settings_post,
 )
 
 app = func.FunctionApp()
@@ -301,3 +303,17 @@ def get_hypothesis_timeout_wicket(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="hypothesis/inn1-prematch", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_hypothesis_inn1_prematch(req: func.HttpRequest) -> func.HttpResponse:
     return view_hypothesis_inn1_prematch(req)
+
+
+# ---------------------------------------------------------------------------
+# HTTP routes — Notifications
+# ---------------------------------------------------------------------------
+
+@app.route(route="notification/settings", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def get_notification_settings(req: func.HttpRequest) -> func.HttpResponse:
+    return view_notification_settings_get(req)
+
+
+@app.route(route="notification/settings", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+def post_notification_settings(req: func.HttpRequest) -> func.HttpResponse:
+    return view_notification_settings_post(req)

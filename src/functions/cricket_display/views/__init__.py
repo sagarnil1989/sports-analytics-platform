@@ -79,6 +79,10 @@ from .win_predictor_whatif import (
 from .live_matches import (
     view_live_matches_html,
 )
+from .notification_settings import (
+    view_notification_settings_get,
+    view_notification_settings_post,
+)
 
 __all__ = [
     "view_prematch_matches", "view_prematch_matches_html", "view_prematch_match_json",
@@ -114,4 +118,6 @@ __all__ = [
     "view_win_predictor_whatif_html",
     "view_win_predictor_whatif_post",
     "view_live_matches_html",
+    "view_notification_settings_get",
+    "view_notification_settings_post",
 ]

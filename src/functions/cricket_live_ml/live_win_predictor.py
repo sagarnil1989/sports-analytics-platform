@@ -145,7 +145,33 @@ def _predict_for_event(gold, silver, event_id: str, accumulator: Dict) -> Option
     return results if results else None
 
 
-# ── Public entry point ────────────────────────────────────────────────────────
+# ── Public entry points ───────────────────────────────────────────────────────
+
+def run_live_win_predictions_from_accumulators(
+    gold,
+    accumulators: Dict[str, Dict],
+) -> Dict[str, List[Dict]]:
+    """
+    Run win predictor for pre-built accumulator dicts (BetsAPI live path).
+    No silver container access needed — batting_dominance() returns None and
+    the model fills it with the training median.
+
+    Returns:
+        event_id → list of checkpoint prediction dicts
+    """
+    results: Dict[str, List[Dict]] = {}
+
+    for eid, accum in accumulators.items():
+        try:
+            preds = _predict_for_event(gold, None, eid, accum)
+            if preds:
+                results[eid] = preds
+                logging.info(f"live_win: {eid} — {len(preds)} checkpoint(s) predicted")
+        except Exception as exc:
+            logging.exception(f"live_win: error for {eid}: {exc}")
+
+    return results
+
 
 def run_live_win_predictions(gold, silver, event_ids: List[str]) -> int:
     """

@@ -24,11 +24,20 @@ Flow 3: Batch ML (weekly Saturday 03:00 UTC)
 The live prediction system is **Flow 4** — a completely new, independent consumer:
 
 ```
-Flow 4: Live ML predictions (new, isolated)
-  READS ONLY from: silver/event_id=.../innings_accumulator.json  ← already written by Flow 1
-  READS ONLY from: gold/cricket/ml_features/t20/live_models/…    ← model pkls (new, written by Flow 3 only)
-  WRITES ONLY to:  gold/event_id=.../live_predictions.json        ← new path, nothing else reads this
+Flow 4: Live ML predictions (isolated, no pipeline dependency)
+  CALLS:     BetsAPI /v3/events/inplay + /v1/bet365/event?stats=1  ← direct API, no bronze/silver
+  READS:     gold/cricket/ml_features/t20/live_models/win_predictor/*.pkl  ← trained by Flow 3
+  WRITES:    gold/cricket/inplay/live_accumulators/event_id=*.json   ← per-over history (grows each 60s)
+             gold/event_id=*/live_predictions.json                   ← win predictor output
+             gold/cricket/inplay/live_index.json                     ← display function reads this
+             gold/cricket/inplay/notification_state.json             ← notifier state
+             gold/cricket/config/notification_prefs.json             ← user preferences (also editable via web)
 ```
+
+**Design note (2026-07):** Flow 4 was originally designed to read silver accumulators. This was
+changed because the daily `bronze_to_silver.py` batch explicitly skips active (live) matches, so
+silver accumulators for live matches were never written. Flow 4 now calls BetsAPI directly and
+builds its own accumulator in gold, accumulating per-over rows every 60 seconds.
 
 ### Rules that enforce isolation
 
@@ -44,20 +53,22 @@ Flow 4: Live ML predictions (new, isolated)
 ### What Flow 4 is allowed to touch
 
 ```
-READ (existing, written by other flows — never modified by Flow 4):
-  silver/event_id=*/innings_accumulator.json
-  gold/cricket/ml_features/t20/live_models/*.pkl     ← new path, written by Flow 3 only
-  gold/ml/live_models/*.pkl                           ← same idea for over/under models
+READ (model artifacts — written by Flow 3 only, never modified by Flow 4):
+  gold/cricket/ml_features/t20/live_models/win_predictor/*.pkl
 
-WRITE (new paths, nothing else reads these):
+WRITE (new paths, nothing else reads these except cricket_display):
   gold/event_id=*/live_predictions.json
+  gold/cricket/inplay/live_index.json
+  gold/cricket/inplay/live_accumulators/event_id=*.json
+  gold/cricket/inplay/notification_state.json
+  gold/cricket/config/notification_prefs.json
 
 NEVER TOUCH:
-  silver/event_id=*/                          (accumulator is read-only for Flow 4)
-  gold/event_id=*/innings_tracker.json        (written by Flow 2 only)
-  gold/ml/over_under_training_data.csv        (Flow 3 training input)
+  silver/**                                    (Flow 4 has no silver access)
+  bronze/**                                    (Flow 4 has no bronze access)
+  gold/event_id=*/innings_tracker.json         (written by Flow 2 only)
+  gold/ml/over_under_training_data.csv         (Flow 3 training input)
   gold/cricket/ml_features/t20/win_predictor_summary.json  (Flow 3 output)
-  bronze/**                                   (ingestion raw data — read-only)
   betsapi/control/**                          (ingestion control files — read-only)
 ```
 

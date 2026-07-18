@@ -1,7 +1,10 @@
 azure-functions
 azure-storage-blob
 azure-identity
+azure-communication-email
 xgboost==2.0.3
 lightgbm==4.3.0
 scikit-learn==1.4.2
 numpy
+requests
+twilio
