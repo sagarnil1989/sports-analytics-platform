@@ -104,9 +104,11 @@ def _send_email(subject: str, body_html: str) -> bool:
             "recipients":    {"to": [{"address": to_addr}]},
             "content":       {"subject": subject, "html": body_html},
         }
-        poller = client.begin_send(message)
-        result = poller.result()
-        logging.info(f"live_notifier: email sent to {to_addr} — {subject}")
+        # Fire-and-forget: begin_send() accepts the message immediately.
+        # Do NOT call poller.result() — it polls indefinitely and would block
+        # the 60-second timer function until the 10-minute timeout kills it.
+        client.begin_send(message)
+        logging.info(f"live_notifier: email queued to {to_addr} — {subject}")
         return True
     except Exception as exc:
         logging.error(f"live_notifier: email failed: {exc}")

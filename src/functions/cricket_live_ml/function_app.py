@@ -20,7 +20,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import azure.functions as func
 from azure.identity import DefaultAzureCredential
@@ -28,6 +28,7 @@ from azure.storage.blob import BlobServiceClient
 
 from betsapi_live_parser import fetch_live_accumulators
 from live_win_predictor import run_live_win_predictions_from_accumulators
+from live_ou_predictor import run_live_ou_predictions_from_accumulators
 from live_notifier import process_notifications
 
 _LIVE_INDEX_PATH = "cricket/inplay/live_index.json"
@@ -42,7 +43,11 @@ def _get_container(account_url: str, container_name: str):
     return client.get_container_client(container_name)
 
 
-def _write_event_predictions(gold, eid: str, accum: Dict, win_preds: List[Dict]) -> None:
+def _write_event_predictions(
+    gold, eid: str, accum: Dict,
+    win_preds: List[Dict],
+    ou_result: Optional[Dict],
+) -> None:
     blob_path = _LIVE_PRED_KEY.format(eid=eid)
     rows      = accum.get("rows") or []
     last_row  = rows[-1] if rows else {}
@@ -63,10 +68,26 @@ def _write_event_predictions(gold, eid: str, accum: Dict, win_preds: List[Dict])
         "generated_at_utc":       datetime.now(timezone.utc).isoformat(),
         "source":                 "live_ml_betsapi",
         "win_predictions":        win_preds,
+        "ou_predictions":         (ou_result or {}).get("ou_predictions") or [],
     }
     gold.get_blob_client(blob_path).upload_blob(
         json.dumps(payload, indent=2).encode(), overwrite=True
     )
+
+
+_OU_MARKET_PRIORITY = [
+    "innings_total", "inn2_first_12", "first_12_overs", "inn2_first_6", "first_6_overs",
+]
+
+
+def _pick_latest_ou(ou_preds: List[Dict]) -> Optional[Dict]:
+    """Return the most informative O/U prediction: highest checkpoint for the priority market."""
+    by_market: Dict[str, Dict] = {}
+    for p in ou_preds:
+        m = p.get("market", "")
+        if m not in by_market or (p.get("checkpoint_over") or 0) > (by_market[m].get("checkpoint_over") or 0):
+            by_market[m] = p
+    return next((by_market[m] for m in _OU_MARKET_PRIORITY if m in by_market), None)
 
 
 def _write_live_index(gold, event_ids: List[str]) -> None:
@@ -84,8 +105,9 @@ def _write_live_index(gold, event_ids: List[str]) -> None:
             "innings2-16over", "innings2-10over", "innings2-6over",
             "innings2-2over", "innings1-only",
         ]
-        win_map  = {p["checkpoint"]: p for p in (preds.get("win_predictions") or [])}
+        win_map    = {p["checkpoint"]: p for p in (preds.get("win_predictions") or [])}
         latest_win = next((win_map[cp] for cp in win_order if cp in win_map), None)
+        latest_ou  = _pick_latest_ou(preds.get("ou_predictions") or [])
 
         entries.append({
             "event_id":       eid,
@@ -101,6 +123,7 @@ def _write_live_index(gold, event_ids: List[str]) -> None:
             "bowling_team_odds":  preds.get("bowling_team_odds"),
             "updated_utc":     preds.get("generated_at_utc", ""),
             "latest_win":      latest_win,
+            "latest_ou":       latest_ou,
         })
 
     payload = {
@@ -146,15 +169,19 @@ def live_ml_tick(timer: func.TimerRequest) -> None:
 
         logging.info(f"live_ml_tick: {len(accumulators)} live event(s)")
 
-        # 2. Run win predictor
+        # 2. Run win predictor and O/U predictor
         win_results = run_live_win_predictions_from_accumulators(gold, accumulators)
-        logging.info(f"live_ml_tick: win predictions for {len(win_results)} event(s)")
+        ou_results  = run_live_ou_predictions_from_accumulators(gold, accumulators)
+        logging.info(
+            f"live_ml_tick: win={len(win_results)} event(s), ou={len(ou_results)} event(s)"
+        )
 
         # 3. Write per-event live_predictions.json
         for eid, accum in accumulators.items():
-            preds = win_results.get(eid) or []
+            win_preds = win_results.get(eid) or []
+            ou_result = ou_results.get(eid)
             try:
-                _write_event_predictions(gold, eid, accum, preds)
+                _write_event_predictions(gold, eid, accum, win_preds, ou_result)
             except Exception as exc:
                 logging.exception(f"live_ml_tick: failed writing predictions for {eid}: {exc}")
 

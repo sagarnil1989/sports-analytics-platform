@@ -456,7 +456,27 @@ def _predict_for_event(gold, event_id: str, accumulator: Dict) -> Optional[Dict]
     }
 
 
-# ── Public entry point ────────────────────────────────────────────────────────
+# ── Public entry points ───────────────────────────────────────────────────────
+
+def run_live_ou_predictions_from_accumulators(
+    gold,
+    accumulators: Dict[str, Dict],
+) -> Dict[str, Dict]:
+    """
+    Run O/U predictions for pre-built accumulator dicts (BetsAPI live path).
+    Returns event_id → ou prediction dict (same shape as _predict_for_event).
+    """
+    results: Dict[str, Dict] = {}
+    for eid, accum in accumulators.items():
+        try:
+            result = _predict_for_event(gold, eid, accum)
+            if result:
+                results[eid] = result
+                logging.info(f"live_ou: {eid} — {len(result.get('ou_predictions', []))} O/U prediction(s)")
+        except Exception as exc:
+            logging.exception(f"live_ou: error for {eid}: {exc}")
+    return results
+
 
 def run_live_ou_predictions(gold, silver) -> int:
     """

@@ -152,6 +152,7 @@ def _view_live_matches_html_inner(req: func.HttpRequest) -> func.HttpResponse:
                 )
 
             win_html = _win_summary_html(m.get("latest_win"))
+            ou_html  = _ou_summary_html(m.get("latest_ou"))
 
             cards += f"""
             <div class="match-card">
@@ -173,6 +174,11 @@ def _view_live_matches_html_inner(req: func.HttpRequest) -> func.HttpResponse:
               <div class="pred-section">
                 <div class="pred-label">Win Predictor</div>
                 {win_html}
+              </div>
+
+              <div class="pred-section" style="margin-top:12px;">
+                <div class="pred-label">Over / Under</div>
+                {ou_html}
               </div>
             </div>"""
 
